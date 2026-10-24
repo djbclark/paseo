@@ -13,6 +13,8 @@ import React, {
   type SetStateAction,
 } from "react";
 import { Pressable, Text, View, type LayoutChangeEvent, type ScrollView } from "react-native";
+import { WorkspaceAccentChrome } from "@/workspace-accent/chrome";
+import { useWorkspaceAccent } from "@/workspace-accent/use-workspace-accent";
 import { useFilePanelOpenWithMenu } from "@/file-panels";
 import {
   CopyX,
@@ -1110,6 +1112,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   const newTabKeys = useShortcutKeys("workspace-tab-new");
   const [tabsContainerWidth, setTabsContainerWidth] = useState<number>(0);
   const tabsScrollRef = useRef<ScrollView>(null);
+  const workspaceAccent = useWorkspaceAccent(normalizedServerId, normalizedWorkspaceId);
   const [exitFocusModeWidth, setExitFocusModeWidth] = useState<number>(0);
   const tabScrollBoundary = useHorizontalScrollBoundary();
   const measurementCache = useContext(TabMeasurementCache);
@@ -1487,6 +1490,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         onSplitDown={onSplitDown}
         onTogglePaneMaximized={onTogglePaneMaximized}
       />
+      <WorkspaceAccentChrome accent={onSidebar ? null : workspaceAccent} />
     </View>
   );
 

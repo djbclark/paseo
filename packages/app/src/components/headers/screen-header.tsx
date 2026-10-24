@@ -20,6 +20,8 @@ interface ScreenHeaderProps {
   rightStyle?: StyleProp<ViewStyle>;
   borderless?: boolean;
   onRowLayout?: (event: LayoutChangeEvent) => void;
+  /** Decoration painted over the header background and under its content. */
+  underlay?: ReactNode;
 }
 
 /**
@@ -33,6 +35,7 @@ export function ScreenHeader({
   rightStyle,
   borderless,
   onRowLayout,
+  underlay,
 }: ScreenHeaderProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
@@ -51,6 +54,7 @@ export function ScreenHeader({
 
   return (
     <ComposerDockBackground style={styles.header} testID="composer-dock-header">
+      {underlay}
       <View style={innerStyle}>
         <WindowChromeSafeArea
           placement="inline"

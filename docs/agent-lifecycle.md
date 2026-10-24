@@ -207,6 +207,8 @@ Closing a tab on a **root agent** still archives — the tab is the agent's home
 
 Closing a tab on a **subagent** (any agent with `parentAgentId`) is **layout-only**. The app clears the current client's open-tab label before removing the tab. Another client's open tab remains protected. The agent stays unarchived and stays in its parent's track, so a later parent archive cascades to it when no client still has it open. The user can re-open the tab from the track at any time. Single and bulk tab close apply the same policy.
 
+A tab's **Color** (the tab context menu's "Color" submenu) is per device, like the layout that holds the tab. It lives in its own store, `workspace-accent/tab-accent-state.ts`, keyed by workspace and tab id, never on `WorkspaceTab`: the layout schema is strict and a blob that fails validation is deleted, so a build that reads an unknown tab key would wipe every layout. A color follows the tab across panes and reloads, and goes away when the tab closes or the workspace is archived.
+
 The asymmetry is intentional: a subagent's persistent relationship lives in the parent's track. Same-workspace subagents are not auto-opened as tabs; the user opens one from that track when needed. A cross-workspace subagent is also auto-opened as a tab in its own workspace so opening that workspace does not appear empty. It remains in the parent's track until it is actually detached.
 
 ## Workspace activity

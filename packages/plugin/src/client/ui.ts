@@ -19,7 +19,7 @@ import type {
   TextProps,
 } from "react-native";
 import type { PluginIconProps } from "../icons.js";
-import type { PluginIcon } from "./contracts.js";
+import type { PluginIcon, PluginIdentityColor } from "./contracts.js";
 
 export interface ModalProps {
   title: string;
@@ -59,6 +59,17 @@ export interface ToastApi {
 export type IconProps = Partial<PluginIconProps> &
   ({ name: string; icon?: never } | { icon: PluginIcon; name?: never });
 
+export interface ColorSwatchProps {
+  color: PluginIdentityColor;
+  /** Draws a ring around the chip. */
+  selected?: boolean;
+  /** Diameter in points. Default 16. */
+  size?: number;
+  testID?: string;
+}
+
+/** A round, non-pressable chip in an identity color, the same color the workspace header carries. */
+export declare const ColorSwatch: ComponentType<ColorSwatchProps>;
 export declare const Icon: ComponentType<IconProps>;
 export declare const Modal: ModalComponent;
 export declare function useToast(): ToastApi;

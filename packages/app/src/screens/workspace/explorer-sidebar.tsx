@@ -15,6 +15,7 @@ import type { WorkspacePaneContentModel } from "@/screens/workspace/workspace-pa
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
 import type { SplitPane } from "@/stores/workspace-layout-store";
 import type { WorkspaceTab } from "@/workspace-tabs/model";
+import { useTabAccents } from "@/workspace-accent/use-tab-accents";
 import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
 
 interface ExplorerSidebarDockProps extends Pick<
@@ -77,7 +78,11 @@ export function ExplorerSidebarDock({
   headerAction,
 }: ExplorerSidebarDockProps) {
   const { activeDragTabId, tabDropPreview, externalDndContext } = useWorkspaceTabDrag();
-  const paneState = useMemo(() => deriveWorkspacePaneState({ pane, tabs: uiTabs }), [pane, uiTabs]);
+  const accentByTabId = useTabAccents(normalizedServerId, normalizedWorkspaceId);
+  const paneState = useMemo(
+    () => deriveWorkspacePaneState({ pane, tabs: uiTabs, accentByTabId }),
+    [accentByTabId, pane, uiTabs],
+  );
   const tabs = useMemo(() => paneState.tabs.map((tab) => tab.descriptor), [paneState.tabs]);
   const activeTabId = paneState.activeTabId;
   const tabItems = useMemo<WorkspaceDesktopTabRowItem[]>(

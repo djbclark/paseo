@@ -1450,7 +1450,10 @@ function ResolvedWorkspaceDesktopTabsRow({
         onSplitDown={onSplitDown}
         onTogglePaneMaximized={onTogglePaneMaximized}
       />
-      <WorkspaceAccentChrome accent={onSidebar ? null : workspaceAccent} />
+      <WorkspaceAccentChrome
+        accent={onSidebar ? null : workspaceAccent}
+        stripe={Boolean(focusModeEnabled)}
+      />
     </View>
   );
 

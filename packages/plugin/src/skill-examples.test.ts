@@ -105,6 +105,9 @@ it("keeps historical string descriptor helpers while accepting translated regist
       client.addSlashCommand({ name: "notes", description: messages.message("title"), argumentHint: "", context: "workspace", onSubmit() {} });
       const button = client.addHeaderButton({ id: "notes", workspaceId: "workspace", button: { title: messages.message("title"), icon: "File", behavior: { kind: "menu", items: [{ kind: "item", id: "open", title: messages.message("title"), behavior: { kind: "action", onPress() {} } }] } } });
       button.update({ label: messages.message("title") });
+      client.setWorkspaceAccent({ workspaceId: "w", color: "teal" }).update({ color: "red" });
+      // @ts-expect-error only the identity color names are accepted
+      client.setWorkspaceAccent({ workspaceId: "w", color: "magenta" });
       const source = defineAttachmentSource({ id: "source", title: messages.message("title"), pickerTitle: messages.message("title"), searchPlaceholder: messages.message("title"), icon: "File", search: { name: "source.search", input: z.object({}), output: z.object({}) } });
       client.addAttachmentSource(source);
       // @ts-expect-error a translated reference is never typed as a string

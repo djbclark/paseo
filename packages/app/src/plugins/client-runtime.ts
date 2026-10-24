@@ -12,6 +12,7 @@ import type { PluginClientRuntime } from "./evaluate";
 import { createPluginNavigation } from "./navigation";
 import { pluginButtonStore } from "./buttons";
 import type { InstalledPlugin } from "./types";
+import { createWorkspaceAccentRegistrar } from "@/workspace-accent/plugin-accents";
 
 export function createPluginClientRuntime(
   installation: InstalledPlugin,
@@ -22,6 +23,7 @@ export function createPluginClientRuntime(
     installation,
     createPluginNavigation({ serverId: installation.serverId, workspaceId: null }),
   );
+  const accents = createWorkspaceAccentRegistrar(installation);
   return {
     ...capabilities,
     i18n: installation.i18n,
@@ -32,6 +34,9 @@ export function createPluginClientRuntime(
     },
     addHeaderButton(contribution) {
       return pluginButtonStore.addHeaderButton(installation, contribution);
+    },
+    setWorkspaceAccent(contribution) {
+      return accents.set(contribution);
     },
     openPanel(panelId, options) {
       openClientPanel({ installation, state, panelId, options });

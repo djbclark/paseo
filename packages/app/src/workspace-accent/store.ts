@@ -8,7 +8,7 @@ interface OverrideEntry {
 }
 
 interface WorkspaceAccentStoreState {
-  /** Entries per `serverId:workspaceId`, in registration order; the first one wins. */
+  /** Entries per `serverId:workspaceId`, sorted by plugin key like the registry snapshot; the first one wins. */
   overridesByKey: Record<string, OverrideEntry[]>;
   setOverride: (input: { workspaceKey: string; pluginKey: string; color: WorkspaceAccent }) => void;
   clearOverride: (input: { workspaceKey: string; pluginKey: string }) => void;
@@ -30,7 +30,9 @@ export const useWorkspaceAccentStore = create<WorkspaceAccentStoreState>((set) =
       const next =
         index >= 0
           ? entries.map((entry, position) => (position === index ? { pluginKey, color } : entry))
-          : [...entries, { pluginKey, color }];
+          : [...entries, { pluginKey, color }].sort((a, b) =>
+              a.pluginKey.localeCompare(b.pluginKey),
+            );
       return { overridesByKey: { ...state.overridesByKey, [workspaceKey]: next } };
     }),
   clearOverride: ({ workspaceKey, pluginKey }) =>

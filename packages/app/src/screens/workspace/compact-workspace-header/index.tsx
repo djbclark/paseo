@@ -18,6 +18,7 @@ export { MobileWorkspaceTabSwitcher } from "./tab-switcher";
 
 interface CompactWorkspaceHeaderProps {
   serverId: string;
+  workspaceId: string;
   isLoading: boolean;
   title: string;
   subtitle: string;
@@ -46,6 +47,7 @@ export function CompactWorkspaceHeader({
   serverId,
   headerVariant,
   actionsActive,
+  workspaceId,
 }: CompactWorkspaceHeaderProps) {
   const { t } = useTranslation();
   const actionsInBar = resolveWorkspaceActionPlacement(useWindowLayout()) === "vertical-bar";
@@ -55,9 +57,10 @@ export function CompactWorkspaceHeader({
         subtitle={subtitle}
         isSubtitleDistinct={isSubtitleDistinct}
         serverId={serverId}
+        workspaceId={workspaceId}
       />
     ),
-    [subtitle, isSubtitleDistinct, serverId],
+    [subtitle, isSubtitleDistinct, serverId, workspaceId],
   );
   const symbols = {
     "tab-count": tabSwitcher,

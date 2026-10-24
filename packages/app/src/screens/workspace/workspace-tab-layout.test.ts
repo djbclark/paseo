@@ -11,6 +11,7 @@ import {
   workspaceTabSwitcherPopoverLayout,
   selectWorkspaceChrome,
   computeWorkspaceTabLayout,
+  PROJECT_ICON_SLOT_WIDTH,
   retainWorkspaceTabMeasuredWidth,
 } from "@/screens/workspace/workspace-tab-layout";
 
@@ -292,4 +293,52 @@ it("gives the tab switcher a readable popover width independent of its 16pt coun
     availableHeight: 600,
   }) as Array<{ minWidth?: number }>;
   expect(frame[0].minWidth).toBeGreaterThanOrEqual(320);
+});
+
+describe("project icon slot reservation", () => {
+  const withIcon = {
+    ...metrics,
+    actionsReservedWidth: metrics.actionsReservedWidth + PROJECT_ICON_SLOT_WIDTH,
+  };
+  const labelWidths = [56, 70, 49, 80, 60];
+
+  it("sizes chips for the container minus the slot", () => {
+    for (const viewportWidth of [500, 640, 900, 1200]) {
+      const reserved = computeWorkspaceTabLayout({
+        viewportWidth,
+        tabLabelWidths: labelWidths,
+        metrics: withIcon,
+        compact: false,
+      });
+      const narrower = computeWorkspaceTabLayout({
+        viewportWidth: viewportWidth - PROJECT_ICON_SLOT_WIDTH,
+        tabLabelWidths: labelWidths,
+        metrics,
+        compact: false,
+      });
+      expect(reserved).toEqual(narrower);
+    }
+  });
+
+  it("falls back to scrolling when only the slot tips the tabs past the minimum", () => {
+    const minimumFit =
+      metrics.actionsReservedWidth +
+      metrics.rowPaddingHorizontal * 2 +
+      (labelWidths.length - 1) * metrics.tabGap +
+      metrics.minTabWidth * labelWidths.length;
+    const without = computeWorkspaceTabLayout({
+      viewportWidth: minimumFit,
+      tabLabelWidths: labelWidths,
+      metrics,
+      compact: false,
+    });
+    const reserved = computeWorkspaceTabLayout({
+      viewportWidth: minimumFit,
+      tabLabelWidths: labelWidths,
+      metrics: withIcon,
+      compact: false,
+    });
+    expect(without.requiresHorizontalScrollFallback).toBe(false);
+    expect(reserved.requiresHorizontalScrollFallback).toBe(true);
+  });
 });

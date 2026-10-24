@@ -19,6 +19,7 @@ import { TabAccentBottomBar } from "@/workspace-accent/tab-accent-marks";
 import { useTabColorMenu } from "@/workspace-accent/tab-color-menu";
 import { setTabAccent } from "@/workspace-accent/use-tab-accents";
 import { useWorkspaceAccent } from "@/workspace-accent/use-workspace-accent";
+import { WorkspaceProjectIcon } from "@/workspace-accent/workspace-project-icon";
 import { useFilePanelOpenWithMenu } from "@/file-panels";
 import {
   CopyX,
@@ -59,7 +60,12 @@ import { CONTROL_HEIGHTS } from "@/components/ui/control-geometry";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { Shortcut } from "@/components/ui/shortcut";
 import { useWorkspaceTabLayout } from "@/screens/workspace/use-workspace-tab-layout";
-import { retainWorkspaceTabMeasuredWidth } from "@/screens/workspace/workspace-tab-layout";
+import {
+  PROJECT_ICON_SIZE,
+  PROJECT_ICON_SLOT_INSET,
+  PROJECT_ICON_SLOT_WIDTH,
+  retainWorkspaceTabMeasuredWidth,
+} from "@/screens/workspace/workspace-tab-layout";
 import {
   WorkspaceTabPresentationResolver,
   WorkspaceTabIcon,
@@ -426,6 +432,29 @@ function WorkspaceExitFocusModeButton({
   );
 }
 
+function ProjectIconSlot({
+  visible,
+  serverId,
+  workspaceId,
+}: {
+  visible: boolean;
+  serverId: string;
+  workspaceId: string;
+}) {
+  if (!visible) {
+    return null;
+  }
+  return (
+    <View style={styles.projectIconSlot}>
+      <WorkspaceProjectIcon
+        serverId={serverId}
+        workspaceId={workspaceId}
+        size={PROJECT_ICON_SIZE}
+      />
+    </View>
+  );
+}
+
 function TabContextMenuItem({
   entry,
 }: {
@@ -568,6 +597,8 @@ export interface WorkspaceDesktopTabsRowProps {
   onTogglePaneMaximized?: () => void;
   onSplitRight?: () => void;
   onSplitDown?: () => void;
+  /** The project icon sits at the start of one tab row per workspace; the caller picks which. */
+  showProjectIcon?: boolean;
   focusModeEnabled: boolean;
   onExitFocusMode: () => void;
 }
@@ -1120,6 +1151,7 @@ function ResolvedWorkspaceDesktopTabsRow({
   onTogglePaneMaximized,
   onSplitRight,
   onSplitDown,
+  showProjectIcon = false,
   focusModeEnabled,
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
@@ -1155,6 +1187,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         0,
         DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH +
           (focusModeEnabled ? exitFocusModeWidth : 0) +
+          (showProjectIcon ? PROJECT_ICON_SLOT_WIDTH : 0) +
           (showPaneSplitActions ? PANE_SPLIT_ACTIONS_RESERVED_WIDTH : 0) +
           (showPaneMaximizeAction ? PANE_MAXIMIZE_ACTION_RESERVED_WIDTH : 0),
       ),
@@ -1167,7 +1200,13 @@ function ResolvedWorkspaceDesktopTabsRow({
       tabHorizontalPadding: TAB_CHIP_HORIZONTAL_PADDING,
       closeButtonWidth: TAB_CLOSE_BUTTON_RESERVED_WIDTH,
     }),
-    [exitFocusModeWidth, focusModeEnabled, showPaneMaximizeAction, showPaneSplitActions],
+    [
+      exitFocusModeWidth,
+      focusModeEnabled,
+      showPaneMaximizeAction,
+      showPaneSplitActions,
+      showProjectIcon,
+    ],
   );
 
   const panePanelKinds = useMemo(() => tabs.map(({ tab }) => tab.kind), [tabs]);
@@ -1448,6 +1487,11 @@ function ResolvedWorkspaceDesktopTabsRow({
         onPress={onExitFocusMode}
         onLayout={handleExitFocusModeLayout}
       />
+      <ProjectIconSlot
+        visible={showProjectIcon}
+        serverId={normalizedServerId}
+        workspaceId={normalizedWorkspaceId}
+      />
       <View style={styles.tabsScrollContainer}>
         <Animated.ScrollView
           ref={tabsScrollRef}
@@ -1696,6 +1740,14 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: TAB_ROW_PADDING_HORIZONTAL,
+  },
+  // Width is what `layoutMetrics` reserves for it; the tabs scroll container takes the rest.
+  projectIconSlot: {
+    width: PROJECT_ICON_SLOT_WIDTH,
+    paddingLeft: PROJECT_ICON_SLOT_INSET,
+    flexShrink: 0,
+    alignSelf: "stretch",
+    justifyContent: "center",
   },
   exitFocusModeSlot: {
     alignSelf: "stretch",

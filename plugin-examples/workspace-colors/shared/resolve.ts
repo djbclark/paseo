@@ -1,5 +1,4 @@
-import type { PluginIdentityColor } from "@getpaseo/plugin/client";
-import type { ColorSettings } from "./colors";
+import type { ColorSettings, WorkspaceColor } from "./colors";
 
 // Mirrors the protocol's workspaceLabelKey.
 export function labelKey(name: string): string {
@@ -9,7 +8,7 @@ export function labelKey(name: string): string {
 export function resolveWorkspaceColor(
   workspace: { id: string; projectId: string; labels?: readonly string[] },
   settings: ColorSettings,
-): PluginIdentityColor | null {
+): WorkspaceColor | null {
   const own = settings.workspaces[workspace.id];
   if (own) return own;
   const keys = new Set((workspace.labels ?? []).map(labelKey));

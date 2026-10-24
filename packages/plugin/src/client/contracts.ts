@@ -173,6 +173,30 @@ interface PluginClientContextAliases {
   addSidebarItem(contribution: PluginSidebarContribution<PluginText>): PluginCleanup;
 }
 
+export type PluginIdentityColor =
+  | "violet"
+  | "sky"
+  | "emerald"
+  | "orange"
+  | "pink"
+  | "indigo"
+  | "teal"
+  | "red"
+  | "amber"
+  | "blue";
+
+/** Colors one workspace of this plugin's host. Its header and tab row carry the color. */
+export interface PluginWorkspaceAccentContribution {
+  workspaceId: string;
+  color: PluginIdentityColor;
+}
+
+export interface PluginWorkspaceAccentRegistration {
+  update(input: { color: PluginIdentityColor }): void;
+  /** Idempotent. Once removed or replaced by a later call for the same workspace, `update` does nothing. */
+  remove(): void;
+}
+
 export interface PluginClientContext extends PluginCommandCapabilities, PluginClientContextAliases {
   readonly i18n: import("./translations.js").PluginI18n;
   /** Play a base64-encoded audio file on this client; resolves when playback ends. */
@@ -193,6 +217,10 @@ export interface PluginClientContext extends PluginCommandCapabilities, PluginCl
   addComposerPill(
     contribution: PluginComposerPillContribution<PluginText>,
   ): PluginButtonRegistration<PluginText>;
+  /** A second call for the same workspace replaces the first. When plugins disagree, the plugin that sorts first by id wins. */
+  setWorkspaceAccent(
+    contribution: PluginWorkspaceAccentContribution,
+  ): PluginWorkspaceAccentRegistration;
   addAttachmentSource(contribution: PluginAttachmentSourceContribution<PluginText>): PluginCleanup;
   addTheme(contribution: PluginThemeContribution<PluginText>): PluginCleanup;
   addFilePanel(contribution: PluginFilePanelContribution<PluginText>): PluginCleanup;

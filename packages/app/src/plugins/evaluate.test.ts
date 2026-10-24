@@ -15,6 +15,9 @@ const runtime = {
   addComposerPill() {
     return { update() {}, remove() {} };
   },
+  setWorkspaceAccent() {
+    return { update() {}, remove() {} };
+  },
 } as unknown as PluginClientRuntime;
 
 function evaluatePluginClientBundle(id: string, source: string) {
@@ -53,6 +56,64 @@ describe("evaluatePluginClientBundle", () => {
       ),
     ).toThrow("Setup failed");
     expect(active).toBe(0);
+  });
+
+  it("releases workspace accents when client setup throws", () => {
+    let active = 0;
+    expect(() =>
+      runPluginClientBundle(
+        "failed-accents",
+        bundle(`
+      plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" });
+      throw new Error("Setup failed");
+    `),
+        {
+          ...runtime,
+          setWorkspaceAccent() {
+            active++;
+            return {
+              update() {},
+              remove() {
+                active--;
+              },
+            };
+          },
+        },
+      ),
+    ).toThrow("Setup failed");
+    expect(active).toBe(0);
+  });
+
+  it("releases workspace accents on cleanup and refuses new ones after", async () => {
+    let active = 0;
+    const plugin = runPluginClientBundle(
+      "accents",
+      bundle(`
+        plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" });
+        globalThis.__pluginAccentClient = plugin;
+      `),
+      {
+        ...runtime,
+        setWorkspaceAccent() {
+          active++;
+          return {
+            update() {},
+            remove() {
+              active--;
+            },
+          };
+        },
+      },
+    );
+    expect(active).toBe(1);
+    await plugin.cleanup();
+    expect(active).toBe(0);
+    const client = Reflect.get(globalThis, "__pluginAccentClient") as {
+      setWorkspaceAccent(input: unknown): unknown;
+    };
+    expect(() => client.setWorkspaceAccent({ workspaceId: "w1", color: "red" })).toThrow(
+      "Plugin has stopped",
+    );
   });
 
   it("accepts memoized settings screens", () => {

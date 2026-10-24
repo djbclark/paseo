@@ -5,6 +5,8 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { PaseoApi } from "@getpaseo/client";
 import { expect, test } from "vitest";
 import { PluginRegistry } from "./registry";
+import { createWorkspaceAccentRegistrar } from "@/workspace-accent/plugin-accents";
+import { useWorkspaceAccentStore } from "@/workspace-accent/store";
 
 const audio = { play: async () => 0 };
 
@@ -62,6 +64,7 @@ function registry(
         openPanel: () => {},
         addComposerPill: () => ({ update() {}, remove() {} }),
         addHeaderButton: () => ({ update() {}, remove() {} }),
+        setWorkspaceAccent: createWorkspaceAccentRegistrar(installation).set,
       };
     },
   });
@@ -100,6 +103,22 @@ test("teardown ends every subscription the plugin still holds", async () => {
 
   h.plugins.removeHost("host");
   await expect.poll(() => h.open.size).toBe(0);
+});
+
+test("dropping a plugin from the catalog clears the workspace colors it set", async () => {
+  useWorkspaceAccentStore.setState({ overridesByKey: {} });
+  const h = registry();
+  const colorize = catalog(
+    "colors",
+    `plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" }); return function() {};`,
+  );
+  h.plugins.installCatalog("host", [colorize], { client: h.client, audio });
+  expect(useWorkspaceAccentStore.getState().overridesByKey["host:w1"]).toEqual([
+    { pluginKey: "host/colors", color: "teal" },
+  ]);
+
+  h.plugins.installCatalog("host", [], { client: h.client, audio });
+  await expect.poll(() => useWorkspaceAccentStore.getState().overridesByKey).toEqual({});
 });
 
 test("reloading a plugin ends the old installation's subscriptions", async () => {

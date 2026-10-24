@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { PluginIdentityColor } from "@getpaseo/plugin/client";
 import { IDENTITY_COLOR_NAMES, deriveIdentityColorName } from "@/styles/identity-colors";
 import type { ProjectDescriptor, WorkspaceDescriptor } from "@/stores/session-store";
 import { buildWorkspaceStructureProjects } from "@/projects/workspace-structure";
@@ -6,8 +7,36 @@ import {
   WORKSPACE_ACCENT_FILL_STYLES,
   WORKSPACE_ACCENT_TINT_STYLES,
   findProjectViewKey,
+  isWorkspaceAccent,
   resolveWorkspaceAccent,
 } from "./model";
+
+describe("isWorkspaceAccent", () => {
+  it("accepts exactly the identity color names", () => {
+    expect(IDENTITY_COLOR_NAMES.every(isWorkspaceAccent)).toBe(true);
+    expect(isWorkspaceAccent("magenta")).toBe(false);
+    expect(isWorkspaceAccent(undefined)).toBe(false);
+  });
+
+  it("matches the colors the plugin SDK names", () => {
+    const sdkColors = [
+      "violet",
+      "sky",
+      "emerald",
+      "orange",
+      "pink",
+      "indigo",
+      "teal",
+      "red",
+      "amber",
+      "blue",
+    ] satisfies PluginIdentityColor[];
+    expect([...sdkColors].sort()).toEqual([...IDENTITY_COLOR_NAMES].sort());
+    // Compile-time: every app color name is a name the SDK type allows.
+    const names: readonly PluginIdentityColor[] = IDENTITY_COLOR_NAMES;
+    expect(names).toHaveLength(sdkColors.length);
+  });
+});
 
 describe("resolveWorkspaceAccent", () => {
   it("prefers the override over the project color", () => {

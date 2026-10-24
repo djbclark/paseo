@@ -24,7 +24,6 @@ import {
   type PluginSurfaceProps,
   type PluginTimelineRendererContribution,
   type PluginTimelineTransformerContribution,
-  type PluginButtonRegistration,
 } from "@getpaseo/plugin/client";
 import type {
   EvaluatedPlugin,
@@ -113,6 +112,7 @@ export type PluginClientRuntime = Pick<
   | "openPanel"
   | "addComposerPill"
   | "addHeaderButton"
+  | "setWorkspaceAccent"
 > & { hosts: ReturnType<typeof createPluginHosts> };
 
 // COMPAT(pluginReactNativeEntrypoint): added in v0.13.0, remove after 2027-04-20
@@ -156,9 +156,10 @@ export function runPluginClientBundle(
   const removals = new Set<PluginCleanup>();
   let setupComplete = false;
   let stopped = false;
-  function trackButton(
-    registration: PluginButtonRegistration<PluginText>,
-  ): PluginButtonRegistration<PluginText> {
+  function track<Patch>(registration: { update(patch: Patch): void; remove(): void }): {
+    update(patch: Patch): void;
+    remove(): void;
+  } {
     let active = true;
     const remove = () => {
       if (!active) return;
@@ -499,11 +500,15 @@ export function runPluginClientBundle(
     },
     addComposerPill(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
-      return trackButton(runtime.addComposerPill(contribution));
+      return track(runtime.addComposerPill(contribution));
     },
     addHeaderButton(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
-      return trackButton(runtime.addHeaderButton(contribution));
+      return track(runtime.addHeaderButton(contribution));
+    },
+    setWorkspaceAccent(contribution) {
+      if (stopped) throw new Error("Plugin has stopped");
+      return track(runtime.setWorkspaceAccent(contribution));
     },
   };
   const runtimeRequire = (name: string): unknown => {

@@ -19,6 +19,15 @@ describe("workspace accent store", () => {
     expect(read()).toBe("red");
   });
 
+  it("ranks by plugin key, not by who registered first", () => {
+    const { setOverride, clearOverride } = useWorkspaceAccentStore.getState();
+    setOverride({ workspaceKey: KEY, pluginKey: "host/b", color: "blue" });
+    setOverride({ workspaceKey: KEY, pluginKey: "host/a", color: "red" });
+    expect(read()).toBe("red");
+    clearOverride({ workspaceKey: KEY, pluginKey: "host/a" });
+    expect(read()).toBe("blue");
+  });
+
   it("keeps an updating plugin's place in line", () => {
     const { setOverride } = useWorkspaceAccentStore.getState();
     setOverride({ workspaceKey: KEY, pluginKey: "a", color: "red" });

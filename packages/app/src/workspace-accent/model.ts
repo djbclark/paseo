@@ -10,6 +10,10 @@ import {
 
 export type WorkspaceAccent = IdentityColorName;
 
+export function isWorkspaceAccent(value: unknown): value is WorkspaceAccent {
+  return IDENTITY_COLOR_NAMES.some((name) => name === value);
+}
+
 export interface WorkspaceAccentSources {
   /** A plugin's explicit choice for this workspace. Wins over everything. */
   override: WorkspaceAccent | null;

@@ -39,6 +39,7 @@ function registry(version: string) {
         openPanel() {},
         addComposerPill: () => ({ update() {}, remove() {} }),
         addHeaderButton: () => ({ update() {}, remove() {} }),
+        setWorkspaceAccent: () => ({ update() {}, remove() {} }),
       };
     },
   });

@@ -8,6 +8,8 @@ import { useTranslation } from "react-i18next";
 import invariant from "tiny-invariant";
 import { getPanelRegistration, type PanelIconProps } from "@/panels/panel-registry";
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
+import { TabAccentLeadingBar } from "@/workspace-accent/tab-accent-marks";
 import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
 import { usePanelInstanceAttributes } from "@/panels/panel-instance-attributes";
@@ -145,6 +147,7 @@ interface WorkspaceTabOptionRowProps {
   presentation: WorkspaceTabPresentation;
   selected: boolean;
   active: boolean;
+  accent?: WorkspaceAccent;
   onPress: () => void;
   trailingAccessory?: ReactNode;
 }
@@ -153,6 +156,7 @@ export function WorkspaceTabOptionRow({
   presentation,
   selected,
   active,
+  accent,
   onPress,
   trailingAccessory,
 }: WorkspaceTabOptionRowProps): ReactElement {
@@ -175,6 +179,7 @@ export function WorkspaceTabOptionRow({
   );
   return (
     <View style={optionRowStyle}>
+      {accent ? <TabAccentLeadingBar accent={accent} /> : null}
       <Pressable onPress={onPress} style={pressableStyle}>
         {(state) => {
           const optionActive = isOptionActive(state);

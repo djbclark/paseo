@@ -38,6 +38,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath,
       onReloadAgent,
       onRenameTab,
+      onSetTabAccent: vi.fn(),
       onCloseTab,
       onCloseTabsBefore,
       onCloseTabsAfter,
@@ -69,6 +70,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -105,6 +107,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -134,6 +137,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -164,6 +168,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab,
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -200,6 +205,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab,
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -251,6 +257,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath,
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -295,6 +302,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsToLeft: vi.fn(),
       onCloseTabsToRight: vi.fn(),
@@ -326,6 +334,7 @@ describe("buildWorkspaceTabMenuEntries", () => {
       onCopyFilePath: vi.fn(),
       onReloadAgent: vi.fn(),
       onRenameTab: vi.fn(),
+      onSetTabAccent: vi.fn(),
       onCloseTab: vi.fn(),
       onCloseTabsBefore: vi.fn(),
       onCloseTabsAfter: vi.fn(),
@@ -365,5 +374,73 @@ describe("buildWorkspaceTabMenuEntries", () => {
       .find((entry) => entry.kind === "separator");
     expect(agentSeparator?.key).toBe("rename-separator");
     expect(terminalSeparator?.key).toBe("rename-separator");
+  });
+});
+
+describe("tab color entry", () => {
+  function entriesFor(
+    surface: "desktop" | "mobile",
+    tab: WorkspaceTabDescriptor,
+    onSetTabAccent = vi.fn(),
+  ) {
+    return buildWorkspaceTabMenuEntries({
+      surface,
+      tab,
+      index: 0,
+      tabCount: 2,
+      menuTestIDBase: "menu",
+      onCopyResumeCommand: vi.fn(),
+      onCopyAgentId: vi.fn(),
+      onCopyTerminalId: vi.fn(),
+      onCopyFilePath: vi.fn(),
+      onReloadAgent: vi.fn(),
+      onRenameTab: vi.fn(),
+      onSetTabAccent,
+      onCloseTab: vi.fn(),
+      onCloseTabsBefore: vi.fn(),
+      onCloseTabsAfter: vi.fn(),
+      onCloseOtherTabs: vi.fn(),
+    });
+  }
+
+  it.each(["desktop", "mobile"] as const)("is offered on the %s surface", (surface) => {
+    const entry = entriesFor(surface, createAgentTab()).find((item) => item.kind === "color");
+    expect(entry).toMatchObject({
+      key: "color",
+      label: "Color",
+      noneLabel: "None",
+      selected: null,
+    });
+  });
+
+  it("reports the tab's current color as selected", () => {
+    const entry = entriesFor("desktop", { ...createAgentTab(), accent: "teal" }).find(
+      (item) => item.kind === "color",
+    );
+    expect(entry).toMatchObject({ selected: "teal" });
+  });
+
+  it("sets the color for this tab and clears it with null", () => {
+    const onSetTabAccent = vi.fn();
+    const entry = entriesFor("desktop", createAgentTab(), onSetTabAccent).find(
+      (item) => item.kind === "color",
+    );
+    if (!entry || entry.kind !== "color") throw new Error("Color entry missing");
+    entry.onChange("violet");
+    entry.onChange(null);
+    expect(onSetTabAccent.mock.calls).toEqual([
+      ["agent_123", "violet"],
+      ["agent_123", null],
+    ]);
+  });
+
+  it("is not offered on a new tab", () => {
+    const newTab: WorkspaceTabDescriptor = {
+      key: "new_1",
+      tabId: "new_1",
+      kind: "new_tab",
+      target: { kind: "new_tab" },
+    };
+    expect(entriesFor("desktop", newTab).some((item) => item.kind === "color")).toBe(false);
   });
 });

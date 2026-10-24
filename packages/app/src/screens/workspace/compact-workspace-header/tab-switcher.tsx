@@ -18,6 +18,8 @@ import {
   buildWorkspaceTabMenuEntries,
   type WorkspaceTabMenuLabels,
 } from "@/screens/workspace/workspace-tab-menu";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
+import { setTabAccent } from "@/workspace-accent/use-tab-accents";
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
 
 // The trigger draws at 32pt beside its island neighbours, so only vertical slop is free.
@@ -192,6 +194,8 @@ function MobileWorkspaceTabOption({
       copyTerminalId: t("workspace.tabs.menu.copyTerminalId"),
       copyFilePath: t("workspace.tabs.menu.copyFilePath"),
       rename: t("workspace.tabs.menu.rename"),
+      color: t("workspace.tabs.menu.color"),
+      colorNone: t("workspace.tabs.menu.colorNone"),
       closeAbove: t("workspace.tabs.menu.closeAbove"),
       closeBelow: t("workspace.tabs.menu.closeBelow"),
       closeLeft: t("workspace.tabs.menu.closeLeft"),
@@ -202,6 +206,11 @@ function MobileWorkspaceTabOption({
       close: t("workspace.tabs.menu.close"),
     }),
     [t],
+  );
+  const onSetTabAccent = useCallback(
+    (tabId: string, accent: WorkspaceAccent | null) =>
+      setTabAccent(normalizedServerId, normalizedWorkspaceId, tabId, accent),
+    [normalizedServerId, normalizedWorkspaceId],
   );
   const menuTestIDBase = `workspace-tab-menu-${tab.tabId}`;
   const menuEntries = buildWorkspaceTabMenuEntries({
@@ -216,6 +225,7 @@ function MobileWorkspaceTabOption({
     onCopyFilePath,
     onReloadAgent,
     onRenameTab,
+    onSetTabAccent,
     onCloseTab,
     onCloseTabsBefore: onCloseTabsAbove,
     onCloseTabsAfter: onCloseTabsBelow,
@@ -260,11 +270,12 @@ function MobileWorkspaceTabOption({
         presentation={presentation}
         selected={selected}
         active={active}
+        accent={tab.accent}
         onPress={onPress}
         trailingAccessory={trailingAccessory}
       />
     ),
-    [selected, active, onPress, trailingAccessory],
+    [selected, active, tab.accent, onPress, trailingAccessory],
   );
 
   return (

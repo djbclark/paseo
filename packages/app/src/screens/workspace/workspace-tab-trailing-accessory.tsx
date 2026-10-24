@@ -20,6 +20,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { FilePanelOpenWithMenu } from "@/file-panels";
+import { useTabColorMenu } from "@/workspace-accent/tab-color-menu";
 import type { WorkspaceTabMenuEntry } from "@/screens/workspace/workspace-tab-menu";
 import type { Theme } from "@/styles/theme";
 
@@ -98,6 +99,11 @@ export function MobileTabTrailingAccessory({
   openWith?: FilePanelOpenWithMenu;
 }): ReactElement {
   const { t } = useTranslation();
+  const colorMenu = useTabColorMenu(menuEntries.find((entry) => entry.kind === "color") ?? null);
+  const pages = useMemo(
+    () => [...(openWith?.pages ?? []), ...colorMenu.pages],
+    [colorMenu.pages, openWith?.pages],
+  );
   return (
     <DropdownMenu compactMode="sheet">
       <DropdownMenuTrigger
@@ -114,13 +120,16 @@ export function MobileTabTrailingAccessory({
         align="end"
         width={220}
         sheetTitle={presentationLabel}
-        pages={openWith?.pages}
+        pages={pages}
         testID={menuTestIDBase}
       >
         {menuEntries.map((entry) => {
           if (entry.kind === "separator") return <DropdownMenuSeparator key={entry.key} />;
           if (entry.kind === "file-panel-open-with") {
             return <Fragment key={entry.key}>{openWith?.trigger}</Fragment>;
+          }
+          if (entry.kind === "color") {
+            return <Fragment key={entry.key}>{colorMenu.trigger}</Fragment>;
           }
           return <MobileTabDropdownMenuItem key={entry.key} entry={entry} />;
         })}

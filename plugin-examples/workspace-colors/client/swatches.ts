@@ -1,7 +1,7 @@
 import type { PluginButtonIconProps, PluginIdentityColor } from "@getpaseo/plugin/client";
 import { ColorSwatch } from "@getpaseo/plugin/client/ui";
 import { createElement, type ComponentType } from "react";
-import { COLORS } from "../shared/colors";
+import { COLORS, type WorkspaceColor } from "../shared/colors";
 
 function swatchIcon(color: PluginIdentityColor, selected: boolean) {
   const Icon = ({ size }: PluginButtonIconProps) =>
@@ -19,6 +19,13 @@ const icons = Object.fromEntries(
 ) as Record<
   PluginIdentityColor,
   { plain: ComponentType<PluginButtonIconProps>; selected: ComponentType<PluginButtonIconProps> }
+>;
+
+// Type-level check that the local color list and the SDK's `PluginIdentityColor` are the same set:
+// the assignment fails to compile if either side gains or loses a name.
+export const COLORS_MATCH_SDK: Record<PluginIdentityColor, true> = {} as Record<
+  WorkspaceColor,
+  true
 >;
 
 export function swatchFor(color: PluginIdentityColor, selected: boolean) {

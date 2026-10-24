@@ -1,8 +1,9 @@
 import { defineSettings } from "@getpaseo/plugin";
-import type { PluginIdentityColor } from "@getpaseo/plugin/client";
 import { z } from "zod";
 
 // Kept as a runtime list here so an app without the SDK's color table never sees a missing value.
+// Shared code cannot import `@getpaseo/plugin/client` (the bundler rejects client modules in the
+// shared bundle, even type-only imports), so the client checks this list against the SDK type.
 export const COLORS = [
   "violet",
   "sky",
@@ -14,7 +15,9 @@ export const COLORS = [
   "red",
   "amber",
   "blue",
-] as const satisfies readonly PluginIdentityColor[];
+] as const;
+
+export type WorkspaceColor = (typeof COLORS)[number];
 
 const Color = z.enum(COLORS);
 

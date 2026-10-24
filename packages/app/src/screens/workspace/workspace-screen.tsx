@@ -125,6 +125,8 @@ import {
   useWorkspaceSetupStore,
 } from "@/stores/workspace-setup-store";
 import { useWorkspace } from "@/stores/session-store-hooks";
+import { WorkspaceAccentChrome } from "@/workspace-accent/chrome";
+import { useWorkspaceAccent } from "@/workspace-accent/use-workspace-accent";
 import { useWorkspaceTerminalSessionRetention } from "@/terminal/hooks/use-workspace-terminal-session-retention";
 import type { CheckoutStatusPayload } from "@/git/use-status-query";
 import { confirmDialog } from "@/utils/confirm-dialog";
@@ -1035,6 +1037,11 @@ function WorkspaceScreenContent({
     [workspaceId],
   );
   const workspaceDescriptor = useWorkspace(normalizedServerId, normalizedWorkspaceId);
+  const workspaceAccent = useWorkspaceAccent(normalizedServerId, normalizedWorkspaceId);
+  const workspaceAccentUnderlay = useMemo(
+    () => <WorkspaceAccentChrome accent={workspaceAccent} />,
+    [workspaceAccent],
+  );
   useEffect(() => {
     if (!normalizedServerId || !normalizedWorkspaceId || workspaceDescriptor) return;
     void getHostRuntimeStore()
@@ -3283,6 +3290,7 @@ function WorkspaceScreenContent({
     () =>
       showScreenHeader ? (
         <ScreenHeader
+          underlay={workspaceAccentUnderlay}
           left={
             <>
               <SidebarMenuToggle />
@@ -3313,6 +3321,7 @@ function WorkspaceScreenContent({
       handleCopyWorkspacePath,
       handleOpenSetupTab,
       headerRight,
+      workspaceAccentUnderlay,
       isWorkspaceHeaderLoading,
       normalizedServerId,
       openImportSheet,

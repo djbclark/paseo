@@ -1,0 +1,6 @@
+{
+  "id": "workspace-colors",
+  "requirements": {
+    "paseo": ">=0.13.0"
+  }
+}

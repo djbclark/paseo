@@ -2349,6 +2349,44 @@ an action already in progress.
 the plugin installation or host connection is torn down. Return cleanup from the client entry for
 your subscriptions, timers, and other resources.
 
+## Workspace colors
+
+`client.setWorkspaceAccent({ workspaceId, color })` colors one workspace's header and tab row on the
+host the plugin is installed on. It returns a registration with `update({ color })` and `remove()`.
+
+```tsx
+import type { PluginIdentityColor } from "@getpaseo/plugin/client";
+
+const accent = client.setWorkspaceAccent({ workspaceId, color: "teal" });
+accent.update({ color: "amber" });
+accent.remove();
+```
+
+`color` is a `PluginIdentityColor`: `violet`, `sky`, `emerald`, `orange`, `pink`, `indigo`, `teal`,
+`red`, `amber`, or `blue`. Paseo picks the pixels for each theme. An unknown name throws.
+
+A workspace without a plugin color carries its project's color. A second call for the same workspace
+replaces the first. When several plugins color one workspace, the plugin that sorts first by id wins.
+`remove()` is idempotent, and `update` does nothing after `remove()` or a replacement. Paseo removes
+outstanding registrations when the installation is torn down.
+
+The sidebar project icon does not follow plugin colors.
+
+To show a color in your own UI, import `ColorSwatch` from `@getpaseo/plugin/client/ui`. It draws a
+round, non-pressable chip in the same color the header carries. Its props are `color`,
+`selected` (a ring), `size` (points, default 16), and `testID`. A component [button icon](#custom-icons-and-popover-content)
+can render it.
+
+An app older than v0.14.0 has no `setWorkspaceAccent`, and calling it throws. Check first:
+
+```tsx
+// COMPAT(pluginWorkspaceAccent): added in v0.14.0, remove after 2027-04-24
+if (typeof client.setWorkspaceAccent !== "function") return () => {};
+```
+
+The [workspace colors example](https://github.com/getpaseo/paseo/tree/main/plugin-examples/workspace-colors)
+colors workspaces by project, label, or one-off override from a header menu and a settings screen.
+
 ## Use the Paseo SDK
 
 Use `usePaseo()` for ordinary Paseo operations from a surface. It borrows the selected host's existing connection; do not create another client.

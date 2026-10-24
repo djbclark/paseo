@@ -608,6 +608,29 @@ Mounted surfaces and command invocations have shorter API lifetimes.
 Keep the client entry synchronous: return its cleanup function immediately and start asynchronous
 work inside it. See the maintained [composer pill example](../plugin-examples/local-plugin/client/main.tsx).
 
+## Contribute a workspace color
+
+`client.setWorkspaceAccent({ workspaceId, color })` colors one workspace's header and tab row. The
+[public reference](../public-docs/plugins/reference.md#workspace-colors) owns the author API;
+`plugin-examples/workspace-colors` is the worked example, with its precedence rules and settings.
+
+- **The host decides the pixels.** A plugin names one of ten identity colors, never a hex. The
+  table in `packages/app/src/styles/identity-colors.ts` is held to one contrast band, so a plugin
+  cannot pick a color that fails on a theme. See [design.md](design.md#13-status-pills-and-badges).
+- **Plugins disagree by key.** Registrations live in `packages/app/src/workspace-accent/store.ts`,
+  keyed by `serverId/installationId`. The key that sorts first wins, the same order as the registry
+  snapshot. A plugin color beats the project-derived default.
+- **Own host only.** A plugin reaches workspaces on the host it is installed on. The registrar binds
+  the installation's `serverId`; a workspace ID from another host colors nothing.
+- **Cleanup is per registration.** The entry cleanup releases every handle through the evaluator's
+  tracking. A replaced or removed handle cannot clear its successor.
+- **Older apps lack the method.** The client entry runs in apps from before v0.14.0 and throws on
+  the missing call. Feature-detect it as the first statement, tagged for removal:
+  `// COMPAT(pluginWorkspaceAccent)` then `if (typeof client.setWorkspaceAccent !== "function") return () => {};`.
+  There is no `server_info` flag because the contribution is client-only.
+- **The sidebar project icon does not follow overrides.** It still hashes the project. Say so in
+  any plugin that promises "project colors".
+
 ## Contribute timeline items
 
 Timeline transformers and renderers are client contributions. The daemon's canonical rows and

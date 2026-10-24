@@ -38,6 +38,7 @@ import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { type TabDropPreview } from "@/components/split-container-tab-drop-preview";
 import { SplitDropZone, type SplitDropZoneHover } from "@/components/split-drop-zone";
 import { deriveWorkspacePaneState } from "@/screens/workspace/workspace-pane-state";
+import { useTabAccents } from "@/workspace-accent/use-tab-accents";
 import type { WorkspacePaneContentModel } from "@/screens/workspace/workspace-pane-content";
 import { WorkspacePanelHost } from "@/screens/workspace/workspace-panel-host";
 import {
@@ -611,13 +612,15 @@ const SplitPaneView = memo(function SplitPaneView({
   recordRenderProfileReasons(`SplitPaneView:${pane.id}`, ["render"]);
   const paneRef = useRef<View | null>(null);
   const stableOnFocusPane = useStableEvent(onFocusPane);
+  const accentByTabId = useTabAccents(normalizedServerId, normalizedWorkspaceId);
   const paneState = useMemo(
     () =>
       deriveWorkspacePaneState({
         pane,
         tabs: uiTabs,
+        accentByTabId,
       }),
-    [pane, uiTabs],
+    [accentByTabId, pane, uiTabs],
   );
   const paneTabs = useMemo(() => paneState.tabs.map((tab) => tab.descriptor), [paneState.tabs]);
   const activeTabDescriptor = paneState.activeTab?.descriptor ?? null;

@@ -174,6 +174,7 @@ import {
   workspaceAgentVisibilityEqual,
 } from "@/workspace-tabs/agent-visibility";
 import { deriveWorkspacePaneState } from "@/screens/workspace/workspace-pane-state";
+import { useTabAccents } from "@/workspace-accent/use-tab-accents";
 import {
   buildWorkspacePaneContentModel,
   WorkspacePaneContent,
@@ -1403,14 +1404,16 @@ function WorkspaceScreenContent({
     [closeWorkspaceTab, hideWorkspaceAgent, persistenceKey, unpinWorkspaceAgent],
   );
 
+  const accentByTabId = useTabAccents(normalizedServerId, normalizedWorkspaceId);
   const focusedPaneTabState = useMemo(
     () =>
       deriveWorkspacePaneState({
         layout: workspaceLayout,
         tabs: uiTabs,
         paneId: workspaceLayout?.focusedPaneId ?? unfocusedPaneId,
+        accentByTabId,
       }),
-    [uiTabs, workspaceLayout, unfocusedPaneId],
+    [accentByTabId, uiTabs, workspaceLayout, unfocusedPaneId],
   );
   const viewedTimelineSync = useSessionStore(
     (state) => state.sessions[normalizedServerId]?.viewedTimelineSync ?? null,

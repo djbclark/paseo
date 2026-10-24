@@ -12,6 +12,10 @@ import React, {
 } from "react";
 import { Pressable, Text, View, type LayoutChangeEvent, type ScrollView } from "react-native";
 import { WorkspaceAccentChrome } from "@/workspace-accent/chrome";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
+import { TabAccentBottomBar } from "@/workspace-accent/tab-accent-marks";
+import { useTabColorMenu } from "@/workspace-accent/tab-color-menu";
+import { setTabAccent } from "@/workspace-accent/use-tab-accents";
 import { useWorkspaceAccent } from "@/workspace-accent/use-workspace-accent";
 import { useFilePanelOpenWithMenu } from "@/file-panels";
 import {
@@ -764,6 +768,12 @@ function TabChip({
     { serverId, workspaceId, tabId: tab.tabId },
     contextMenuTestId,
   );
+  const colorEntry = menuEntries.find((entry) => entry.kind === "color") ?? null;
+  const colorMenu = useTabColorMenu(colorEntry);
+  const menuPages = useMemo(
+    () => [...openWith.pages, ...colorMenu.pages],
+    [colorMenu.pages, openWith.pages],
+  );
   const middleClickRef = useMiddleClickClose(
     useCallback(() => void onCloseTab(tab.tabId), [onCloseTab, tab.tabId]),
   );
@@ -878,6 +888,9 @@ function TabChip({
                 tabLabelStyle={tabLabelStyle}
                 modifiedTestId={`workspace-tab-modified-${testIdentity}`}
               />
+              {tab.accent ? (
+                <TabAccentBottomBar accent={tab.accent} inset={TAB_CHIP_HORIZONTAL_PADDING} />
+              ) : null}
             </ContextMenuTrigger>
           </TooltipTrigger>
           <TooltipContent
@@ -944,13 +957,16 @@ function TabChip({
         <ContextMenuContent
           align="start"
           width={DROPDOWN_WIDTH}
-          pages={openWith.pages}
+          pages={menuPages}
           testID={contextMenuTestId}
         >
           {menuEntries.map((entry) => {
             if (entry.kind === "separator") return <ContextMenuSeparator key={entry.key} />;
             if (entry.kind === "file-panel-open-with") {
               return <Fragment key={entry.key}>{openWith.trigger}</Fragment>;
+            }
+            if (entry.kind === "color") {
+              return <Fragment key={entry.key}>{colorMenu.trigger}</Fragment>;
             }
             return <TabContextMenuItem key={entry.key} entry={entry} />;
           })}
@@ -1119,6 +1135,8 @@ function ResolvedWorkspaceDesktopTabsRow({
       copyTerminalId: t("workspace.tabs.menu.copyTerminalId"),
       copyFilePath: t("workspace.tabs.menu.copyFilePath"),
       rename: t("workspace.tabs.menu.rename"),
+      color: t("workspace.tabs.menu.color"),
+      colorNone: t("workspace.tabs.menu.colorNone"),
       closeAbove: t("workspace.tabs.menu.closeAbove"),
       closeBelow: t("workspace.tabs.menu.closeBelow"),
       closeLeft: t("workspace.tabs.menu.closeLeft"),
@@ -1518,6 +1536,11 @@ function ResolvedDesktopTabChip({
 }) {
   const { t } = useTranslation();
   const presentation = item.presentation;
+  const onSetTabAccent = useCallback(
+    (tabId: string, accent: WorkspaceAccent | null) =>
+      setTabAccent(serverId, workspaceId, tabId, accent),
+    [serverId, workspaceId],
+  );
   const resolvedTab = useMemo(
     () =>
       buildWorkspaceDesktopTabActions({
@@ -1530,6 +1553,7 @@ function ResolvedDesktopTabChip({
         onCopyFilePath,
         onReloadAgent,
         onRenameTab,
+        onSetTabAccent,
         onCloseTab,
         onCloseTabsToLeft,
         onCloseTabsToRight,
@@ -1550,6 +1574,7 @@ function ResolvedDesktopTabChip({
       labels,
       onReloadAgent,
       onRenameTab,
+      onSetTabAccent,
       tabCount,
     ],
   );

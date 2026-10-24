@@ -11,6 +11,7 @@ import {
   workspaceTabTargetsEqual,
 } from "@/workspace-tabs/identity";
 import { findAdjacentPane } from "@/utils/split-navigation";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
 
 export interface WorkspaceDerivedTab {
   descriptor: WorkspaceTabDescriptor;
@@ -82,7 +83,10 @@ function orderPaneTabs(input: { pane: SplitPane | null; tabs: WorkspaceTab[] }):
   return orderedTabs;
 }
 
-function normalizeWorkspacePaneTabs(tabs: WorkspaceTab[]): NormalizeWorkspacePaneTabsResult {
+function normalizeWorkspacePaneTabs(
+  tabs: WorkspaceTab[],
+  accentByTabId: Readonly<Record<string, WorkspaceAccent>> | undefined,
+): NormalizeWorkspacePaneTabsResult {
   const nextTabs: WorkspaceDerivedTab[] = [];
   const openTabIds = new Set<string>();
 
@@ -100,6 +104,9 @@ function normalizeWorkspacePaneTabs(tabs: WorkspaceTab[]): NormalizeWorkspacePan
         kind: normalizedTab.target.kind,
         target: normalizedTab.target,
         state: normalizedTab.state,
+        ...(accentByTabId?.[normalizedTab.tabId]
+          ? { accent: accentByTabId[normalizedTab.tabId] }
+          : {}),
       },
     });
   }
@@ -166,6 +173,7 @@ export function deriveWorkspacePaneState(input: {
   tabs: WorkspaceTab[];
   focusedTabId?: string | null;
   preferredTarget?: WorkspaceTabTarget | null;
+  accentByTabId?: Readonly<Record<string, WorkspaceAccent>>;
 }): WorkspacePaneState {
   const pane = getPane({
     layout: input.layout ?? null,
@@ -176,7 +184,7 @@ export function deriveWorkspacePaneState(input: {
     pane,
     tabs: input.tabs,
   });
-  const normalizedTabs = normalizeWorkspacePaneTabs(orderedTabs);
+  const normalizedTabs = normalizeWorkspacePaneTabs(orderedTabs, input.accentByTabId);
   const focusedTabId = pane?.focusedTabId ?? trimNonEmpty(input.focusedTabId) ?? null;
   const activeTabId = getActiveTabId({
     tabs: normalizedTabs.tabs,

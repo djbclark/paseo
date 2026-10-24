@@ -1,4 +1,5 @@
 import type { WorkspaceTabDescriptor } from "@/screens/workspace/workspace-tabs-types";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
 import { i18n } from "@/i18n/i18next";
 import { encodeFilePathForPathSegment, encodeWorkspaceIdForPathSegment } from "@/utils/host-routes";
 import { buildDeterministicWorkspaceTabId } from "@/workspace-tabs/identity";
@@ -11,6 +12,8 @@ export interface WorkspaceTabMenuLabels {
   copyTerminalId: string;
   copyFilePath: string;
   rename: string;
+  color: string;
+  colorNone: string;
   closeAbove: string;
   closeBelow: string;
   closeLeft: string;
@@ -27,6 +30,8 @@ export const DEFAULT_WORKSPACE_TAB_MENU_LABELS: WorkspaceTabMenuLabels = {
   copyTerminalId: i18n.t("workspace.tabs.menu.copyTerminalId"),
   copyFilePath: i18n.t("workspace.tabs.menu.copyFilePath"),
   rename: i18n.t("workspace.tabs.menu.rename"),
+  color: i18n.t("workspace.tabs.menu.color"),
+  colorNone: i18n.t("workspace.tabs.menu.colorNone"),
   closeAbove: i18n.t("workspace.tabs.menu.closeAbove"),
   closeBelow: i18n.t("workspace.tabs.menu.closeBelow"),
   closeLeft: i18n.t("workspace.tabs.menu.closeLeft"),
@@ -65,6 +70,16 @@ export type WorkspaceTabMenuEntry =
       /** Where the file tab's "Open with…" row goes; it renders only for files with several panels. */
       kind: "file-panel-open-with";
       key: string;
+    }
+  | {
+      /** The "Color" row and its page of swatches; `null` is "None". */
+      kind: "color";
+      key: string;
+      label: string;
+      noneLabel: string;
+      selected: WorkspaceAccent | null;
+      testID: string;
+      onChange: (accent: WorkspaceAccent | null) => void;
     };
 
 interface BuildWorkspaceTabMenuEntriesInput {
@@ -79,6 +94,7 @@ interface BuildWorkspaceTabMenuEntriesInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
+  onSetTabAccent: (tabId: string, accent: WorkspaceAccent | null) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsBefore: (tabId: string) => Promise<void> | void;
   onCloseTabsAfter: (tabId: string) => Promise<void> | void;
@@ -96,6 +112,7 @@ interface BuildWorkspaceDesktopTabActionsInput {
   onCopyFilePath: (path: string) => Promise<void> | void;
   onReloadAgent: (agentId: string) => Promise<void> | void;
   onRenameTab: (tab: WorkspaceTabDescriptor) => void;
+  onSetTabAccent: (tabId: string, accent: WorkspaceAccent | null) => void;
   onCloseTab: (tabId: string) => Promise<void> | void;
   onCloseTabsToLeft: (tabId: string) => Promise<void> | void;
   onCloseTabsToRight: (tabId: string) => Promise<void> | void;
@@ -183,6 +200,7 @@ export function buildWorkspaceTabMenuEntries(
     onCopyFilePath,
     onReloadAgent,
     onRenameTab,
+    onSetTabAccent,
     onCloseTab,
     onCloseTabsBefore,
     onCloseTabsAfter,
@@ -193,6 +211,17 @@ export function buildWorkspaceTabMenuEntries(
   const isLastTab = index === tabCount - 1;
   const isOnlyTab = tabCount <= 1;
   const entries: WorkspaceTabMenuEntry[] = [];
+  const colorEntry: WorkspaceTabMenuEntry = {
+    kind: "color",
+    key: "color",
+    label: labels.color,
+    noneLabel: labels.colorNone,
+    selected: tab.accent ?? null,
+    testID: `${menuTestIDBase}-color`,
+    onChange: (accent) => {
+      onSetTabAccent(tab.tabId, accent);
+    },
+  };
 
   if (tab.target.kind === "agent") {
     const { agentId } = tab.target;
@@ -260,10 +289,13 @@ export function buildWorkspaceTabMenuEntries(
         onRenameTab(tab);
       },
     });
+    entries.push(colorEntry);
     entries.push({
       kind: "separator",
       key: "rename-separator",
     });
+  } else if (tab.target.kind !== "new_tab") {
+    entries.push(colorEntry);
   }
 
   entries.push({
@@ -345,6 +377,7 @@ export function buildWorkspaceDesktopTabActions(
       onCopyFilePath: input.onCopyFilePath,
       onReloadAgent: input.onReloadAgent,
       onRenameTab: input.onRenameTab,
+      onSetTabAccent: input.onSetTabAccent,
       onCloseTab: input.onCloseTab,
       onCloseTabsBefore: input.onCloseTabsToLeft,
       onCloseTabsAfter: input.onCloseTabsToRight,

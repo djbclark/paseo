@@ -57,6 +57,11 @@ vi.mock("react-native-unistyles", () => ({
     },
 }));
 
+// The Color page rides on the real menu engine, which this test replaces with stubs.
+vi.mock("@/workspace-accent/tab-color-menu", () => ({
+  useTabColorMenu: () => ({ trigger: null, pages: [] }),
+}));
+
 vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({
     children,
@@ -146,6 +151,7 @@ function renderAccessory(
     onCopyFilePath: vi.fn(),
     onReloadAgent: vi.fn(),
     onRenameTab,
+    onSetTabAccent: vi.fn(),
     onCloseTab: vi.fn(),
     onCloseTabsBefore: vi.fn(),
     onCloseTabsAfter: vi.fn(),

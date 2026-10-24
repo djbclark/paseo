@@ -120,3 +120,14 @@ export function computeWorkspaceTabLayout(
     requiresHorizontalScrollFallback,
   };
 }
+
+/** The project icon at the start of the first pane's tab row. */
+export const PROJECT_ICON_SIZE = 16;
+const PROJECT_ICON_LEADING_INSET = 8;
+/**
+ * Width the icon takes out of the tab row, beside the tabs. The row reserves it in
+ * `actionsReservedWidth`, the same way it reserves the exit-focus button, so chip widths and the
+ * overflow decision are computed for the room the tabs actually have.
+ */
+export const PROJECT_ICON_SLOT_WIDTH = PROJECT_ICON_LEADING_INSET + PROJECT_ICON_SIZE;
+export const PROJECT_ICON_SLOT_INSET = PROJECT_ICON_LEADING_INSET;

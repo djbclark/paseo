@@ -39,7 +39,14 @@ export function findProjectViewKey(
   projects: readonly WorkspaceStructureProject[],
   workspaceKey: string,
 ): string | null {
-  return projects.find((project) => project.workspaceKeys.includes(workspaceKey))?.viewKey ?? null;
+  return findWorkspaceProject(projects, workspaceKey)?.viewKey ?? null;
+}
+
+export function findWorkspaceProject(
+  projects: readonly WorkspaceStructureProject[],
+  workspaceKey: string,
+): WorkspaceStructureProject | null {
+  return projects.find((project) => project.workspaceKeys.includes(workspaceKey)) ?? null;
 }
 
 // `identityTint` and `identityColor` are theme-independent — one hex per name — so these are

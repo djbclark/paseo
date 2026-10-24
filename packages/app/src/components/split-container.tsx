@@ -38,6 +38,7 @@ import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { type TabDropPreview } from "@/components/split-container-tab-drop-preview";
 import { SplitDropZone, type SplitDropZoneHover } from "@/components/split-drop-zone";
 import { deriveWorkspacePaneState } from "@/screens/workspace/workspace-pane-state";
+import { resolveProjectIconPaneId } from "@/workspace-accent/project-icon-pane";
 import { useTabAccents } from "@/workspace-accent/use-tab-accents";
 import type { WorkspacePaneContentModel } from "@/screens/workspace/workspace-pane-content";
 import { WorkspacePanelHost } from "@/screens/workspace/workspace-panel-host";
@@ -117,6 +118,8 @@ interface SplitNodeViewProps extends Omit<
   windowChromeCorners: WindowChromeCorners;
   maximizedPaneId: string | null;
   workspaceHasMultiplePanes: boolean;
+  /** The pane whose tab row carries the project icon; see `resolveProjectIconPaneId`. */
+  projectIconPaneId: string | null;
   onTogglePaneMaximized: (paneId: string) => void;
 }
 
@@ -232,6 +235,10 @@ export function SplitContainer({
       : inheritedWindowChromeCorners;
   const mainColumnStyle = styles.mainColumn;
   const renderRoot = useMemo(() => wrapRootPaneForStableMount(splitRoot.root), [splitRoot.root]);
+  const projectIconPaneId = useMemo(
+    () => (focusModeEnabled ? null : resolveProjectIconPaneId(splitRoot.root, maximizedPaneId)),
+    [focusModeEnabled, maximizedPaneId, splitRoot.root],
+  );
   return (
     <RenderProfile id="SplitContainer">
       <View style={styles.workspaceShell}>
@@ -276,6 +283,7 @@ export function SplitContainer({
                 windowChromeCorners={splitRoot.usesFallbackStrip ? "none" : windowChromeCorners}
                 maximizedPaneId={maximizedPaneId}
                 workspaceHasMultiplePanes={workspaceHasMultiplePanes}
+                projectIconPaneId={projectIconPaneId}
                 onTogglePaneMaximized={handleTogglePaneMaximized}
                 focusModeEnabled={focusModeEnabled}
                 onExitFocusMode={onExitFocusMode}
@@ -407,6 +415,7 @@ function SplitNodeView({
   windowChromeCorners,
   maximizedPaneId,
   workspaceHasMultiplePanes,
+  projectIconPaneId,
   onTogglePaneMaximized,
   focusModeEnabled,
   onExitFocusMode,
@@ -493,6 +502,7 @@ function SplitNodeView({
             tabDropPreview={tabDropPreview}
             maximizedPaneId={maximizedPaneId}
             workspaceHasMultiplePanes={workspaceHasMultiplePanes}
+            projectIconPaneId={projectIconPaneId}
             onTogglePaneMaximized={onTogglePaneMaximized}
             focusModeEnabled={focusModeEnabled}
             onExitFocusMode={onExitFocusMode}
@@ -547,6 +557,7 @@ function SplitNodeView({
               windowChromeCorners={windowChromeCorners}
               maximizedPaneId={maximizedPaneId}
               workspaceHasMultiplePanes={workspaceHasMultiplePanes}
+              projectIconPaneId={projectIconPaneId}
               onTogglePaneMaximized={onTogglePaneMaximized}
               focusModeEnabled={focusModeEnabled}
               onExitFocusMode={onExitFocusMode}
@@ -605,6 +616,7 @@ const SplitPaneView = memo(function SplitPaneView({
   tabDropPreview,
   maximizedPaneId,
   workspaceHasMultiplePanes,
+  projectIconPaneId,
   onTogglePaneMaximized,
   focusModeEnabled,
   onExitFocusMode,
@@ -740,6 +752,7 @@ const SplitPaneView = memo(function SplitPaneView({
             }
             showPaneSplitActions={!focusModeEnabled}
             showPaneMaximizeAction={workspaceHasMultiplePanes && !focusModeEnabled}
+            showProjectIcon={paneId === projectIconPaneId}
             paneMaximized={paneId === maximizedPaneId}
             onTogglePaneMaximized={handleTogglePaneMaximized}
             onSplitRight={handleSplitRight}

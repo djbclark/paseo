@@ -3,6 +3,8 @@ import { StyleSheet } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { HostBadge } from "@/hosts/host-badge";
 import { useHostBadges } from "@/hosts/use-host-badges";
+import { PROJECT_ICON_SIZE } from "@/screens/workspace/workspace-tab-layout";
+import { WorkspaceProjectIcon } from "@/workspace-accent/workspace-project-icon";
 
 /**
  * Which project the workspace belongs to, and which machine it runs on.
@@ -12,15 +14,21 @@ import { useHostBadges } from "@/hosts/use-host-badges";
  * badge is closed. It still follows the host's own badge setting, so a purely local setup stays
  * quiet. A project name that only repeats the workspace name is dropped on wide, where the two sit
  * side by side, and kept on compact, where the line exists for the host anyway.
+ *
+ * Compact also leads the line with the project icon (when given the workspace), so a phone gets
+ * the project's identity from the same mark the sidebar uses. It is shorter than the text's line
+ * box, so the row keeps its height.
  */
 export function WorkspaceHeaderProjectRow({
   subtitle,
   isSubtitleDistinct,
   serverId,
+  workspaceId,
 }: {
   subtitle: string;
   isSubtitleDistinct: boolean;
   serverId: string;
+  workspaceId?: string;
 }) {
   const isCompact = useIsCompactFormFactor();
   const hostBadge = useHostBadges({ enabled: isCompact }).get(serverId) ?? null;
@@ -30,6 +38,13 @@ export function WorkspaceHeaderProjectRow({
   }
   return (
     <View style={styles.row}>
+      {isCompact && showProject && workspaceId ? (
+        <WorkspaceProjectIcon
+          serverId={serverId}
+          workspaceId={workspaceId}
+          size={PROJECT_ICON_SIZE}
+        />
+      ) : null}
       {showProject ? (
         <Text testID="workspace-header-subtitle" style={styles.project} numberOfLines={1}>
           {subtitle}

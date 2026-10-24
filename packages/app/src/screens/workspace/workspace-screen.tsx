@@ -1083,7 +1083,7 @@ function WorkspaceScreenContent({
   const workspaceDescriptor = useWorkspace(normalizedServerId, normalizedWorkspaceId);
   const workspaceAccent = useWorkspaceAccent(normalizedServerId, normalizedWorkspaceId);
   const workspaceAccentUnderlay = useMemo(
-    () => <WorkspaceAccentChrome accent={workspaceAccent} />,
+    () => <WorkspaceAccentChrome accent={workspaceAccent} stripe />,
     [workspaceAccent],
   );
   useEffect(() => {

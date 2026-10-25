@@ -47,12 +47,31 @@ export function createWorkspaceTabAccentStore(storage: StateStorage) {
       update: (state: WorkspaceTabAccentState) => Partial<WorkspaceTabAccentState>,
     ) => void;
   } | null = null;
+  // A failed read leaves the stored colors unknown. The store then runs from memory for the
+  // session: it writes nothing (a write would replace the stored blob with only this session's
+  // edits), and hydration never finishes, so reload pruning (which needs the stored colors) never
+  // runs against an empty map. The next launch reads the stored colors again.
+  let readFailed = false;
+  const guardedStorage: StateStorage = {
+    getItem: async (name) => {
+      try {
+        const value = await storage.getItem(name);
+        readFailed = false;
+        return value;
+      } catch (error) {
+        readFailed = true;
+        throw error;
+      }
+    },
+    setItem: (name, value) => (readFailed ? undefined : storage.setItem(name, value)),
+    removeItem: (name) => storage.removeItem(name),
+  };
   return create<WorkspaceTabAccentState>()(
     persist<WorkspaceTabAccentState, [], [], z.infer<typeof TabAccentPersistedSchema>>(
       (set, _get, api) => {
         storeApi = api;
         const edit = (apply: (accents: AccentsByWorkspace) => AccentsByWorkspace) => {
-          if (!api.persist.hasHydrated()) editsDuringHydration.push(apply);
+          if (!readFailed && !api.persist.hasHydrated()) editsDuringHydration.push(apply);
           set((state) => {
             const next = apply(state.accentsByWorkspace);
             return next === state.accentsByWorkspace ? state : { accentsByWorkspace: next };
@@ -104,7 +123,7 @@ export function createWorkspaceTabAccentStore(storage: StateStorage) {
       {
         name: "workspace-tab-accent-state",
         version: 1,
-        storage: createValidatedPersistStorage(storage, TabAccentPersistedSchema),
+        storage: createValidatedPersistStorage(guardedStorage, TabAccentPersistedSchema),
         partialize: (state) => ({ accentsByWorkspace: state.accentsByWorkspace }),
         merge: (persistedState, currentState) => {
           const result = TabAccentPersistedSchema.safeParse(persistedState);
@@ -118,7 +137,10 @@ export function createWorkspaceTabAccentStore(storage: StateStorage) {
           };
         },
         onRehydrateStorage: () => (_state, error) => {
-          if (error) return;
+          if (error) {
+            editsDuringHydration = [];
+            return;
+          }
           const replayed = editsDuringHydration.length > 0;
           editsDuringHydration = [];
           // The write for those edits was suppressed while the read was pending; save the result.

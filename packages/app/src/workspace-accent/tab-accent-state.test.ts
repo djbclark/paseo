@@ -146,6 +146,56 @@ describe("hydration racing with edits", () => {
     expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { b: "blue" } });
     await expect.poll(() => stored(storage)).toEqual({ [KEY]: { b: "blue" } });
   });
+
+  describe("when the first read fails", () => {
+    /** A storage whose read rejects once released, with a stored blob it must keep. */
+    function failingStorage() {
+      const storage = memoryStorage({
+        [ACCENT_BLOB]: blob({ accentsByWorkspace: { [KEY]: { a: "red" } } }),
+      });
+      const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+      return {
+        ...storage,
+        getItem: async () => {
+          await gate;
+          throw new Error("disk unavailable");
+        },
+        release,
+      };
+    }
+    // A failed hydration emits no event, so drain its promise chain with one macrotask turn.
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it("keeps edits in memory without writing over the stored colors", async () => {
+      const storage = failingStorage();
+      const original = storage.values.get(ACCENT_BLOB);
+      const store = createWorkspaceTabAccentStore(storage);
+      store.getState().setTabAccent(KEY, "pending", "blue");
+      storage.release();
+      await settle();
+      store.getState().setTabAccent(KEY, "later", "teal");
+      await settle();
+      expect(store.persist.hasHydrated()).toBe(false);
+      expect(store.getState().accentsByWorkspace).toEqual({
+        [KEY]: { pending: "blue", later: "teal" },
+      });
+      expect(storage.values.get(ACCENT_BLOB)).toBe(original);
+    });
+
+    it("does not prune against the unknown stored colors", async () => {
+      const storage = failingStorage();
+      const store = createWorkspaceTabAccentStore(storage);
+      const layout = createWorkspaceLayoutStore(undefined, memoryStorage());
+      await layout.persist.rehydrate();
+      const unbind = bindTabAccentPruning(layout, store);
+      storage.release();
+      await settle();
+      store.getState().setTabAccent(KEY, "gone", "red");
+      await settle();
+      expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { gone: "red" } });
+      unbind();
+    });
+  });
 });
 
 describe("reload reconciliation", () => {

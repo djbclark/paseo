@@ -13,6 +13,8 @@ import {
   WindowLayoutActions,
 } from "@/window-layout";
 import { IconButtonChromeProvider } from "@/components/ui/icon-button-chrome";
+import { WorkspaceAccentChrome } from "@/workspace-accent/chrome";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
 
 export { MobileWorkspaceTabSwitcher } from "./tab-switcher";
 
@@ -23,6 +25,8 @@ interface CompactWorkspaceHeaderProps {
   title: string;
   subtitle: string;
   isSubtitleDistinct: boolean;
+  /** The workspace's identity color, painted behind the header. */
+  accent: WorkspaceAccent | null;
   onToggleExplorer: () => void;
   explorerToggleLabel: string;
   explorerToggleAccessibilityState: { expanded: boolean };
@@ -39,6 +43,7 @@ export function CompactWorkspaceHeader({
   title,
   subtitle,
   isSubtitleDistinct,
+  accent,
   onToggleExplorer,
   explorerToggleLabel,
   explorerToggleAccessibilityState,
@@ -80,11 +85,14 @@ export function CompactWorkspaceHeader({
     <Fragment key={symbol}>{symbols[symbol]}</Fragment>
   ));
 
+  const underlay = useMemo(() => <WorkspaceAccentChrome accent={accent} stripe />, [accent]);
+
   return (
     <IconButtonChromeProvider value="header-island">
       {headerVariant === "compact" ? (
         <CompactHeader
           navigation="menu"
+          underlay={underlay}
           title={title}
           titleTestID="workspace-header-title"
           subtitle={projectRow}

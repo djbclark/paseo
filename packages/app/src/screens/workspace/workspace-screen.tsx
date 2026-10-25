@@ -3481,6 +3481,7 @@ function WorkspaceScreenContent({
           title={workspaceHeaderTitle}
           subtitle={workspaceHeaderSubtitle}
           isSubtitleDistinct={isWorkspaceHeaderSubtitleDistinct}
+          accent={workspaceAccent}
           serverId={normalizedServerId}
           workspaceId={normalizedWorkspaceId}
           onToggleExplorer={handleToggleExplorerSidebar}
@@ -3527,6 +3528,7 @@ function WorkspaceScreenContent({
       handleToggleExplorerSidebar,
       isMobile,
       isRouteFocused,
+      workspaceAccent,
       isWorkspaceHeaderLoading,
       isWorkspaceHeaderSubtitleDistinct,
       normalizedServerId,

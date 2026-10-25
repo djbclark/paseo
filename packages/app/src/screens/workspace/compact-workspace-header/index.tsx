@@ -6,6 +6,8 @@ import {
   WorkspaceExplorerToggle,
 } from "@/screens/workspace/workspace-explorer-toggle";
 import { WorkspaceHeaderProjectRow } from "@/screens/workspace/workspace-header-project-row";
+import { WorkspaceAccentChrome } from "@/workspace-accent/chrome";
+import type { WorkspaceAccent } from "@/workspace-accent/model";
 
 export { MobileWorkspaceTabSwitcher } from "./tab-switcher";
 
@@ -16,6 +18,8 @@ interface CompactWorkspaceHeaderProps {
   title: string;
   subtitle: string;
   isSubtitleDistinct: boolean;
+  /** The workspace's identity color, painted behind the header. */
+  accent: WorkspaceAccent | null;
   onToggleExplorer: () => void;
   explorerToggleLabel: string;
   explorerToggleAccessibilityState: { expanded: boolean };
@@ -29,6 +33,7 @@ export function CompactWorkspaceHeader({
   title,
   subtitle,
   isSubtitleDistinct,
+  accent,
   onToggleExplorer,
   explorerToggleLabel,
   explorerToggleAccessibilityState,
@@ -62,9 +67,12 @@ export function CompactWorkspaceHeader({
     </>
   );
 
+  const underlay = useMemo(() => <WorkspaceAccentChrome accent={accent} stripe />, [accent]);
+
   return (
     <CompactHeader
       navigation="menu"
+      underlay={underlay}
       title={title}
       titleTestID="workspace-header-title"
       subtitle={projectRow}

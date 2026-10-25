@@ -32,13 +32,15 @@ interface CompactHeaderProps {
   loading?: boolean;
   /** Icon actions inherit the island chrome through the shared button primitives. */
   actions?: ReactNode;
+  /** Decoration painted behind the header's content, filling its box. */
+  underlay?: ReactNode;
 }
 
 /**
  * The phone header: the navigation button and the screen's actions sit in islands, with the title
  * left-aligned between them. Neither the header nor its islands draw a background, so it reads the
  * same in flow and floating over content (see `FloatingHeaderLayout`, whose fade gives the icons
- * contrast). Its height matches the old flat header, so anything
+ * contrast). An `underlay` is the one exception: decoration the caller paints behind the content. Its height matches the old flat header, so anything
  * offset by the header height still lines up.
  */
 export function CompactHeader({
@@ -49,6 +51,7 @@ export function CompactHeader({
   subtitle,
   loading = false,
   actions,
+  underlay,
 }: CompactHeaderProps) {
   const insets = useSafeAreaInsets();
   const rootStyle = useMemo(
@@ -66,6 +69,7 @@ export function CompactHeader({
   return (
     <IconButtonChromeProvider value="header-island">
       <View style={rootStyle}>
+        {underlay}
         <View style={styles.row}>
           <View style={styles.island}>
             {navigation === "menu" ? <SidebarMenuToggle /> : <BackButton onBack={onBack} />}

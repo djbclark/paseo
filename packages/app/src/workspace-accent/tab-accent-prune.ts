@@ -49,3 +49,21 @@ export function findClosedTabs(
   }
   return { closedTabs, removedWorkspaces };
 }
+
+/**
+ * Stored colors whose tab is not open in `snapshot`: a tab the layout does not persist (commit
+ * diffs), one closed while this build was not running, or a workspace whose layout is gone.
+ * Only meaningful once the layout has hydrated.
+ */
+export function findOrphanedTabs(
+  accentsByWorkspace: Readonly<Record<string, Readonly<Record<string, string>>>>,
+  snapshot: LayoutSnapshot,
+): Record<string, string[]> {
+  const orphans: Record<string, string[]> = {};
+  for (const [workspaceKey, accents] of Object.entries(accentsByWorkspace)) {
+    const live = liveTabIds(snapshot, workspaceKey);
+    const gone = Object.keys(accents).filter((tabId) => !live.has(tabId));
+    if (gone.length > 0) orphans[workspaceKey] = gone;
+  }
+  return orphans;
+}

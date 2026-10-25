@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { StateStorage } from "zustand/middleware";
-import { createWorkspaceTabAccentStore, readTabAccents } from "./tab-accent-state";
+import { createWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import {
+  bindTabAccentPruning,
+  createWorkspaceTabAccentStore,
+  readTabAccents,
+} from "./tab-accent-state";
 
 const KEY = "server:workspace";
 
@@ -140,5 +145,57 @@ describe("hydration racing with edits", () => {
     await hydrated(store);
     expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { b: "blue" } });
     await expect.poll(() => stored(storage)).toEqual({ [KEY]: { b: "blue" } });
+  });
+});
+
+describe("reload reconciliation", () => {
+  const WORKSPACE = "server:workspace";
+
+  it("drops colors of tabs the restored layout no longer has", async () => {
+    const layoutStorage = memoryStorage();
+    const accentStorage = memoryStorage();
+
+    // First run: a terminal tab and a commit diff tab, both colored, plus a color for a workspace
+    // whose layout never persisted.
+    const layout = createWorkspaceLayoutStore(undefined, layoutStorage);
+    await layout.persist.rehydrate();
+    const accents = createWorkspaceTabAccentStore(accentStorage);
+    await accents.persist.rehydrate();
+    bindTabAccentPruning(layout, accents);
+    const terminalTab = layout.getState().openTab({
+      workspaceKey: WORKSPACE,
+      target: { kind: "terminal", terminalId: "t1" },
+      intent: "reveal",
+    });
+    const diffTab = layout.getState().openTab({
+      workspaceKey: WORKSPACE,
+      target: { kind: "commit_diff", sha: "abc1234" },
+      intent: "reveal",
+    });
+    if (!terminalTab || !diffTab) throw new Error("open failed");
+    accents.getState().setTabAccent(WORKSPACE, terminalTab, "red");
+    accents.getState().setTabAccent(WORKSPACE, diffTab, "blue");
+    accents.getState().setTabAccent("server:gone", "x", "teal");
+    await expect
+      .poll(() => stored(accentStorage)?.[WORKSPACE])
+      .toEqual({
+        [terminalTab]: "red",
+        [diffTab]: "blue",
+      });
+
+    // Reload: the layout strips the commit diff tab and never saw the other workspace.
+    const restoredLayout = createWorkspaceLayoutStore(undefined, layoutStorage);
+    const restoredAccents = createWorkspaceTabAccentStore(accentStorage);
+    bindTabAccentPruning(restoredLayout, restoredAccents);
+    await Promise.all([hydrated(restoredLayout), hydrated(restoredAccents)]);
+
+    expect(restoredAccents.getState().accentsByWorkspace).toEqual({
+      [WORKSPACE]: { [terminalTab]: "red" },
+    });
+    await expect
+      .poll(() => stored(accentStorage))
+      .toEqual({
+        [WORKSPACE]: { [terminalTab]: "red" },
+      });
   });
 });

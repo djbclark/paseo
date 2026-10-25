@@ -103,7 +103,12 @@ afterEach(() => {
   container = null;
 });
 
-function renderRow(input: { accent: WorkspaceAccent | null; focusMode?: boolean }): HTMLElement {
+function renderRow(input: {
+  accent: WorkspaceAccent | null;
+  focusMode?: boolean;
+  host?: "main" | "explorer";
+  showProjectIcon?: boolean;
+}): HTMLElement {
   accentRef.current = input.accent;
   if (!container) {
     container = document.createElement("div");
@@ -130,6 +135,8 @@ function renderRow(input: { accent: WorkspaceAccent | null; focusMode?: boolean 
         onCloseOtherTabs={NOOP}
         onCreateNewTab={NOOP}
         onReorderTabs={NOOP}
+        host={input.host}
+        showProjectIcon={input.showProjectIcon}
         focusModeEnabled={input.focusMode ?? false}
         onExitFocusMode={NOOP}
       />,
@@ -140,17 +147,34 @@ function renderRow(input: { accent: WorkspaceAccent | null; focusMode?: boolean 
   return row;
 }
 
-describe("WorkspaceDesktopTabsRow on a wide native layout", () => {
-  it("carries the project icon when no pane split chooses the icon's row", () => {
-    const row = renderRow({ accent: "teal" });
-    expect(row.querySelector('[data-testid="project-icon"]')).not.toBeNull();
-  });
-
-  it("drops the project icon in focus mode", () => {
-    const row = renderRow({ accent: "teal", focusMode: true });
+describe("WorkspaceDesktopTabsRow project icon", () => {
+  it("shows no project icon on the explorer sidebar's row, which passes no prop", () => {
+    const row = renderRow({ accent: "teal", host: "explorer" });
     expect(row.querySelector('[data-testid="project-icon"]')).toBeNull();
   });
 
+  it("shows the project icon on the single-pane fallback row, which passes the inverse of focus mode", () => {
+    for (const focusMode of [false, true]) {
+      const row = renderRow({ accent: "teal", focusMode, showProjectIcon: !focusMode });
+      expect(row.querySelector('[data-testid="project-icon"]') !== null).toBe(!focusMode);
+    }
+  });
+
+  it("shows the project icon only where a split layout chooses it", () => {
+    expect(
+      renderRow({ accent: "teal", showProjectIcon: true }).querySelector(
+        '[data-testid="project-icon"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      renderRow({ accent: "teal", showProjectIcon: false }).querySelector(
+        '[data-testid="project-icon"]',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("WorkspaceDesktopTabsRow on a wide native layout", () => {
   it("paints the accent tint beneath the row's content", () => {
     const row = renderRow({ accent: "teal" });
     const chrome = row.querySelector('[data-testid="workspace-accent-chrome"]');

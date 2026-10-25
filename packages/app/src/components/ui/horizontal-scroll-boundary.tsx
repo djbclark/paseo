@@ -8,7 +8,12 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import type { IdentityColorName } from "@/styles/identity-colors";
 import type { Theme } from "@/styles/theme";
+import {
+  scrollBoundaryBackdropColor,
+  type ScrollBoundaryBackdrop,
+} from "./scroll-boundary-backdrop";
 
 const EDGE_EPSILON = 1;
 const SHADE_WIDTH = 24;
@@ -35,8 +40,23 @@ function ScrollBoundaryShadeSvg({ side, color }: { side: "left" | "right"; color
 }
 
 const ThemedScrollBoundaryShadeSvg = withUnistyles(ScrollBoundaryShadeSvg);
-const surfaceColorMapping = (theme: Theme) => ({ color: theme.colors.surface0 });
-const sidebarColorMapping = (theme: Theme) => ({ color: theme.colors.surfaceSidebar });
+
+// One mapping per backdrop and tint, built once, so `uniProps` keeps a stable identity.
+const colorMappings = new Map<string, (theme: Theme) => { color: string }>();
+function colorMappingFor(
+  backdrop: ScrollBoundaryBackdrop,
+  tint: IdentityColorName | null | undefined,
+) {
+  const key = `${backdrop}:${tint ?? ""}`;
+  let mapping = colorMappings.get(key);
+  if (!mapping) {
+    mapping = (theme: Theme) => ({
+      color: scrollBoundaryBackdropColor(theme.colors, backdrop, tint),
+    });
+    colorMappings.set(key, mapping);
+  }
+  return mapping;
+}
 
 export function useHorizontalScrollBoundary() {
   const offset = useSharedValue(0);
@@ -71,18 +91,21 @@ export function useHorizontalScrollBoundary() {
 export function HorizontalScrollBoundaryShades({
   visible,
   backdrop,
+  tint,
   leftStyle,
   rightStyle,
   testIDPrefix = "horizontal-scroll-boundary",
 }: {
   visible: boolean;
-  backdrop: "surface" | "sidebar";
+  backdrop: ScrollBoundaryBackdrop;
+  /** The workspace tint painted over the backdrop, so the fade ramps to what the row shows. */
+  tint?: IdentityColorName | null;
   leftStyle: AnimatedStyle<{ opacity: number }>;
   rightStyle: AnimatedStyle<{ opacity: number }>;
   testIDPrefix?: string;
 }) {
   if (!visible) return null;
-  const colorMapping = backdrop === "sidebar" ? sidebarColorMapping : surfaceColorMapping;
+  const colorMapping = colorMappingFor(backdrop, tint);
   return (
     <>
       <Animated.View

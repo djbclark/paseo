@@ -89,9 +89,30 @@ export function identityForeground(name: IdentityColorName, colorScheme: "light"
   return colorScheme === "light" ? IDENTITY_FOREGROUND_LIGHT[name] : IDENTITY_FOREGROUND_DARK[name];
 }
 
+// The tint's alpha, as the byte appended to the hex. Every consumer reads it from here — a
+// translucent tint over a surface and the opaque color a surface-matching fade needs must agree.
+const IDENTITY_TINT_ALPHA_BYTE = 0x1a;
+
 /** The same hue at 10% alpha, for fills that sit behind text of the full-strength color. */
 export function identityTint(name: IdentityColorName): string {
-  return `${IDENTITY_COLORS[name]}1a`;
+  return `${IDENTITY_COLORS[name]}${IDENTITY_TINT_ALPHA_BYTE.toString(16).padStart(2, "0")}`;
+}
+
+/**
+ * The opaque color `identityTint(name)` shows when painted over `surface` (a `#rrggbb` token).
+ * For an element that has to hide what scrolls under it yet still match a tinted surface.
+ */
+export function identityTintOver(name: IdentityColorName, surface: string): string {
+  const alpha = IDENTITY_TINT_ALPHA_BYTE / 255;
+  const tint = IDENTITY_COLORS[name];
+  const channels = [1, 3, 5].map((start) => {
+    const under = Number.parseInt(surface.slice(start, start + 2), 16);
+    const over = Number.parseInt(tint.slice(start, start + 2), 16);
+    return Math.round(under * (1 - alpha) + over * alpha)
+      .toString(16)
+      .padStart(2, "0");
+  });
+  return `#${channels.join("")}`;
 }
 
 function hashIdentityKey(key: string): number {

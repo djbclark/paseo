@@ -1336,6 +1336,8 @@ function ResolvedWorkspaceDesktopTabsRow({
 
   const rail: WorkspaceTabRailSurface = host === "explorer" ? "sidebar" : "surface";
   const onSidebar = rail === "sidebar";
+  // The tint the row paints: the chrome and the scroll-edge fades both follow it.
+  const rowAccent = onSidebar ? null : workspaceAccent;
 
   const renderTab = useCallback(
     ({
@@ -1435,10 +1437,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         their own colors. A filled chip (active or hovered) is opaque and so is not tinted; that is
         what lifts it off the tinted rail.
       */}
-      <WorkspaceAccentChrome
-        accent={onSidebar ? null : workspaceAccent}
-        stripe={Boolean(focusModeEnabled)}
-      />
+      <WorkspaceAccentChrome accent={rowAccent} stripe={Boolean(focusModeEnabled)} />
       <View
         style={styles.tabLabelMeasurements}
         pointerEvents="none"
@@ -1504,6 +1503,7 @@ function ResolvedWorkspaceDesktopTabsRow({
         <HorizontalScrollBoundaryShades
           visible={layout.requiresHorizontalScrollFallback}
           backdrop={rail}
+          tint={rowAccent}
           testIDPrefix="workspace-tabs-scroll-shade"
           leftStyle={tabScrollBoundary.leftShadeStyle}
           rightStyle={tabScrollBoundary.rightShadeStyle}

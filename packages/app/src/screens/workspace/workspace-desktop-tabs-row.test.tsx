@@ -30,7 +30,9 @@ vi.mock("@/components/sortable-inline-list", () => ({
   SortableInlineList: () => <b data-testid="tabs" />,
 }));
 vi.mock("@/components/ui/horizontal-scroll-boundary", () => ({
-  HorizontalScrollBoundaryShades: () => null,
+  HorizontalScrollBoundaryShades: ({ backdrop, tint }: { backdrop: string; tint?: string }) => (
+    <i data-testid="scroll-shade" data-backdrop={backdrop} data-tint={tint ?? ""} />
+  ),
   useHorizontalScrollBoundary: () => ({
     onLayout: () => {},
     onContentSizeChange: () => {},
@@ -186,12 +188,36 @@ describe("WorkspaceDesktopTabsRow on a wide native layout", () => {
     const content = (row: HTMLElement) =>
       [...row.children]
         .filter((child) => child.getAttribute("data-testid") !== "workspace-accent-chrome")
-        .map((child) => child.outerHTML);
+        .map((child) => child.outerHTML.replace(/ data-tint="[^"]*"/g, ""));
     const teal = content(renderRow({ accent: "teal" }));
     const none = content(renderRow({ accent: null }));
     const red = content(renderRow({ accent: "red" }));
     expect(teal.length).toBeGreaterThan(0);
     expect(none).toEqual(teal);
     expect(red).toEqual(teal);
+  });
+});
+
+describe("WorkspaceDesktopTabsRow scroll-edge fades", () => {
+  const shadeOf = (row: HTMLElement) => {
+    const shade = row.querySelector<HTMLElement>('[data-testid="scroll-shade"]');
+    if (!shade) throw new Error("scroll shade did not render");
+    return shade;
+  };
+
+  it("ramps the fades to the same tint the row paints", () => {
+    const shade = shadeOf(renderRow({ accent: "red" }));
+    expect(shade.dataset.tint).toBe("red");
+    expect(shade.dataset.backdrop).toBe("surface");
+  });
+
+  it("leaves the fades untinted when the workspace has no accent", () => {
+    expect(shadeOf(renderRow({ accent: null })).dataset.tint).toBe("");
+  });
+
+  it("leaves the explorer sidebar's fades untinted, as its row is", () => {
+    const shade = shadeOf(renderRow({ accent: "red", host: "explorer" }));
+    expect(shade.dataset.tint).toBe("");
+    expect(shade.dataset.backdrop).toBe("sidebar");
   });
 });

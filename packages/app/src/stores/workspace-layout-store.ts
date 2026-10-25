@@ -1014,11 +1014,41 @@ function advancePanelRevision(
   };
 }
 
+/**
+ * Called when a tab id stops existing in the layout because the tab took another id or folded
+ * into a tab that already shows the same thing. It fires from exactly two places:
+ *   1. `replaceTab` on a layout tab when the replacement gets a new id (an agent tab replaced
+ *      with a draft; a replacement of another kind gets a fresh id too).
+ *   2. `reconcileTabs` when it closes a duplicate entity tab in favor of the one it keeps.
+ * It does not fire when a tab keeps its id (a draft that starts an agent), when a tab is
+ * closed, or for sheet tabs. Data kept per tab id outside the layout (tab colors) moves to
+ * `intoTabId`. Listeners run synchronously, before the layout state that drops `fromTabId` is
+ * published.
+ */
+type TabMergeListener = (workspaceKey: string, fromTabId: string, intoTabId: string) => void;
+
 export function createWorkspaceLayoutStore(
   ids: WorkspaceLayoutIdSource = defaultWorkspaceLayoutIds,
   storage: StateStorage = AsyncStorage,
 ) {
-  return create<WorkspaceLayoutStore>()(
+  const mergeListeners = new Set<TabMergeListener>();
+  // A listener that throws must not cost the layout change or skip the listeners after it. Set
+  // iteration skips one a listener unsubscribed before its turn.
+  const notifyTabsMerged = (
+    workspaceKey: string,
+    merges: readonly { fromTabId: string; intoTabId: string }[],
+  ) => {
+    for (const { fromTabId, intoTabId } of merges) {
+      for (const listener of mergeListeners) {
+        try {
+          listener(workspaceKey, fromTabId, intoTabId);
+        } catch (error) {
+          console.error("[workspace-layout] tab merge listener failed", error);
+        }
+      }
+    }
+  };
+  const store = create<WorkspaceLayoutStore>()(
     persist(
       (set, get) => ({
         autoOpenPullRequestTab: (workspaceKey, resolvePlacement) => {
@@ -1581,6 +1611,13 @@ export function createWorkspaceLayoutStore(
             state: tabState,
           });
           if (!result) return null;
+          if (result.tabId !== normalizedTabId) {
+            // Before the layout is published, so nothing subscribed to it sees the old id vanish
+            // while its color is still on it.
+            notifyTabsMerged(normalizedWorkspaceKey, [
+              { fromTabId: normalizedTabId, intoTabId: result.tabId },
+            ]);
+          }
           set((state) => ({
             ...withoutFocusRestoration(state, normalizedWorkspaceKey),
             ...advancePanelRevision(state, normalizedWorkspaceKey, result.tabId, normalizedTarget),
@@ -1721,6 +1758,9 @@ export function createWorkspaceLayoutStore(
               return state;
             }
 
+            // Before the layout is published, so nothing subscribed to it sees a folded tab's id
+            // vanish while its color is still on it.
+            notifyTabsMerged(normalizedWorkspaceKey, nextState.foldedTabs);
             return {
               ...(sheetAgentGone ? withSheets(state, normalizedWorkspaceKey, fittingSheets) : {}),
               pinnedAgentIdsByWorkspace,
@@ -2341,6 +2381,13 @@ export function createWorkspaceLayoutStore(
       },
     ),
   );
+  return Object.assign(store, {
+    /** See `TabMergeListener`. Returns the unsubscribe function. */
+    onTabMerged: (listener: TabMergeListener) => {
+      mergeListeners.add(listener);
+      return () => void mergeListeners.delete(listener);
+    },
+  });
 }
 
 export const useWorkspaceLayoutStore = createWorkspaceLayoutStore();

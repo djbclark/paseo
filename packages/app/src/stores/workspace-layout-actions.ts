@@ -266,6 +266,17 @@ export interface WorkspaceTabReconcileState {
   explorerSidebarPaneId: string | null;
 }
 
+/** The tab with id `fromTabId` was closed because `intoTabId` already shows the same thing. */
+export interface FoldedTab {
+  fromTabId: string;
+  intoTabId: string;
+}
+
+export interface WorkspaceTabReconcileResult extends WorkspaceTabReconcileState {
+  /** Duplicate entity tabs closed in favor of the one kept, in the order they were closed. */
+  foldedTabs: FoldedTab[];
+}
+
 export interface WorkspaceTabSnapshot {
   agentsHydrated: boolean;
   terminalsHydrated: boolean;
@@ -2435,8 +2446,9 @@ function addMissingEntityTabs(input: {
 export function reconcileWorkspaceTabs(
   state: WorkspaceTabReconcileState,
   snapshot: WorkspaceTabSnapshot,
-): WorkspaceTabReconcileState {
+): WorkspaceTabReconcileResult {
   let nextLayout = state.layout;
+  const foldedTabs: FoldedTab[] = [];
   const originalFocusedTabId =
     findPaneById(nextLayout.root, nextLayout.focusedPaneId)?.focusedTabId ?? null;
   let reconciledFocusedTabId = originalFocusedTabId;
@@ -2496,12 +2508,16 @@ export function reconcileWorkspaceTabs(
       if (tab.tabId === keeper.tabId) {
         continue;
       }
-      nextLayout =
-        closeTabInLayout({
-          layout: nextLayout,
-          tabId: tab.tabId,
-          explorerSidebarPaneId: state.explorerSidebarPaneId,
-        }) ?? nextLayout;
+      const closed = closeTabInLayout({
+        layout: nextLayout,
+        tabId: tab.tabId,
+        explorerSidebarPaneId: state.explorerSidebarPaneId,
+      });
+      if (!closed) {
+        continue;
+      }
+      nextLayout = closed;
+      foldedTabs.push({ fromTabId: tab.tabId, intoTabId: keeper.tabId });
     }
   }
 
@@ -2535,5 +2551,6 @@ export function reconcileWorkspaceTabs(
     ...state,
     layout: nextLayout,
     pinnedAgentIds,
+    foldedTabs,
   };
 }

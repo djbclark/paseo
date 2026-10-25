@@ -154,6 +154,7 @@ export function runPluginClientBundle(
   const timelineTransformerIds = new Set<string>();
   const timelineRendererIds = new Set<string>();
   const removals = new Set<PluginCleanup>();
+  const accentRegistrations = new Map<string, { remove(): void }>();
   let setupComplete = false;
   let stopped = false;
   function track<Patch>(registration: { update(patch: Patch): void; remove(): void }): {
@@ -508,7 +509,13 @@ export function runPluginClientBundle(
     },
     setWorkspaceAccent(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
-      return track(runtime.setWorkspaceAccent(contribution));
+      const registration = track(runtime.setWorkspaceAccent(contribution));
+      // A later call replaces the workspace's color. Release the registration it supersedes so
+      // a plugin that re-applies its color on every event does not accumulate one per call.
+      const workspaceId = contribution.workspaceId.trim();
+      accentRegistrations.get(workspaceId)?.remove();
+      accentRegistrations.set(workspaceId, registration);
+      return registration;
     },
   };
   const runtimeRequire = (name: string): unknown => {

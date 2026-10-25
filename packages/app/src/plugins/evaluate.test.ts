@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { useRevealedText } from "@/hooks/use-revealed-text";
+import { createWorkspaceAccentRegistrar } from "@/workspace-accent/plugin-accents";
+import { selectWorkspaceAccentOverride, useWorkspaceAccentStore } from "@/workspace-accent/store";
 import { runPluginClientBundle, type PluginClientRuntime } from "./evaluate";
 
 const runtime = {
@@ -82,6 +84,41 @@ describe("evaluatePluginClientBundle", () => {
       ),
     ).toThrow("Setup failed");
     expect(active).toBe(0);
+  });
+
+  it("releases a superseded workspace accent registration when a plugin replaces it", async () => {
+    useWorkspaceAccentStore.setState({ overridesByKey: {} });
+    const accents = createWorkspaceAccentRegistrar({ serverId: "host", id: "accents" });
+    let released = 0;
+    const plugin = runPluginClientBundle(
+      "accents",
+      bundle(`
+        for (const color of ["teal", "red", "blue", "amber"]) {
+          plugin.setWorkspaceAccent({ workspaceId: "w1", color });
+        }
+      `),
+      {
+        ...runtime,
+        setWorkspaceAccent(contribution) {
+          const registration = accents.set(contribution);
+          return {
+            update: registration.update,
+            remove() {
+              released++;
+              registration.remove();
+            },
+          };
+        },
+      },
+    );
+    // Only the live registration stays tracked; the three it replaced were released on the spot.
+    expect(released).toBe(3);
+    expect(selectWorkspaceAccentOverride(useWorkspaceAccentStore.getState(), "host:w1")).toBe(
+      "amber",
+    );
+    await plugin.cleanup();
+    expect(released).toBe(4);
+    expect(selectWorkspaceAccentOverride(useWorkspaceAccentStore.getState(), "host:w1")).toBeNull();
   });
 
   it("releases workspace accents on cleanup and refuses new ones after", async () => {

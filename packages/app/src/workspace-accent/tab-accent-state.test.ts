@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { StateStorage } from "zustand/middleware";
 import { createWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import {
   bindTabAccentPruning,
   createWorkspaceTabAccentStore,
@@ -247,5 +248,188 @@ describe("reload reconciliation", () => {
       .toEqual({
         [WORKSPACE]: { [terminalTab]: "red" },
       });
+  });
+});
+
+describe("a tab whose id changes", () => {
+  async function boundStores() {
+    const layout = createWorkspaceLayoutStore(undefined, memoryStorage());
+    await layout.persist.rehydrate();
+    const accents = createWorkspaceTabAccentStore(memoryStorage());
+    await accents.persist.rehydrate();
+    bindTabAccentPruning(layout, accents);
+    return { layout, accents };
+  }
+
+  type Stores = Awaited<ReturnType<typeof boundStores>>;
+
+  function open(layout: Stores["layout"], target: WorkspaceTabTarget, intent: "reveal" | "new") {
+    const tabId = layout.getState().openTab({ workspaceKey: KEY, target, intent });
+    if (!tabId) throw new Error("open failed");
+    return tabId;
+  }
+
+  const AGENT: WorkspaceTabTarget = { kind: "agent", agentId: "agent-1" };
+  const SNAPSHOT = {
+    agentsHydrated: true,
+    terminalsHydrated: true,
+    activeAgentIds: ["agent-1"],
+    autoOpenAgentIds: ["agent-1"],
+    standaloneTerminalIds: [] as string[],
+  };
+
+  /** An agent tab with its canonical id, and a draft-origin tab for the same agent. */
+  function openAgentAndDraftOriginDuplicate(layout: Stores["layout"]) {
+    const keeperTabId = open(layout, AGENT, "reveal");
+    const duplicateTabId = open(layout, { kind: "draft", draftId: "d1" }, "reveal");
+    layout.getState().replaceTab(KEY, duplicateTabId, AGENT);
+    return { keeperTabId, duplicateTabId };
+  }
+
+  function agentTabIds(layout: Stores["layout"]): string[] {
+    return layout
+      .getState()
+      .getWorkspaceTabs(KEY)
+      .filter((tab) => tab.target.kind === "agent")
+      .map((tab) => tab.tabId);
+  }
+
+  it("replacing an agent tab with a draft: keeps the color on the draft tab it becomes", async () => {
+    const { layout, accents } = await boundStores();
+    const agentTabId = open(layout, AGENT, "reveal");
+    accents.getState().setTabAccent(KEY, agentTabId, "red");
+
+    const draftTabId = layout
+      .getState()
+      .replaceTab(KEY, agentTabId, { kind: "draft", draftId: "d1" });
+
+    expect(draftTabId).not.toBe(agentTabId);
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [draftTabId!]: "red" } });
+  });
+
+  it("replacing an agent tab with a draft: leaves other tabs' colors alone", async () => {
+    const { layout, accents } = await boundStores();
+    const agentTabId = open(layout, AGENT, "reveal");
+    const terminalTabId = open(layout, { kind: "terminal", terminalId: "t1" }, "reveal");
+    accents.getState().setTabAccent(KEY, terminalTabId, "blue");
+
+    layout.getState().replaceTab(KEY, agentTabId, { kind: "draft", draftId: "d1" });
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [terminalTabId]: "blue" } });
+  });
+
+  it("replacing an agent tab with a draft: applies the move that was made while the stored colors were still loading", async () => {
+    const storage = deferredStorage();
+    const accents = createWorkspaceTabAccentStore(storage);
+    const layout = createWorkspaceLayoutStore(undefined, memoryStorage());
+    await layout.persist.rehydrate();
+    bindTabAccentPruning(layout, accents);
+    const agentTabId = open(layout, AGENT, "reveal");
+    accents.getState().setTabAccent(KEY, agentTabId, "red");
+
+    const draftTabId = layout
+      .getState()
+      .replaceTab(KEY, agentTabId, { kind: "draft", draftId: "d1" });
+    storage.release();
+    await hydrated(accents);
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [draftTabId!]: "red" } });
+  });
+
+  it("a draft that starts an agent: keeps its id and its color", async () => {
+    const { layout, accents } = await boundStores();
+    const draftTabId = open(layout, { kind: "draft", draftId: "d1" }, "reveal");
+    accents.getState().setTabAccent(KEY, draftTabId, "red");
+
+    const agentTabId = layout.getState().replaceTab(KEY, draftTabId, AGENT);
+
+    expect(agentTabId).toBe(draftTabId);
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [draftTabId]: "red" } });
+  });
+
+  it("a duplicate tab for the same agent folding into the canonical one: gives an uncolored canonical tab the duplicate's color", async () => {
+    const { layout, accents } = await boundStores();
+    const { keeperTabId, duplicateTabId } = openAgentAndDraftOriginDuplicate(layout);
+    accents.getState().setTabAccent(KEY, duplicateTabId, "red");
+
+    layout.getState().reconcileTabs(KEY, SNAPSHOT);
+
+    expect(agentTabIds(layout)).toEqual([keeperTabId]);
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [keeperTabId]: "red" } });
+  });
+
+  it("a duplicate tab for the same agent folding into the canonical one: lets a colored canonical tab keep its own color", async () => {
+    const { layout, accents } = await boundStores();
+    const { keeperTabId, duplicateTabId } = openAgentAndDraftOriginDuplicate(layout);
+    accents.getState().setTabAccent(KEY, duplicateTabId, "red");
+    accents.getState().setTabAccent(KEY, keeperTabId, "blue");
+
+    layout.getState().reconcileTabs(KEY, SNAPSHOT);
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [keeperTabId]: "blue" } });
+  });
+
+  it("a duplicate tab for the same agent folding into the canonical one: keeps the canonical tab's color when the duplicate has none", async () => {
+    const { layout, accents } = await boundStores();
+    const { keeperTabId } = openAgentAndDraftOriginDuplicate(layout);
+    accents.getState().setTabAccent(KEY, keeperTabId, "blue");
+
+    layout.getState().reconcileTabs(KEY, SNAPSHOT);
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [keeperTabId]: "blue" } });
+  });
+
+  it("the layout store's notification: still changes the layout when a listener throws, and tells the listeners after it", async () => {
+    const { layout, accents } = await boundStores();
+    const heard: string[] = [];
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    layout.onTabMerged(() => {
+      throw new Error("listener failed");
+    });
+    layout.onTabMerged((_workspaceKey, from, into) => heard.push(`${from}>${into}`));
+    const agentTabId = open(layout, AGENT, "reveal");
+    accents.getState().setTabAccent(KEY, agentTabId, "red");
+
+    const draftTabId = layout
+      .getState()
+      .replaceTab(KEY, agentTabId, { kind: "draft", draftId: "d1" });
+
+    const tabIds = layout
+      .getState()
+      .getWorkspaceTabs(KEY)
+      .map((tab) => tab.tabId);
+    expect(tabIds).toContain(draftTabId);
+    expect(tabIds).not.toContain(agentTabId);
+    expect(heard).toEqual([`${agentTabId}>${draftTabId}`]);
+    expect(logged).toHaveBeenCalledTimes(1);
+    logged.mockRestore();
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [draftTabId!]: "red" } });
+  });
+
+  it("the layout store's notification: lets a listener unsubscribe another during dispatch", async () => {
+    const { layout } = await boundStores();
+    const heard: string[] = [];
+    const stopSecond = layout.onTabMerged(() => {});
+    layout.onTabMerged(() => {
+      heard.push("first");
+      stopSecond();
+    });
+    layout.onTabMerged(() => heard.push("third"));
+    const agentTabId = open(layout, AGENT, "reveal");
+
+    layout.getState().replaceTab(KEY, agentTabId, { kind: "draft", draftId: "d1" });
+
+    expect(heard).toEqual(["first", "third"]);
+  });
+
+  it("the layout store's notification: does not fire for a replacement that keeps the tab id", async () => {
+    const { layout } = await boundStores();
+    const heard: string[] = [];
+    layout.onTabMerged((_workspaceKey, from) => heard.push(from));
+    const draftTabId = open(layout, { kind: "draft", draftId: "d1" }, "reveal");
+
+    layout.getState().replaceTab(KEY, draftTabId, AGENT);
+
+    expect(heard).toEqual([]);
   });
 });

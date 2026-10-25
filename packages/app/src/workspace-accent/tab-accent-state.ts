@@ -30,43 +30,59 @@ interface WorkspaceTabAccentState {
 
 const NO_ACCENTS: Readonly<Record<string, WorkspaceAccent>> = Object.freeze({});
 
+type AccentsByWorkspace = Record<string, Record<string, string>>;
+
 export function createWorkspaceTabAccentStore(storage: StateStorage) {
+  // Edits made while a read of the stored colors is pending. Hydration replaces the whole map, so
+  // it replays these over what it loaded; otherwise a color chosen or a tab closed in that window
+  // is overwritten by the stored snapshot, and the write for it was already suppressed.
+  let editsDuringHydration: ((accents: AccentsByWorkspace) => AccentsByWorkspace)[] = [];
+  let storeApi: {
+    setState: (
+      update: (state: WorkspaceTabAccentState) => Partial<WorkspaceTabAccentState>,
+    ) => void;
+  } | null = null;
   return create<WorkspaceTabAccentState>()(
     persist<WorkspaceTabAccentState, [], [], z.infer<typeof TabAccentPersistedSchema>>(
-      (set) => ({
-        accentsByWorkspace: {},
-        setTabAccent: (workspaceKey, tabId, accent) =>
+      (set, _get, api) => {
+        storeApi = api;
+        const edit = (apply: (accents: AccentsByWorkspace) => AccentsByWorkspace) => {
+          if (!api.persist.hasHydrated()) editsDuringHydration.push(apply);
           set((state) => {
-            const current = state.accentsByWorkspace[workspaceKey] ?? {};
-            if ((current[tabId] ?? null) === accent) return state;
-            const { [tabId]: _removed, ...rest } = current;
-            return {
-              accentsByWorkspace: withWorkspace(
-                state.accentsByWorkspace,
+            const next = apply(state.accentsByWorkspace);
+            return next === state.accentsByWorkspace ? state : { accentsByWorkspace: next };
+          });
+        };
+        return {
+          accentsByWorkspace: {},
+          setTabAccent: (workspaceKey, tabId, accent) =>
+            edit((accentsByWorkspace) => {
+              const current = accentsByWorkspace[workspaceKey] ?? {};
+              if ((current[tabId] ?? null) === accent) return accentsByWorkspace;
+              const { [tabId]: _removed, ...rest } = current;
+              return withWorkspace(
+                accentsByWorkspace,
                 workspaceKey,
                 accent ? { ...rest, [tabId]: accent } : rest,
-              ),
-            };
-          }),
-        removeTabs: (workspaceKey, tabIds) =>
-          set((state) => {
-            const current = state.accentsByWorkspace[workspaceKey];
-            if (!current || !tabIds.some((tabId) => tabId in current)) return state;
-            const rest = Object.fromEntries(
-              Object.entries(current).filter(([tabId]) => !tabIds.includes(tabId)),
-            );
-            return {
-              accentsByWorkspace: withWorkspace(state.accentsByWorkspace, workspaceKey, rest),
-            };
-          }),
-        purgeWorkspace: (workspaceKey) =>
-          set((state) => {
-            if (!(workspaceKey in state.accentsByWorkspace)) return state;
-            return {
-              accentsByWorkspace: withWorkspace(state.accentsByWorkspace, workspaceKey, {}),
-            };
-          }),
-      }),
+              );
+            }),
+          removeTabs: (workspaceKey, tabIds) =>
+            edit((accentsByWorkspace) => {
+              const current = accentsByWorkspace[workspaceKey];
+              if (!current || !tabIds.some((tabId) => tabId in current)) return accentsByWorkspace;
+              const rest = Object.fromEntries(
+                Object.entries(current).filter(([tabId]) => !tabIds.includes(tabId)),
+              );
+              return withWorkspace(accentsByWorkspace, workspaceKey, rest);
+            }),
+          purgeWorkspace: (workspaceKey) =>
+            edit((accentsByWorkspace) =>
+              workspaceKey in accentsByWorkspace
+                ? withWorkspace(accentsByWorkspace, workspaceKey, {})
+                : accentsByWorkspace,
+            ),
+        };
+      },
       {
         name: "workspace-tab-accent-state",
         version: 1,
@@ -74,10 +90,25 @@ export function createWorkspaceTabAccentStore(storage: StateStorage) {
         partialize: (state) => ({ accentsByWorkspace: state.accentsByWorkspace }),
         merge: (persistedState, currentState) => {
           const result = TabAccentPersistedSchema.safeParse(persistedState);
+          const stored = result.success ? (result.data.accentsByWorkspace ?? {}) : {};
           return {
             ...currentState,
-            accentsByWorkspace: result.success ? (result.data.accentsByWorkspace ?? {}) : {},
+            accentsByWorkspace: editsDuringHydration.reduce(
+              (accents, apply) => apply(accents),
+              stored,
+            ),
           };
+        },
+        onRehydrateStorage: () => (_state, error) => {
+          if (error) return;
+          const replayed = editsDuringHydration.length > 0;
+          editsDuringHydration = [];
+          // The write for those edits was suppressed while the read was pending; save the result.
+          if (replayed) {
+            storeApi?.setState((state) => ({
+              accentsByWorkspace: { ...state.accentsByWorkspace },
+            }));
+          }
         },
       },
     ),
@@ -108,16 +139,27 @@ export function readTabAccents(
 
 export const useWorkspaceTabAccentStore = createWorkspaceTabAccentStore(AsyncStorage);
 
-// A closed tab or a purged workspace takes its color with it. The layout store has several
-// closing paths (menu, bulk close, agent archive, workspace archive); watching its state covers
-// them all. Only a tab seen in the previous state is pruned, so the layout store hydrating or
-// reconciling later never costs a color.
-useWorkspaceLayoutStore.subscribe((state, previous) => {
-  if (!useWorkspaceLayoutStore.persist.hasHydrated()) return;
-  const { closedTabs, removedWorkspaces } = findClosedTabs(previous, state);
-  const store = useWorkspaceTabAccentStore.getState();
-  for (const workspaceKey of removedWorkspaces) store.purgeWorkspace(workspaceKey);
-  for (const [workspaceKey, tabIds] of Object.entries(closedTabs)) {
-    store.removeTabs(workspaceKey, tabIds);
-  }
-});
+type TabAccentStore = ReturnType<typeof createWorkspaceTabAccentStore>;
+type LayoutStore = Pick<typeof useWorkspaceLayoutStore, "subscribe" | "getState" | "persist">;
+
+/**
+ * A closed tab or a purged workspace takes its color with it. The layout store has several
+ * closing paths (menu, bulk close, agent archive, workspace archive); watching its state covers
+ * them all. Only a tab seen in the previous state is pruned, so the layout store hydrating or
+ * reconciling later never costs a color.
+ */
+export function bindTabAccentPruning(layout: LayoutStore, accents: TabAccentStore): () => void {
+  const unsubscribe = layout.subscribe((state, previous) => {
+    if (!layout.persist.hasHydrated()) return;
+    const { closedTabs, removedWorkspaces } = findClosedTabs(previous, state);
+    const store = accents.getState();
+    for (const workspaceKey of removedWorkspaces) store.purgeWorkspace(workspaceKey);
+    for (const [workspaceKey, tabIds] of Object.entries(closedTabs)) {
+      store.removeTabs(workspaceKey, tabIds);
+    }
+  });
+
+  return unsubscribe;
+}
+
+bindTabAccentPruning(useWorkspaceLayoutStore, useWorkspaceTabAccentStore);

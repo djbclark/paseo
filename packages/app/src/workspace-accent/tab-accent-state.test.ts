@@ -20,6 +20,39 @@ function blob(state: unknown): string {
   return JSON.stringify({ state, version: 1 });
 }
 
+const ACCENT_BLOB = "workspace-tab-accent-state";
+
+/** Storage whose first read stays pending until `release()`, like a slow AsyncStorage. */
+function deferredStorage(initial: Record<string, string> = {}) {
+  const storage = memoryStorage(initial);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    ...storage,
+    getItem: async (name: string) => {
+      await gate;
+      return storage.getItem(name);
+    },
+    release,
+  };
+}
+
+function hydrated(store: {
+  persist: { hasHydrated(): boolean; onFinishHydration(cb: () => void): unknown };
+}) {
+  return new Promise<void>((resolve) => {
+    if (store.persist.hasHydrated()) resolve();
+    else store.persist.onFinishHydration(() => resolve());
+  });
+}
+
+function stored(storage: { values: Map<string, string> }) {
+  const raw = storage.values.get(ACCENT_BLOB);
+  return raw ? JSON.parse(raw).state.accentsByWorkspace : undefined;
+}
+
 describe("workspace tab accent store", () => {
   it("sets, replaces and clears a tab's color", () => {
     const store = createWorkspaceTabAccentStore(memoryStorage());
@@ -68,5 +101,44 @@ describe("workspace tab accent store", () => {
     await store.persist.rehydrate();
     expect(store.getState().accentsByWorkspace).toEqual({});
     expect(storage.values.has("workspace-tab-accent-state")).toBe(true);
+  });
+});
+
+describe("hydration racing with edits", () => {
+  it("keeps a color chosen while the first read is pending, and saves it", async () => {
+    const storage = deferredStorage({
+      [ACCENT_BLOB]: blob({ accentsByWorkspace: { [KEY]: { a: "red" } } }),
+    });
+    const store = createWorkspaceTabAccentStore(storage);
+    store.getState().setTabAccent(KEY, "b", "blue");
+    storage.release();
+    await hydrated(store);
+    expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { a: "red", b: "blue" } });
+    await expect.poll(() => stored(storage)).toEqual({ [KEY]: { a: "red", b: "blue" } });
+  });
+
+  it("keeps a color chosen on a fresh install while the first read is pending", async () => {
+    const storage = deferredStorage();
+    const store = createWorkspaceTabAccentStore(storage);
+    store.getState().setTabAccent(KEY, "b", "blue");
+    storage.release();
+    await hydrated(store);
+    expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { b: "blue" } });
+    await expect.poll(() => stored(storage)).toEqual({ [KEY]: { b: "blue" } });
+  });
+
+  it("does not restore a color for a tab closed while the first read is pending", async () => {
+    const storage = deferredStorage({
+      [ACCENT_BLOB]: blob({
+        accentsByWorkspace: { [KEY]: { a: "red", b: "blue" }, "o:w": { c: "teal" } },
+      }),
+    });
+    const store = createWorkspaceTabAccentStore(storage);
+    store.getState().removeTabs(KEY, ["a"]);
+    store.getState().purgeWorkspace("o:w");
+    storage.release();
+    await hydrated(store);
+    expect(store.getState().accentsByWorkspace).toEqual({ [KEY]: { b: "blue" } });
+    await expect.poll(() => stored(storage)).toEqual({ [KEY]: { b: "blue" } });
   });
 });

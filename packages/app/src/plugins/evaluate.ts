@@ -509,10 +509,21 @@ export function runPluginClientBundle(
     },
     setWorkspaceAccent(contribution) {
       if (stopped) throw new Error("Plugin has stopped");
-      const registration = track(runtime.setWorkspaceAccent(contribution));
+      const tracked = track(runtime.setWorkspaceAccent(contribution));
+      const workspaceId = contribution.workspaceId.trim();
+      // Only the live registration per workspace stays in the map: removing a handle drops its
+      // entry, unless a newer registration already replaced it.
+      const registration = {
+        update: tracked.update,
+        remove: () => {
+          tracked.remove();
+          if (accentRegistrations.get(workspaceId) === registration) {
+            accentRegistrations.delete(workspaceId);
+          }
+        },
+      };
       // A later call replaces the workspace's color. Release the registration it supersedes so
       // a plugin that re-applies its color on every event does not accumulate one per call.
-      const workspaceId = contribution.workspaceId.trim();
       accentRegistrations.get(workspaceId)?.remove();
       accentRegistrations.set(workspaceId, registration);
       return registration;

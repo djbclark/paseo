@@ -1,3 +1,5 @@
+import v8 from "node:v8";
+import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import { useRevealedText } from "@/hooks/use-revealed-text";
 import { createWorkspaceAccentRegistrar } from "@/workspace-accent/plugin-accents";
@@ -119,6 +121,59 @@ describe("evaluatePluginClientBundle", () => {
     await plugin.cleanup();
     expect(released).toBe(4);
     expect(selectWorkspaceAccentOverride(useWorkspaceAccentStore.getState(), "host:w1")).toBeNull();
+  });
+
+  it("keeps the newer registration tracked when a superseded handle is removed", async () => {
+    let released = 0;
+    const plugin = runPluginClientBundle(
+      "accents",
+      bundle(`
+        const first = plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" });
+        plugin.setWorkspaceAccent({ workspaceId: "w1", color: "red" });
+        first.remove();
+        plugin.setWorkspaceAccent({ workspaceId: "w1", color: "blue" });
+      `),
+      {
+        ...runtime,
+        setWorkspaceAccent() {
+          return {
+            update() {},
+            remove() {
+              released++;
+            },
+          };
+        },
+      },
+    );
+    // teal released by red, red released by blue; removing the stale teal handle changed nothing.
+    expect(released).toBe(2);
+    await plugin.cleanup();
+    expect(released).toBe(3);
+  });
+
+  it("does not keep a removed workspace accent registration alive", async () => {
+    // The evaluator keys live registrations by workspace id; a removed one must leave that map,
+    // or a plugin coloring workspaces that later disappear keeps one dead handle per id.
+    v8.setFlagsFromString("--expose_gc");
+    const collect = vm.runInNewContext("gc") as () => void;
+    const plugin = runPluginClientBundle(
+      "accents",
+      bundle(`
+        globalThis.__accentHandle = plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" });
+      `),
+      runtime,
+    );
+    const ref = (() => {
+      const handle = Reflect.get(globalThis, "__accentHandle") as { remove(): void };
+      handle.remove();
+      Reflect.deleteProperty(globalThis, "__accentHandle");
+      return new WeakRef(handle);
+    })();
+    // A WeakRef keeps its target alive until the current job ends; a macrotask turn ends it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    collect();
+    expect(ref.deref()).toBeUndefined();
+    await plugin.cleanup();
   });
 
   it("releases workspace accents on cleanup and refuses new ones after", async () => {

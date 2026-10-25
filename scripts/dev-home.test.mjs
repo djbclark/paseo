@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -76,5 +85,23 @@ test("rewriting the config leaves no temporary file behind", () => {
     configureDevDaemonConfig({ home, listen: "127.0.0.1:6768" });
 
     assert.deepEqual(readdirSync(home), ["config.json"]);
+  });
+});
+
+test("the config stays private: an existing 0600 config is not loosened and a new one is 0600", () => {
+  withTempHome((home) => {
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.json"), JSON.stringify({ version: 1 }));
+    chmodSync(join(home, "config.json"), 0o600);
+
+    configureDevDaemonConfig({ home, listen: "127.0.0.1:6768" });
+
+    assert.equal(statSync(join(home, "config.json")).mode & 0o777, 0o600);
+  });
+
+  withTempHome((home) => {
+    configureDevDaemonConfig({ home, listen: "127.0.0.1:6768" });
+
+    assert.equal(statSync(join(home, "config.json")).mode & 0o777, 0o600);
   });
 });

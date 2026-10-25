@@ -67,27 +67,9 @@ configure_dev_daemon_config() {
   # A dev home is a second Paseo home on the same machine. With no agents.skills.selection the
   # daemon defaults to mode "all" and syncs its bundled orchestration skills into the real
   # ~/.agents/skills, ~/.claude/skills and ~/.codex/skills, overwriting whatever those link to.
-  # Pin an empty custom selection so a dev daemon never writes outside its own home, whether
-  # the config was created here or copied from a real home.
-  node -e '
-const fs = require("fs");
-const [path, listen] = [process.argv[1], process.argv[2]];
-let cfg = {};
-try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
-cfg.version = cfg.version || 1;
-if (listen) {
-  cfg.daemon = cfg.daemon || {};
-  cfg.daemon.listen = listen;
-  cfg.daemon.cors = cfg.daemon.cors || {};
-  cfg.daemon.cors.allowedOrigins = ["*"];
-}
-cfg.agents = cfg.agents || {};
-cfg.agents.skills = cfg.agents.skills || {};
-cfg.agents.skills.selection = { mode: "custom", skills: [] };
-const tmp = `${path}.tmp.${process.pid}`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
-fs.renameSync(tmp, path);
-' "$PASEO_HOME/config.json" "${PASEO_LISTEN:-}"
+  # Pin an empty custom selection so a dev daemon never syncs skills outside its own home,
+  # whether the config was created here or copied from a real home.
+  node "$(dirname "${BASH_SOURCE[0]}")/dev-home-config.mjs" "$PASEO_HOME/config.json" "${PASEO_LISTEN:-}"
 }
 
 resolve_dev_daemon_endpoint() {

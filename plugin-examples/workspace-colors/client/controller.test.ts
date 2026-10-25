@@ -1,5 +1,12 @@
-import type { PluginButton, PluginClientContext } from "@getpaseo/plugin/client";
+import type {
+  PluginButton,
+  PluginClientContext,
+  PluginHeaderButtonContribution,
+  PluginText,
+} from "@getpaseo/plugin/client";
 import { describe, expect, it, vi, type Mock } from "vitest";
+import { PluginButtonStore } from "../../../packages/app/src/plugins/buttons/model";
+import type { InstalledPlugin } from "../../../packages/app/src/plugins/types";
 import contribute from "../index.client";
 import { startWorkspaceColors } from "./controller";
 
@@ -78,6 +85,11 @@ function fakeClient(initial: unknown) {
     failNextWrite: () => void (failNextWrite = true),
     setStored: (value: unknown) => void (stored = value),
     snapshot: (entries: unknown[]) => workspaceObserver?.snapshot({ entries }),
+    upsertWorkspace: (workspace: Record<string, unknown>) =>
+      workspaceObserver?.update({
+        type: "workspace_update",
+        payload: { kind: "upsert", workspace },
+      }),
     removeWorkspace: (id: string) =>
       workspaceObserver?.update({ type: "workspace_update", payload: { kind: "remove", id } }),
     settingsChanged: (settingsId = "colors") =>
@@ -164,5 +176,32 @@ describe("workspace colors", () => {
       { revision: "2", values: settings({ workspaces: { w1: "teal" } }) },
     ]);
     expect(fake.raw.setWorkspaceAccent).toHaveBeenCalledWith({ workspaceId: "w1", color: "teal" });
+  });
+
+  it("keeps an open palette menu open across unrelated workspace events", async () => {
+    const { fake } = await started(settings({}));
+    const store = new PluginButtonStore({ parseIcon: (icon) => icon });
+    const plugin = {
+      id: "workspace-colors",
+      serverId: "host",
+      i18n: { subscribe: () => () => {}, resolve: (text: string) => text },
+    } as unknown as InstalledPlugin;
+    // Re-register the workspaces' buttons on the real store, as the app does.
+    Object.assign(fake.raw, {
+      addHeaderButton: (input: PluginHeaderButtonContribution<PluginText>) =>
+        store.addHeaderButton(plugin, input),
+    });
+    fake.snapshot([]);
+    fake.snapshot(entries);
+    const key = store.getSnapshot().find((entry) => entry.context.workspaceId === "w1")?.key;
+    if (key === undefined) throw new Error("w1 has no button");
+    store.setOpen(key, true);
+    expect(store.getSnapshot().find((entry) => entry.key === key)?.open).toBe(true);
+
+    // An agent in another workspace changes status; nothing about w1's palette changed.
+    fake.upsertWorkspace({ id: "w2", projectId: "p2", labels: ["Urgent"], status: "running" });
+    fake.upsertWorkspace({ id: "w1", projectId: "p1", labels: [], status: "running" });
+
+    expect(store.getSnapshot().find((entry) => entry.key === key)?.open).toBe(true);
   });
 });

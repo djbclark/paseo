@@ -34,7 +34,9 @@ export function startWorkspaceColors(client: PluginClientContext): () => void {
     string,
     { color: PluginIdentityColor; registration: PluginWorkspaceAccentRegistration }
   >();
-  const buttons = new Map<string, PluginButtonRegistration>();
+  // The registration and the inputs its menu was built from. Updating a button with a new menu
+  // closes it if open, so it is rebuilt only when those inputs change.
+  const buttons = new Map<string, { registration: PluginButtonRegistration; inputs: string }>();
   const releases: (() => void)[] = [];
   let settings = EMPTY;
   let reads = 0;
@@ -158,14 +160,26 @@ export function startWorkspaceColors(client: PluginClientContext): () => void {
         current.registration.update({ color });
         current.color = color;
       }
-      const button = buildButton(workspace);
+      const inputs = [
+        workspace.id,
+        workspace.projectId,
+        settings.workspaces[workspace.id] ?? "",
+        settings.projects[workspace.projectId] ?? "",
+      ].join("\0");
       const existing = buttons.get(workspace.id);
-      if (existing) existing.update(button);
-      else
-        buttons.set(
-          workspace.id,
-          client.addHeaderButton({ id: "workspace-color", workspaceId: workspace.id, button }),
-        );
+      if (!existing) {
+        buttons.set(workspace.id, {
+          inputs,
+          registration: client.addHeaderButton({
+            id: "workspace-color",
+            workspaceId: workspace.id,
+            button: buildButton(workspace),
+          }),
+        });
+      } else if (existing.inputs !== inputs) {
+        existing.registration.update(buildButton(workspace));
+        existing.inputs = inputs;
+      }
     }
     for (const [id, accent] of accents) {
       if (workspaces.has(id)) continue;
@@ -174,7 +188,7 @@ export function startWorkspaceColors(client: PluginClientContext): () => void {
     }
     for (const [id, button] of buttons) {
       if (workspaces.has(id)) continue;
-      button.remove();
+      button.registration.remove();
       buttons.delete(id);
     }
   }
@@ -232,7 +246,7 @@ export function startWorkspaceColors(client: PluginClientContext): () => void {
     stopped = true;
     for (const release of releases) release();
     for (const accent of accents.values()) accent.registration.remove();
-    for (const button of buttons.values()) button.remove();
+    for (const button of buttons.values()) button.registration.remove();
     accents.clear();
     buttons.clear();
     workspaces.clear();

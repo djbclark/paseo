@@ -6,7 +6,7 @@ import { createValidatedPersistStorage } from "@/storage/validated-persist-stora
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
 import { IDENTITY_COLOR_NAMES } from "@/styles/identity-colors";
 import type { WorkspaceAccent } from "./model";
-import { findClosedTabs } from "./tab-accent-prune";
+import { findClosedTabs, findOrphanedTabs } from "./tab-accent-prune";
 
 /**
  * A tab's color lives here, not on `WorkspaceTab`: the layout schema is strict and a blob that
@@ -147,6 +147,10 @@ type LayoutStore = Pick<typeof useWorkspaceLayoutStore, "subscribe" | "getState"
  * closing paths (menu, bulk close, agent archive, workspace archive); watching its state covers
  * them all. Only a tab seen in the previous state is pruned, so the layout store hydrating or
  * reconciling later never costs a color.
+ *
+ * That watch never sees a tab that was gone before this process started (the layout does not
+ * persist commit diffs, and a color can outlive its tab across builds), so once both stores have
+ * hydrated, colors for tabs the restored layout does not hold are dropped in one pass.
  */
 export function bindTabAccentPruning(layout: LayoutStore, accents: TabAccentStore): () => void {
   const unsubscribe = layout.subscribe((state, previous) => {
@@ -159,7 +163,27 @@ export function bindTabAccentPruning(layout: LayoutStore, accents: TabAccentStor
     }
   });
 
-  return unsubscribe;
+  let disposed = false;
+  const stopWaiting: (() => void)[] = [];
+  const whenHydrated = (store: LayoutStore | TabAccentStore, then: () => void) => {
+    if (store.persist.hasHydrated()) then();
+    else stopWaiting.push(store.persist.onFinishHydration(then));
+  };
+  whenHydrated(layout, () =>
+    whenHydrated(accents, () => {
+      if (disposed) return;
+      const orphans = findOrphanedTabs(accents.getState().accentsByWorkspace, layout.getState());
+      for (const [workspaceKey, tabIds] of Object.entries(orphans)) {
+        accents.getState().removeTabs(workspaceKey, tabIds);
+      }
+    }),
+  );
+
+  return () => {
+    disposed = true;
+    unsubscribe();
+    for (const stop of stopWaiting) stop();
+  };
 }
 
 bindTabAccentPruning(useWorkspaceLayoutStore, useWorkspaceTabAccentStore);

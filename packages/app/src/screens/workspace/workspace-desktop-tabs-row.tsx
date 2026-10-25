@@ -586,8 +586,8 @@ export interface WorkspaceDesktopTabsRowProps {
   onSplitRight?: () => void;
   onSplitDown?: () => void;
   /**
-   * The project icon sits at the start of one tab row per workspace; a split layout picks which.
-   * Unset: the icon shows unless focus mode is on.
+   * The project icon sits at the start of one tab row per workspace; the caller picks which: a
+   * split layout's chosen pane, or the single-pane fallback. Unset: no icon (the explorer sidebar).
    */
   showProjectIcon?: boolean;
   focusModeEnabled: boolean;
@@ -1101,13 +1101,10 @@ function ResolvedWorkspaceDesktopTabsRow({
   onTogglePaneMaximized,
   onSplitRight,
   onSplitDown,
-  showProjectIcon: showProjectIconProp,
+  showProjectIcon = false,
   focusModeEnabled,
   onExitFocusMode,
 }: ResolvedWorkspaceDesktopTabsRowProps) {
-  // Left unset, the row is the workspace's only one (the single-pane fallback on tablets, where the
-  // compact header's project row is off), so it carries the icon unless focus mode hides the chrome.
-  const showProjectIcon = showProjectIconProp ?? !focusModeEnabled;
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
   const newTabKeys = useShortcutKeys("workspace-tab-new");

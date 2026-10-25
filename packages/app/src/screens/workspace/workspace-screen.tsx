@@ -3588,6 +3588,7 @@ function WorkspaceScreenContent({
             onCloseOtherTabs={handleCloseOtherTabs}
             onCreateNewTab={handleCreateNewTab}
             onReorderTabs={handleReorderTabsInFocusedPane}
+            showProjectIcon={!desktopFocusModeEnabled}
             focusModeEnabled={desktopFocusModeEnabled}
             onExitFocusMode={toggleFocusMode}
           />

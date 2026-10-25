@@ -24,11 +24,6 @@ interface WorkspaceTabAccentState {
   /** `serverId:workspaceId` → tab id → color name. */
   accentsByWorkspace: Record<string, Record<string, string>>;
   setTabAccent: (workspaceKey: string, tabId: string, accent: WorkspaceAccent | null) => void;
-  /**
-   * A tab became another or folded into one already open: its color follows. A color the
-   * destination already has wins, so the tab the user lands on keeps the color it showed.
-   */
-  moveTabAccent: (workspaceKey: string, fromTabId: string, intoTabId: string) => void;
   removeTabs: (workspaceKey: string, tabIds: readonly string[]) => void;
   purgeWorkspace: (workspaceKey: string) => void;
 }
@@ -89,19 +84,6 @@ export function createWorkspaceTabAccentStore(storage: StateStorage) {
                 workspaceKey,
                 accent ? { ...rest, [tabId]: accent } : rest,
               );
-            }),
-          moveTabAccent: (workspaceKey, fromTabId, intoTabId) =>
-            edit((accentsByWorkspace) => {
-              const current = accentsByWorkspace[workspaceKey];
-              const moved = current?.[fromTabId];
-              if (!current || moved === undefined || fromTabId === intoTabId) {
-                return accentsByWorkspace;
-              }
-              const { [fromTabId]: _from, ...rest } = current;
-              return withWorkspace(accentsByWorkspace, workspaceKey, {
-                ...rest,
-                [intoTabId]: current[intoTabId] ?? moved,
-              });
             }),
           removeTabs: (workspaceKey, tabIds) =>
             edit((accentsByWorkspace) => {
@@ -180,10 +162,7 @@ export function readTabAccents(
 export const useWorkspaceTabAccentStore = createWorkspaceTabAccentStore(AsyncStorage);
 
 type TabAccentStore = ReturnType<typeof createWorkspaceTabAccentStore>;
-type LayoutStore = Pick<
-  typeof useWorkspaceLayoutStore,
-  "subscribe" | "getState" | "persist" | "onTabMerged"
->;
+type LayoutStore = Pick<typeof useWorkspaceLayoutStore, "subscribe" | "getState" | "persist">;
 
 /**
  * A closed tab or a purged workspace takes its color with it. The layout store has several
@@ -196,9 +175,6 @@ type LayoutStore = Pick<
  * hydrated, colors for tabs the restored layout does not hold are dropped in one pass.
  */
 export function bindTabAccentPruning(layout: LayoutStore, accents: TabAccentStore): () => void {
-  const stopMerges = layout.onTabMerged((workspaceKey, fromTabId, intoTabId) =>
-    accents.getState().moveTabAccent(workspaceKey, fromTabId, intoTabId),
-  );
   const unsubscribe = layout.subscribe((state, previous) => {
     if (!layout.persist.hasHydrated()) return;
     const { closedTabs, removedWorkspaces } = findClosedTabs(previous, state);
@@ -228,7 +204,6 @@ export function bindTabAccentPruning(layout: LayoutStore, accents: TabAccentStor
   return () => {
     disposed = true;
     unsubscribe();
-    stopMerges();
     for (const stop of stopWaiting) stop();
   };
 }

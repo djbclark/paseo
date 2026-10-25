@@ -6,7 +6,7 @@ import type { PaseoApi } from "@getpaseo/client";
 import { expect, test } from "vitest";
 import { PluginRegistry } from "./registry";
 import { createWorkspaceAccentRegistrar } from "@/workspace-accent/plugin-accents";
-import { useWorkspaceAccentStore } from "@/workspace-accent/store";
+import { selectWorkspaceAccentOverride, useWorkspaceAccentStore } from "@/workspace-accent/store";
 
 const audio = { play: async () => 0 };
 
@@ -113,10 +113,32 @@ test("dropping a plugin from the catalog clears the workspace colors it set", as
     `plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" }); return function() {};`,
   );
   h.plugins.installCatalog("host", [colorize], { client: h.client, audio });
-  expect(useWorkspaceAccentStore.getState().overridesByKey["host:w1"]).toEqual([
+  expect(useWorkspaceAccentStore.getState().overridesByKey["host:w1"]).toMatchObject([
     { pluginKey: "host/colors", color: "teal" },
   ]);
 
+  h.plugins.installCatalog("host", [], { client: h.client, audio });
+  await expect.poll(() => useWorkspaceAccentStore.getState().overridesByKey).toEqual({});
+});
+
+test("reloading a plugin keeps the color its replacement set while the old cleanup is still pending", async () => {
+  useWorkspaceAccentStore.setState({ overridesByKey: {} });
+  const h = registry();
+  const colorize = catalog(
+    "colors",
+    `plugin.setWorkspaceAccent({ workspaceId: "w1", color: "teal" }); return function() {};`,
+  );
+  h.plugins.installCatalog("host", [colorize], { client: h.client, audio });
+
+  // The replacement installs synchronously; the old installation's cleanup settles afterwards.
+  h.plugins.installCatalog("host", [colorize], {
+    client: h.client,
+    audio,
+    replacePluginId: "colors",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(selectWorkspaceAccentOverride(useWorkspaceAccentStore.getState(), "host:w1")).toBe("teal");
   h.plugins.installCatalog("host", [], { client: h.client, audio });
   await expect.poll(() => useWorkspaceAccentStore.getState().overridesByKey).toEqual({});
 });

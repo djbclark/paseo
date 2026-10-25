@@ -1473,6 +1473,15 @@ function ResolvedWorkspaceDesktopTabsRow({
       testID="workspace-tabs-row"
       onLayout={handleTabsContainerLayout}
     >
+      {/*
+        First child, so every sibling paints over the tint and the icon, labels and tab marks keep
+        their own colors. A filled chip (active or hovered) is opaque and so is not tinted; that is
+        what lifts it off the tinted rail.
+      */}
+      <WorkspaceAccentChrome
+        accent={onSidebar ? null : workspaceAccent}
+        stripe={Boolean(focusModeEnabled)}
+      />
       <View
         style={styles.tabLabelMeasurements}
         pointerEvents="none"
@@ -1557,10 +1566,6 @@ function ResolvedWorkspaceDesktopTabsRow({
         onSplitRight={onSplitRight}
         onSplitDown={onSplitDown}
         onTogglePaneMaximized={onTogglePaneMaximized}
-      />
-      <WorkspaceAccentChrome
-        accent={onSidebar ? null : workspaceAccent}
-        stripe={Boolean(focusModeEnabled)}
       />
     </View>
   );

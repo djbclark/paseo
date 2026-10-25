@@ -150,4 +150,24 @@ describe("WorkspaceDesktopTabsRow on a wide native layout", () => {
     const row = renderRow({ accent: "teal", focusMode: true });
     expect(row.querySelector('[data-testid="project-icon"]')).toBeNull();
   });
+
+  it("paints the accent tint beneath the row's content", () => {
+    const row = renderRow({ accent: "teal" });
+    const chrome = row.querySelector('[data-testid="workspace-accent-chrome"]');
+    expect(chrome).not.toBeNull();
+    expect(row.firstElementChild).toBe(chrome);
+  });
+
+  it("changes nothing but the tint when only the workspace accent changes", () => {
+    const content = (row: HTMLElement) =>
+      [...row.children]
+        .filter((child) => child.getAttribute("data-testid") !== "workspace-accent-chrome")
+        .map((child) => child.outerHTML);
+    const teal = content(renderRow({ accent: "teal" }));
+    const none = content(renderRow({ accent: null }));
+    const red = content(renderRow({ accent: "red" }));
+    expect(teal.length).toBeGreaterThan(0);
+    expect(none).toEqual(teal);
+    expect(red).toEqual(teal);
+  });
 });

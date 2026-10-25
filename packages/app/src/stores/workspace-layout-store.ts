@@ -1014,11 +1014,19 @@ function advancePanelRevision(
   };
 }
 
+/**
+ * Called when one tab id stops existing because the tab became another, or folded into one that
+ * was already open. Data kept per tab id outside the layout (tab colors) moves to `intoTabId`.
+ * Runs synchronously, before the layout state that drops `fromTabId` is published.
+ */
+type TabMergeListener = (workspaceKey: string, fromTabId: string, intoTabId: string) => void;
+
 export function createWorkspaceLayoutStore(
   ids: WorkspaceLayoutIdSource = defaultWorkspaceLayoutIds,
   storage: StateStorage = AsyncStorage,
 ) {
-  return create<WorkspaceLayoutStore>()(
+  const mergeListeners = new Set<TabMergeListener>();
+  const store = create<WorkspaceLayoutStore>()(
     persist(
       (set, get) => ({
         autoOpenPullRequestTab: (workspaceKey, resolvePlacement) => {
@@ -1647,6 +1655,14 @@ export function createWorkspaceLayoutStore(
           });
           if (!result) {
             return null;
+          }
+
+          // Tells listeners before the layout changes: its subscribers see the old id vanish,
+          // and whatever hangs off that id has to move before they prune it.
+          if (result.tabId !== normalizedTabId) {
+            for (const listener of mergeListeners) {
+              listener(normalizedWorkspaceKey, normalizedTabId, result.tabId);
+            }
           }
 
           set((state) => ({
@@ -2341,6 +2357,13 @@ export function createWorkspaceLayoutStore(
       },
     ),
   );
+  return Object.assign(store, {
+    /** See `TabMergeListener`. Returns the unsubscribe function. */
+    onTabMerged: (listener: TabMergeListener) => {
+      mergeListeners.add(listener);
+      return () => void mergeListeners.delete(listener);
+    },
+  });
 }
 
 export const useWorkspaceLayoutStore = createWorkspaceLayoutStore();

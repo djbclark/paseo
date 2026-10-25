@@ -199,3 +199,68 @@ describe("reload reconciliation", () => {
       });
   });
 });
+
+describe("draft promotion", () => {
+  async function boundStores() {
+    const layout = createWorkspaceLayoutStore(undefined, memoryStorage());
+    await layout.persist.rehydrate();
+    const accents = createWorkspaceTabAccentStore(memoryStorage());
+    await accents.persist.rehydrate();
+    bindTabAccentPruning(layout, accents);
+    return { layout, accents };
+  }
+
+  function openDraft(layout: Awaited<ReturnType<typeof boundStores>>["layout"]): string {
+    const tabId = layout.getState().openTab({
+      workspaceKey: KEY,
+      target: { kind: "draft", draftId: "d1" },
+      intent: "reveal",
+    });
+    if (!tabId) throw new Error("open failed");
+    return tabId;
+  }
+
+  it("moves a draft tab's color to the agent tab it becomes", async () => {
+    const { layout, accents } = await boundStores();
+    const draftTabId = openDraft(layout);
+    accents.getState().setTabAccent(KEY, draftTabId, "red");
+
+    const agentTabId = layout.getState().convertDraftToAgent(KEY, draftTabId, "agent-1");
+
+    expect(agentTabId).toBe("agent_agent-1");
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { "agent_agent-1": "red" } });
+  });
+
+  it("lets the agent tab keep its own color when the draft folds into it", async () => {
+    const { layout, accents } = await boundStores();
+    const draftTabId = openDraft(layout);
+    const agentTabId = layout.getState().openTab({
+      workspaceKey: KEY,
+      target: { kind: "agent", agentId: "agent-1" },
+      intent: "reveal",
+    });
+    if (!agentTabId) throw new Error("open failed");
+    accents.getState().setTabAccent(KEY, draftTabId, "red");
+    accents.getState().setTabAccent(KEY, agentTabId, "blue");
+
+    layout.getState().convertDraftToAgent(KEY, draftTabId, "agent-1");
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [agentTabId]: "blue" } });
+  });
+
+  it("gives the agent tab the draft's color when the draft folds into an uncolored one", async () => {
+    const { layout, accents } = await boundStores();
+    const draftTabId = openDraft(layout);
+    const agentTabId = layout.getState().openTab({
+      workspaceKey: KEY,
+      target: { kind: "agent", agentId: "agent-1" },
+      intent: "reveal",
+    });
+    if (!agentTabId) throw new Error("open failed");
+    accents.getState().setTabAccent(KEY, draftTabId, "red");
+
+    layout.getState().convertDraftToAgent(KEY, draftTabId, "agent-1");
+
+    expect(accents.getState().accentsByWorkspace).toEqual({ [KEY]: { [agentTabId]: "red" } });
+  });
+});

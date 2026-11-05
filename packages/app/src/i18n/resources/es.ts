@@ -2661,6 +2661,12 @@ export const es: TranslationResources = {
         },
         moveUp: "Mover hacia arriba",
         moveDown: "Mover hacia abajo",
+        navLayout: {
+          title: "Diseño del menú",
+          description: "Cómo cabe el menú de la barra lateral en pantallas bajas",
+          scroll: "Desplazar",
+          resizable: "Redimensionable",
+        },
       },
       fonts: {
         title: "Fuentes",

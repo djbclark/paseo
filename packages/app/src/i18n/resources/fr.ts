@@ -2662,6 +2662,12 @@ export const fr: TranslationResources = {
         },
         moveUp: "Monter",
         moveDown: "Descendre",
+        navLayout: {
+          title: "Disposition du menu",
+          description: "Comment le menu de la barre latérale tient sur les petits écrans",
+          scroll: "Défiler",
+          resizable: "Redimensionnable",
+        },
       },
       fonts: {
         title: "Polices",

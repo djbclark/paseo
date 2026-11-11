@@ -1279,6 +1279,11 @@ export const en = {
       closeSidebar: "Close sidebar",
       moreActions: "More actions",
     },
+    nav: {
+      more: "More",
+      moreItems: "More menu items",
+      resize: "Resize menu",
+    },
     footer: {
       usage: "Usage",
     },

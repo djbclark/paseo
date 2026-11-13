@@ -41,13 +41,20 @@ vi.mock("@/components/ui/horizontal-scroll-boundary", () => ({
     rightShadeStyle: {},
   }),
 }));
-vi.mock("@/components/ui/pane-content-toolbar", () => ({
+vi.mock("@/components/ui/pane-content-toolbar", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/ui/pane-content-toolbar")>()),
   paneContentToolbarTrailingPadding: () => 0,
   ToolbarButton: () => null,
   ToolbarControls: () => null,
 }));
-vi.mock("@/components/ui/icon-button-chrome", () => ({ smallIconButtonChromeFrameSize: () => 24 }));
-vi.mock("@/components/ui/control-geometry", () => ({ buttonControlHeight: () => 28 }));
+vi.mock("@/components/ui/icon-button-chrome", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/ui/icon-button-chrome")>()),
+  smallIconButtonChromeFrameSize: () => 24,
+}));
+vi.mock("@/components/ui/control-geometry", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/ui/control-geometry")>()),
+  buttonControlHeight: () => 28,
+}));
 vi.mock("@/components/ui/context-menu", () => ({
   ContextMenu: () => null,
   ContextMenuContent: () => null,

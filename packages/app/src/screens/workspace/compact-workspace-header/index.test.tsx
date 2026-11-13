@@ -46,6 +46,14 @@ vi.mock("@/screens/workspace/workspace-explorer-toggle", () => ({
 vi.mock("@/screens/workspace/workspace-header-project-row", () => ({
   WorkspaceHeaderProjectRow: () => null,
 }));
+vi.mock("@/window-layout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/window-layout")>()),
+  WindowLayoutActions: () => null,
+}));
+vi.mock("@gorhom/portal", () => ({
+  Portal: ({ children }: { children: React.ReactNode }) => children,
+  PortalHost: () => null,
+}));
 vi.mock("./tab-switcher", () => ({ MobileWorkspaceTabSwitcher: () => null }));
 
 let root: Root | null = null;
@@ -71,6 +79,9 @@ function header(accent: "teal" | "red" | null) {
       subtitle="project"
       isSubtitleDistinct
       accent={accent}
+      headerVariant="compact"
+      actionsActive={false}
+      tabSwitcher={null}
       onToggleExplorer={NOOP}
       explorerToggleLabel="Explorer"
       explorerToggleAccessibilityState={COLLAPSED}

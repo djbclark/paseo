@@ -163,7 +163,8 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   window.addEventListener("dblclick", click, options);
   window.addEventListener("dragstart", dragStart, options);
   window.addEventListener("pointercancel", cancel, options);
-  window.addEventListener("blur", cancel, options);
+  // Element blur does not bubble; capture would cancel every drag leaving the composer.
+  window.addEventListener("blur", cancel, { signal: listeners.signal });
   document.addEventListener("visibilitychange", visibilityChanged, options);
 
   return () => {

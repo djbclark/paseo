@@ -916,6 +916,9 @@ describe("Shift-drag selection controller", () => {
     start(label);
     expect(getComputedStyle(label).userSelect).toBe("text");
     expect(press).not.toHaveBeenCalled();
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.dispatchEvent(new FocusEvent("blur"));
     selectText(label, 0, textNode(label).length);
     window.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift" }));
     finish(label);

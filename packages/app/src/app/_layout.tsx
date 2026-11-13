@@ -1,4 +1,5 @@
 import { useHardwareKeyboardPresent } from "@/keyboard";
+import { SelectionCopyBootstrap } from "@/selection-copy/bootstrap";
 import {
   WindowLayoutProvider,
   WindowLayoutActionsHost,
@@ -909,6 +910,7 @@ function AppShell() {
   return (
     <MobilePanelsProvider>
       <HorizontalScrollProvider>
+        <SelectionCopyBootstrap />
         <OpenProjectListener />
         <AgentNavigationListener />
         <AppWithSidebar>

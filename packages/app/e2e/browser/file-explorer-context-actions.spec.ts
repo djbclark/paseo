@@ -1,3 +1,4 @@
+import { shiftDragText } from "../support/helpers/selection-copy";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, type Page } from "@playwright/test";
@@ -122,6 +123,13 @@ test("creates, renames, copies, and deletes entries through the file explorer", 
   const tree = page.getByTestId("file-explorer-tree-scroll");
   const entry = (name: string) => tree.getByText(name, { exact: true }).first();
   const nameInput = page.getByTestId("file-explorer-name-input");
+  const locationBeforeCopy = page.url();
+  await shiftDragText(page, entry("README.md"), { start: "README", end: ".md" });
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("README.md");
+  expect(page.url()).toBe(locationBeforeCopy);
+  await expect(
+    page.getByTestId("workspace-tabs-row").getByText("README.md", { exact: true }),
+  ).toHaveCount(0);
 
   await page.getByTestId("files-new-folder").click();
   await expect(nameInput).toBeVisible();

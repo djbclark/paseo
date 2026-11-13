@@ -1,3 +1,4 @@
+import { shiftDragText } from "../support/helpers/selection-copy";
 import { fork } from "node:child_process";
 import path from "node:path";
 import { expect, type BrowserContext, type Locator, type Page } from "@playwright/test";
@@ -35,6 +36,10 @@ const SUCCESS_QUESTION = "What success criteria should we use?";
 const REPO_URL_QUESTION = "What is the GitHub private repo URL to push to?";
 const COMMIT_MESSAGE_QUESTION = "What should the first commit message be?";
 const LINKED_QUESTION = "Sign in at https://example.com/login, then follow the setup guide. Done?";
+
+function readClipboardText(page: Page) {
+  return page.evaluate(() => navigator.clipboard.readText());
+}
 
 function selectedText(page: Page) {
   return page.evaluate(() => window.getSelection()?.toString().trim());
@@ -79,6 +84,23 @@ async function expectChecked(option: Locator, checked: boolean) {
 }
 
 test.describe("Question option text", () => {
+  test("Shift-drag copies an option label without answering", async ({ page, context }) => {
+    test.setTimeout(180_000);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const { session, card } = await openLinkedQuestions(page, context);
+    try {
+      const done = card.getByRole("radio", { name: "Done" });
+      await shiftDragText(page, done, { start: "Done", end: "Done" });
+      await expect.poll(() => readClipboardText(page)).toBe("Done");
+      await expectChecked(done, false);
+      await expectCurrentQuestion(page, { index: 1, total: 2, question: LINKED_QUESTION });
+      await done.getByText("Done", { exact: true }).click();
+      await expectChecked(done, true);
+    } finally {
+      await session.cleanup();
+    }
+  });
+
   test("links in an option label or description open without answering", async ({
     page,
     context,

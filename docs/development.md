@@ -29,6 +29,21 @@ the titlebar row. Production builds leave the variable unset and show no label.
 
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
+## Copy UI text on web and desktop
+
+Hold Shift and drag across text to copy the visible selection automatically as
+plain text. This also works on labels, file entries, tabs and question options;
+the gesture does not activate their controls. Release Shift during a drag if
+needed: copying happens when you release the mouse. A Shift-click without a drag
+does nothing. Ordinary selection and Cmd/Ctrl+C keep their existing behavior.
+
+Inputs, terminal surfaces, dedicated code editors, embedded browser content and
+window controls keep their own interactions. Only rendered text can be copied;
+truncated or unmounted text is unavailable. This gesture requires a mouse and
+does not change selection on native iOS or Android. Clipboard access requires
+HTTPS, localhost or Electron. A failed write leaves the selection available for
+manual copying and displays an error.
+
 ## Nix desktop package
 
 The flake exposes `packages.<system>.desktop` on Linux and macOS:

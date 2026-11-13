@@ -1,5 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "../support/fixtures";
+import { shiftDragText } from "../support/helpers/selection-copy";
 import { gotoAppShell } from "../support/helpers/app";
 import { projectEquivalenceViewKey } from "../support/helpers/project-view-key";
 import { getServerId } from "../support/helpers/server-id";
@@ -79,6 +80,7 @@ async function dragWithoutReordering(rows: Locator): Promise<void> {
 
 test("projects and pinned chats reorder while ordinary workspaces stay newest first", async ({
   page,
+  context,
 }) => {
   const firstProject = await seedWorkspace({ repoPrefix: "sidebar-reorder-first-" });
   const secondProject = await seedWorkspace({ repoPrefix: "sidebar-reorder-second-" });
@@ -113,6 +115,18 @@ test("projects and pinned chats reorder while ordinary workspaces stay newest fi
     await expect
       .poll(() => rowTestIds(ordinaryRows))
       .toEqual([secondWorkspaceTestId, firstWorkspaceTestId]);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const locationBeforeCopy = page.url();
+    const orderBeforeCopy = await rowTestIds(ordinaryRows);
+    await shiftDragText(page, ordinaryRows.getByText("Second workspace", { exact: true }), {
+      start: "Second",
+      end: "workspace",
+    });
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe("Second workspace");
+    expect(page.url()).toBe(locationBeforeCopy);
+    expect(await rowTestIds(ordinaryRows)).toEqual(orderBeforeCopy);
     await dragWithoutReordering(ordinaryRows);
 
     await firstProject.client.setWorkspacePinned(firstProject.workspaceId, true);

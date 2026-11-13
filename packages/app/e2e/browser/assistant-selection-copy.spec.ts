@@ -1,6 +1,7 @@
 import type { BrowserContext, Locator } from "@playwright/test";
 import { expect, test, type Page } from "../support/fixtures";
 import { openAgentRoute, seedMockAgentWorkspace } from "../support/helpers/mock-agent";
+import { shiftDragText } from "../support/helpers/selection-copy";
 
 const CROSS_STRUCTURE_MARKDOWN = [
   "# P1 — High-value UI behavior",
@@ -796,4 +797,61 @@ test.describe("on a touch-capable desktop browser", () => {
       await agent.cleanup();
     }
   });
+});
+
+test("Shift-drag auto-copies visible prose, links and code without Markdown", async ({
+  context,
+  page,
+}) => {
+  const agent = await seedMockAgentWorkspace({
+    repoPrefix: "shift-selection-copy-",
+    title: "Shift selection copy",
+    initialPrompt: "Render the clipboard fixture.",
+    featureValues: {
+      mockAssistantResponse:
+        "Before **bold** [docs](https://example.com) after.\n\n```typescript\nconst answer = 1;\n  return answer;\n```",
+    },
+  });
+  try {
+    await allowRichClipboard(context);
+    await agent.client.waitForAgentUpsert(
+      agent.agentId,
+      (snapshot) => snapshot.status === "idle",
+      30_000,
+    );
+    await openAgentRoute(page, agent);
+    const message = assistantMessageBlocks(page);
+    const url = page.url();
+    await shiftDragText(page, message, { start: "Before", end: "after." });
+    await expect.poll(() => readPlainClipboard(page)).toBe("Before bold docs after.");
+    expect(page.url()).toBe(url);
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString()))
+      .toBe("Before bold docs after.");
+    await shiftDragText(page, message, {
+      start: "const answer = 1;",
+      end: "return answer;",
+      releaseShiftDuringDrag: true,
+    });
+    await expect.poll(() => readPlainClipboard(page)).toBe("const answer = 1;\n  return answer;");
+
+    await page.evaluate(() => {
+      Object.defineProperty(navigator.clipboard, "writeText", {
+        configurable: true,
+        value: () => Promise.reject(new DOMException("Denied", "NotAllowedError")),
+      });
+    });
+    await shiftDragText(page, message, { start: "Before", end: "after." });
+    await expect(page.getByText("Copy failed", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
+      "Before bold docs after.",
+    );
+    // Failure must leave a usable selection for a normal keyboard copy.
+    await copySelection(page);
+    await expect
+      .poll(() => readPlainClipboard(page))
+      .toBe("Before **bold** [docs](https://example.com) after.");
+  } finally {
+    await agent.cleanup();
+  }
 });

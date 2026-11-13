@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { installSelectionCopy } from "../selection-copy/install.web";
 import { createAssistantSelectionClipboardContent } from "./content.web";
 
 const fixture = `
@@ -864,4 +865,167 @@ it("copies a workspace image path instead of its temporary display URL", () => {
   expect(createAssistantSelectionClipboardContent(selection)?.plainText).toBe(
     "![chart](assets/chart.png)",
   );
+});
+
+describe("Shift-drag selection controller", () => {
+  let cleanup = () => {};
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  function setup() {
+    const copied = vi.fn();
+    const failed = vi.fn();
+    const write = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    cleanup = installSelectionCopy({ onCopied: copied, onError: failed });
+    const label = document.createElement("button");
+    label.textContent = "  Label text  ";
+    label.style.userSelect = "none";
+    document.body.append(label);
+    return { label, write, copied, failed };
+  }
+
+  function start(label: Element, modifiers: MouseEventInit = {}) {
+    label.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "mouse",
+        button: 0,
+        shiftKey: true,
+        clientX: 10,
+        clientY: 10,
+        ...modifiers,
+      }),
+    );
+  }
+
+  function finish(label: Element) {
+    label.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 100, clientY: 10 }));
+    label.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  }
+
+  it("copies only a new drag, preserving whitespace after Shift is released", async () => {
+    const { label, write, copied } = setup();
+    const press = vi.fn();
+    label.addEventListener("pointerdown", press);
+    label.addEventListener("click", press);
+    start(label);
+    expect(getComputedStyle(label).userSelect).toBe("text");
+    expect(press).not.toHaveBeenCalled();
+    selectText(label, 0, textNode(label).length);
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift" }));
+    finish(label);
+    label.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await expect.poll(() => copied.mock.calls.length).toBe(1);
+    expect(write).toHaveBeenCalledExactlyOnceWith("  Label text  ");
+    expect(window.getSelection()?.toString()).toBe("  Label text  ");
+    expect(press).not.toHaveBeenCalled();
+    label.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", button: 0 }),
+    );
+    label.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(press).toHaveBeenCalledTimes(2);
+    expect(getComputedStyle(label).userSelect).toBe("none");
+  });
+
+  it("leaves the selected text available when clipboard writing fails", async () => {
+    const { label, write, failed } = setup();
+    write.mockRejectedValue(new DOMException("Denied", "NotAllowedError"));
+    start(label);
+    selectText(label, 2, 12);
+    finish(label);
+    await expect.poll(() => failed.mock.calls.length).toBe(1);
+    expect(window.getSelection()?.toString()).toBe("Label text");
+  });
+
+  it.each([
+    "input",
+    "textarea",
+    "select",
+    "[contenteditable]",
+    ".xterm",
+    ".cm-editor",
+    ".monaco-editor",
+    "iframe",
+    "webview",
+    "[data-testid]",
+  ])("leaves %s interactions alone", (selector) => {
+    const { write } = setup();
+    const element = document.createElement(
+      selector.startsWith("[") || selector.startsWith(".") ? "div" : selector,
+    );
+    if (selector === "[contenteditable]") element.setAttribute("contenteditable", "true");
+    if (selector.startsWith(".")) element.className = selector.slice(1);
+    if (selector === "[data-testid]")
+      element.setAttribute("data-testid", "desktop-window-controls");
+    document.body.append(element);
+    const press = vi.fn();
+    element.addEventListener("pointerdown", press);
+    start(element);
+    finish(element);
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(["blur", "pointercancel", "escape", "unmount"])(
+    "cancels without copying on %s",
+    (reason) => {
+      const { label, write } = setup();
+      start(label);
+      selectText(label, 2, 12);
+      if (reason === "unmount") cleanup();
+      else if (reason === "escape")
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      else window.dispatchEvent(new Event(reason));
+      finish(label);
+      expect(write).not.toHaveBeenCalled();
+      expect(getComputedStyle(label).userSelect).toBe("none");
+    },
+  );
+
+  it.each([
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+    { shiftKey: false },
+    { button: 2 },
+  ])("preserves other mouse gestures %j", (modifiers) => {
+    const { label, write } = setup();
+    const press = vi.fn();
+    label.addEventListener("pointerdown", press);
+    start(label, modifiers);
+    finish(label);
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("does not copy an old selection, a Shift-click or whitespace-only text", () => {
+    const { label, write } = setup();
+    selectText(label, 2, 12);
+    finish(label);
+    expect(write).not.toHaveBeenCalled();
+    start(label);
+    label.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    expect(write).not.toHaveBeenCalled();
+    start(label);
+    selectText(label, 0, 2);
+    finish(label);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("does not copy a range crossing an excluded editor", () => {
+    const { label, write } = setup();
+    const editor = document.createElement("div");
+    editor.className = "cm-editor";
+    editor.textContent = "Editor text";
+    const end = document.createElement("span");
+    end.textContent = "End text";
+    document.body.append(editor, end);
+    start(label);
+    selectRange(label, 0, end, 8);
+    finish(end);
+    expect(write).not.toHaveBeenCalled();
+  });
 });

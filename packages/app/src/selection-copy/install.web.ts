@@ -38,6 +38,7 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   let retainHighlight = false;
   let blockClick = false;
   let disposed = false;
+  let focusBefore: Element | null = null;
 
   function updateMode() {
     document.documentElement.toggleAttribute(
@@ -46,7 +47,17 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
     );
   }
 
+  // Mousedown's default focuses the control under the pointer, so Space or Enter would activate it.
+  function releaseFocus() {
+    const focused = document.activeElement;
+    if (focused !== focusBefore && focused instanceof HTMLElement && focused !== document.body) {
+      focused.blur();
+    }
+    focusBefore = null;
+  }
+
   function cancel() {
+    if (gesture) releaseFocus();
     shiftHeld = false;
     gesture = null;
     retainHighlight = false;
@@ -75,6 +86,7 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
     // Shift normally extends the previous range. This gesture always starts at the mouse.
     window.getSelection()?.removeAllRanges();
     gesture = { x: event.clientX, y: event.clientY, moved: false };
+    focusBefore = document.activeElement;
     blockClick = true;
     updateMode();
     event.stopImmediatePropagation();
@@ -108,6 +120,7 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
     if (!gesture) return;
     const moved = gesture.moved;
     gesture = null;
+    releaseFocus();
     shiftHeld = onlyShift(event);
     event.stopImmediatePropagation();
 

@@ -1038,6 +1038,22 @@ describe("Shift-drag selection controller", () => {
     },
   );
 
+  it.each(["release", "escape"])(
+    "does not leave the pressed control focused after %s",
+    (reason) => {
+      const { label } = setup();
+      start(label);
+      // The browser's mousedown default focuses the control; synthetic events skip it.
+      label.focus();
+      selectText(label, 2, 12);
+      if (reason === "escape")
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      finish(label);
+      expect(document.activeElement).not.toBe(label);
+      expect(window.getSelection()?.toString()).toBe("Label text");
+    },
+  );
+
   it("does not copy a range crossing an excluded editor", () => {
     const { label, write } = setup();
     const editor = document.createElement("div");

@@ -1050,7 +1050,9 @@ describe("Shift-drag selection controller", () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
       finish(label);
       expect(document.activeElement).not.toBe(label);
-      expect(window.getSelection()?.toString()).toBe("Label text");
+      // Escape cancels selection mode, which drops the range; a release keeps it.
+      const kept = reason === "release" ? "Label text" : "";
+      expect(window.getSelection()?.toString()).toBe(kept);
     },
   );
 

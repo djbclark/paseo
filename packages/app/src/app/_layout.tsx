@@ -130,6 +130,7 @@ import { getNextThemePreference, ICON_STROKE_WIDTH } from "@/styles/theme";
 import { useSessionStore } from "@/stores/session-store";
 import { WorkspaceLayoutModePublisher } from "@/workspace-tabs/layout-mode-publisher";
 import { installWebScrollbarStyles } from "@/styles/install-web-scrollbar-styles";
+import { installSelectionMode } from "@/selection-mode/install-selection-mode";
 import type { HostProfile } from "@/types/host-connection";
 import {
   useHasWindowChromeObstruction,
@@ -147,6 +148,8 @@ import { NotificationOpenRouter } from "@/notification-open/react";
 import { ensureOsNotificationPermission } from "@/utils/os-notifications";
 
 polyfillCrypto();
+// Registers before React mounts so its window-capture key listeners run ahead of the keyboard pipeline.
+installSelectionMode();
 
 export interface HostRuntimeBootstrapState {
   splashError: string | null;

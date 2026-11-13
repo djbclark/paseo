@@ -301,3 +301,22 @@ New status pills use `<StatusBadge>`. Identity, shortcut, and interactive link b
 | Trigger-anchored menu                               | `packages/app/src/components/ui/dropdown-menu.tsx` (used in `sidebar-workspace-list.tsx`, theme picker)                                                                                                                                                                                                  |
 | Right-click / long-press menu                       | `packages/app/src/components/ui/context-menu.tsx` (used in `sidebar-workspace-list.tsx`)                                                                                                                                                                                                                 |
 | Headers (back, screen, menu)                        | `packages/app/src/components/headers/back-header.tsx`, `screen-header.tsx`, `menu-header.tsx`                                                                                                                                                                                                            |
+
+---
+
+## 16. Selecting chrome text
+
+Chrome (sidebar rows, tab titles, buttons) sets `userSelect: "none"` and keeps it. A drag on a row or tab reorders or opens it, so selectable chrome text would fight the gesture.
+
+Holding Shift overrides that on web and Electron. `packages/app/src/selection-mode/` owns the mode: while Shift is down a stylesheet forces `user-select: text !important` and pointer events stop at the document, so a drag selects text instead of clicking, navigating or dragging. Releasing Shift over a selection keeps the stylesheet on until the selection collapses, because Chromium leaves `user-select: none` text out of copies. Copy with Cmd/Ctrl+C or the native right-click menu.
+
+Inputs, contenteditable, terminals, webviews, iframes and the git diff canvas are exempt and keep their own selection and menus. Native is not covered.
+
+Limits:
+
+- The diff canvas body keeps its own selection. Mermaid and HTML-preview iframes and webview guests are not covered.
+- A long drag through a virtualized list truncates at the rows that are mounted.
+- Focus still moves on mousedown, and line-number gutters land in copies.
+- A right-click over a selection opens the native menu with Copy, not the app's menu.
+- A latched selection turns off Electron title-bar window dragging until it clears.
+- Shift+Arrow keyboard selection is not part of the mode.

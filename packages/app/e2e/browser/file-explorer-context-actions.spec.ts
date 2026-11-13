@@ -207,11 +207,13 @@ test("creates, renames, copies, and deletes entries through the file explorer", 
   await expect(entry("created.txt")).toHaveCSS("user-select", "none");
   await entry("created.txt").dblclick();
   expect(await page.evaluate(() => window.getSelection()?.toString() ?? "")).toBe("");
-  const fileTab = page.getByTestId("workspace-tabs-row").getByText("created.txt", { exact: true });
+  const fileTab = page.getByTestId("workspace-tab-file_created.txt");
   await expect(fileTab).toBeVisible();
+  await expect(fileTab).toHaveAttribute("aria-selected", "true");
   await shiftDragText(page, fileTab, { start: "created", end: ".txt" });
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("created.txt");
   await expect(fileTab).toBeVisible();
+  await expect(fileTab).toHaveAttribute("aria-selected", "true");
 
   const folderRow = entry("folder").locator(
     "xpath=ancestor::*[starts-with(@data-testid, 'file-explorer-row-')][1]",

@@ -34,25 +34,27 @@ ${ROOT} {
 }
 `;
 
-const POINTER_BLOCKER_EVENTS = [
-  "pointerdown",
-  "mousedown",
-  "touchstart",
-  "click",
-  "auxclick",
-  "dblclick",
-  "dragstart",
-] as const;
+const GESTURE_STOP_EVENTS = ["pointerdown", "mousedown", "touchstart", "dblclick"] as const;
+const CLICK_EVENTS = ["click", "auxclick"] as const;
 
-const DEFAULT_PREVENTED_EVENTS: ReadonlySet<string> = new Set(["click", "auxclick", "dragstart"]);
+let installed: (() => void) | null = null;
 
-function isEditableElement(element: Element | null): boolean {
+function eventOriginElement(event: Event): Element | null {
+  const origin = event.composedPath()[0];
+  if (origin instanceof Element) {
+    return origin;
+  }
+  return origin instanceof Node ? origin.parentElement : null;
+}
+
+function isEditableEvent(event: Event): boolean {
+  const element = eventOriginElement(event);
   return element !== null && element.closest(EDITABLE_TARGET_SELECTOR) !== null;
 }
 
-function isEditablePointerTarget(event: Event): boolean {
-  const origin = event.composedPath()[0];
-  return origin instanceof Element && isEditableElement(origin);
+function isActiveElementEditable(): boolean {
+  const active = document.activeElement;
+  return active !== null && active.closest(EDITABLE_TARGET_SELECTOR) !== null;
 }
 
 function isSelectionCollapsed(): boolean {
@@ -60,70 +62,33 @@ function isSelectionCollapsed(): boolean {
   return selection === null || selection.isCollapsed;
 }
 
-function blockPointerEvent(event: Event): void {
-  if (isEditablePointerTarget(event)) {
-    return;
-  }
-  event.stopPropagation();
-  if (DEFAULT_PREVENTED_EVENTS.has(event.type)) {
-    event.preventDefault();
-  }
-}
-
-function keydownToMachineEvent(event: KeyboardEvent): SelectionModeEvent {
-  return {
-    type: "keydown",
-    key: event.key,
-    shiftKey: event.shiftKey,
-    mods: { meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey },
-    editableTarget: isEditableElement(document.activeElement),
-  };
-}
-
 export function installSelectionMode(): () => void {
-  const root = document.documentElement;
-  const existingStyle = document.getElementById(SELECTION_MODE_STYLE_ID);
-  const style = existingStyle ?? document.createElement("style");
-  if (!existingStyle) {
-    style.id = SELECTION_MODE_STYLE_ID;
-    style.textContent = STYLE_TEXT;
-    document.head.append(style);
+  if (typeof document === "undefined") {
+    return () => {};
   }
+  if (installed) {
+    return installed;
+  }
+
+  const root = document.documentElement;
+  const style = document.createElement("style");
+  style.id = SELECTION_MODE_STYLE_ID;
+  style.textContent = STYLE_TEXT;
+  document.head.append(style);
 
   let state: SelectionModeState = "off";
+  // Whether text was selected during the current Shift hold, so a Shift tap over an unrelated
+  // selection does not latch the mode.
+  let selectedDuringHold = false;
+  // Set when a held pointerdown was blocked: the click that ends the gesture is swallowed even if
+  // Shift was released before the button.
+  let swallowNextClick = false;
+  const controller = new AbortController();
+  const capture = { capture: true, signal: controller.signal };
+  const bubble = { signal: controller.signal };
 
-  function blockContextMenuOverSelection(event: Event): void {
-    if (!isSelectionCollapsed()) {
-      event.stopPropagation();
-    }
-  }
-
-  function setPointerBlockers(enabled: boolean): void {
-    for (const type of POINTER_BLOCKER_EVENTS) {
-      if (enabled) {
-        document.addEventListener(type, blockPointerEvent, true);
-      } else {
-        document.removeEventListener(type, blockPointerEvent, true);
-      }
-    }
-  }
-
-  function setActive(enabled: boolean): void {
-    if (enabled) {
-      root.setAttribute(SELECTION_MODE_ATTRIBUTE, "");
-      document.addEventListener("contextmenu", blockContextMenuOverSelection, true);
-      return;
-    }
-    root.removeAttribute(SELECTION_MODE_ATTRIBUTE);
-    document.removeEventListener("contextmenu", blockContextMenuOverSelection, true);
-  }
-
-  function setPointerMoveWatch(enabled: boolean): void {
-    if (enabled) {
-      window.addEventListener("pointermove", onPointerMove, true);
-    } else {
-      window.removeEventListener("pointermove", onPointerMove, true);
-    }
+  function hasSelection(): boolean {
+    return selectedDuringHold && !isSelectionCollapsed();
   }
 
   function dispatch(event: SelectionModeEvent): void {
@@ -132,36 +97,43 @@ export function installSelectionMode(): () => void {
     if (state === previous) {
       return;
     }
-    if (isActive(previous) !== isActive(state)) {
-      setActive(isActive(state));
+    if (state === "held") {
+      selectedDuringHold = previous === "latched";
     }
-    if ((previous === "held") !== (state === "held")) {
-      setPointerBlockers(state === "held");
-      setPointerMoveWatch(state === "held");
-    }
+    root.toggleAttribute(SELECTION_MODE_ATTRIBUTE, isActive(state));
   }
 
   function onKeyDown(event: KeyboardEvent): void {
+    // A repeating Shift must not re-arm a cancelled press or move a latched mode to held.
     if (event.repeat && event.key === SELECTION_MODE_KEY) {
       return;
     }
-    dispatch(keydownToMachineEvent(event));
+    dispatch({
+      type: "keydown",
+      key: event.key,
+      shiftKey: event.shiftKey,
+      mods: { meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey },
+      editableTarget: isActiveElementEditable(),
+      hasSelection: hasSelection(),
+    });
   }
 
   function onKeyUp(event: KeyboardEvent): void {
-    dispatch({ type: "keyup", key: event.key, selectionCollapsed: isSelectionCollapsed() });
+    dispatch({ type: "keyup", key: event.key, hasSelection: hasSelection() });
   }
 
   function onPointerMove(event: PointerEvent): void {
-    dispatch({ type: "pointermove", shiftKey: event.shiftKey });
+    if (state === "held") {
+      dispatch({ type: "pointermove", shiftKey: event.shiftKey, hasSelection: hasSelection() });
+    }
   }
 
   function onSelectionChange(): void {
-    dispatch({ type: "selectionchange", collapsed: isSelectionCollapsed() });
-  }
-
-  function onBlur(): void {
-    dispatch({ type: "blur" });
+    const collapsed = isSelectionCollapsed();
+    if (state === "held" && !collapsed) {
+      selectedDuringHold = true;
+    }
+    dispatch({ type: "selectionchange", collapsed });
   }
 
   function onVisibilityChange(): void {
@@ -170,23 +142,66 @@ export function installSelectionMode(): () => void {
     }
   }
 
-  window.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("keyup", onKeyUp, true);
-  window.addEventListener("blur", onBlur);
-  document.addEventListener("selectionchange", onSelectionChange);
-  document.addEventListener("visibilitychange", onVisibilityChange);
-
-  return () => {
-    window.removeEventListener("keydown", onKeyDown, true);
-    window.removeEventListener("keyup", onKeyUp, true);
-    window.removeEventListener("blur", onBlur);
-    document.removeEventListener("selectionchange", onSelectionChange);
-    document.removeEventListener("visibilitychange", onVisibilityChange);
-    setActive(false);
-    setPointerBlockers(false);
-    setPointerMoveWatch(false);
-    if (!existingStyle) {
-      style.remove();
+  function onGestureStart(event: Event): void {
+    if (event.type === "pointerdown") {
+      swallowNextClick = false;
     }
+    if (state !== "held" || isEditableEvent(event)) {
+      return;
+    }
+    event.stopPropagation();
+    if (event instanceof PointerEvent && event.type === "pointerdown") {
+      swallowNextClick = true;
+      // Shift+press would otherwise extend an earlier caret or selection instead of starting here.
+      if (event.button === 0) {
+        window.getSelection()?.removeAllRanges();
+      }
+    }
+  }
+
+  function onClick(event: Event): void {
+    if (isEditableEvent(event) || (state !== "held" && !swallowNextClick)) {
+      return;
+    }
+    swallowNextClick = false;
+    event.stopPropagation();
+    event.preventDefault();
+  }
+
+  function onDragStart(event: Event): void {
+    if (state !== "held" || isEditableEvent(event)) {
+      return;
+    }
+    event.stopPropagation();
+    event.preventDefault();
+  }
+
+  function onContextMenu(event: Event): void {
+    if (isActive(state) && !isSelectionCollapsed() && !isEditableEvent(event)) {
+      event.stopPropagation();
+    }
+  }
+
+  window.addEventListener("keydown", onKeyDown, capture);
+  window.addEventListener("keyup", onKeyUp, capture);
+  window.addEventListener("pointermove", onPointerMove, capture);
+  window.addEventListener("blur", () => dispatch({ type: "blur" }), bubble);
+  document.addEventListener("selectionchange", onSelectionChange, bubble);
+  document.addEventListener("visibilitychange", onVisibilityChange, bubble);
+  for (const type of GESTURE_STOP_EVENTS) {
+    document.addEventListener(type, onGestureStart, capture);
+  }
+  for (const type of CLICK_EVENTS) {
+    document.addEventListener(type, onClick, capture);
+  }
+  document.addEventListener("dragstart", onDragStart, capture);
+  document.addEventListener("contextmenu", onContextMenu, capture);
+
+  installed = () => {
+    controller.abort();
+    root.removeAttribute(SELECTION_MODE_ATTRIBUTE);
+    style.remove();
+    installed = null;
   };
+  return installed;
 }

@@ -8,6 +8,10 @@ export interface KeyModifiers {
   alt: boolean;
 }
 
+/**
+ * `hasSelection` means a selection made while Shift was held still exists. The caller owns that
+ * definition; the machine only needs to know whether text is worth keeping selectable.
+ */
 export type SelectionModeEvent =
   | {
       type: "keydown";
@@ -15,15 +19,22 @@ export type SelectionModeEvent =
       shiftKey: boolean;
       mods: KeyModifiers;
       editableTarget: boolean;
+      hasSelection: boolean;
     }
-  | { type: "keyup"; key: string; selectionCollapsed: boolean }
-  | { type: "pointermove"; shiftKey: boolean }
+  | { type: "keyup"; key: string; hasSelection: boolean }
+  | { type: "pointermove"; shiftKey: boolean; hasSelection: boolean }
   | { type: "selectionchange"; collapsed: boolean }
   | { type: "blur" }
   | { type: "hidden" };
 
 export function isActive(state: SelectionModeState): boolean {
   return state !== "off";
+}
+
+// Chromium drops user-select:none text from Selection.toString() and from copies, so a selection
+// made in the mode needs the mode's stylesheet to stay on until it collapses.
+function leaveHeld(hasSelection: boolean): SelectionModeState {
+  return hasSelection ? "latched" : "off";
 }
 
 export function reduceSelectionMode(
@@ -34,9 +45,11 @@ export function reduceSelectionMode(
     case "keydown":
       return reduceKeydown(state, event);
     case "keyup":
-      return reduceKeyup(state, event);
+      return state === "held" && event.key === SELECTION_MODE_KEY
+        ? leaveHeld(event.hasSelection)
+        : state;
     case "pointermove":
-      return state === "held" && !event.shiftKey ? "off" : state;
+      return state === "held" && !event.shiftKey ? leaveHeld(event.hasSelection) : state;
     case "selectionchange":
       return state === "latched" && event.collapsed ? "off" : state;
     case "blur":
@@ -49,25 +62,13 @@ function reduceKeydown(
   state: SelectionModeState,
   event: Extract<SelectionModeEvent, { type: "keydown" }>,
 ): SelectionModeState {
-  if (state === "held" && !event.shiftKey) {
-    return "off";
-  }
-  if (event.key !== SELECTION_MODE_KEY) {
-    return state === "held" ? "off" : state;
-  }
-  if (state !== "off") {
-    return state;
+  const isModeKey = event.key === SELECTION_MODE_KEY;
+  if (state === "held") {
+    return isModeKey && event.shiftKey ? "held" : leaveHeld(event.hasSelection);
   }
   const hasOtherModifier = event.mods.meta || event.mods.ctrl || event.mods.alt;
-  return hasOtherModifier || event.editableTarget ? "off" : "held";
-}
-
-function reduceKeyup(
-  state: SelectionModeState,
-  event: Extract<SelectionModeEvent, { type: "keyup" }>,
-): SelectionModeState {
-  if (event.key !== SELECTION_MODE_KEY || state === "off") {
+  if (!isModeKey || hasOtherModifier || event.editableTarget) {
     return state;
   }
-  return event.selectionCollapsed ? "off" : "latched";
+  return "held";
 }

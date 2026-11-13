@@ -85,11 +85,7 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   }
 
   function mouseDown(event: MouseEvent) {
-    if (gesture) {
-      event.stopImmediatePropagation();
-      return;
-    }
-    begin(event);
+    if (gesture) event.stopImmediatePropagation();
   }
 
   function move(event: MouseEvent) {
@@ -138,10 +134,9 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   }
 
   function click(event: MouseEvent) {
-    if (!blockClick) return;
+    if (!blockClick || event.detail === 0) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    blockClick = false;
   }
 
   function dragStart(event: DragEvent) {
@@ -165,6 +160,7 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   window.addEventListener("pointerup", pointerUp, options);
   window.addEventListener("mouseup", end, options);
   window.addEventListener("click", click, options);
+  window.addEventListener("dblclick", click, options);
   window.addEventListener("dragstart", dragStart, options);
   window.addEventListener("pointercancel", cancel, options);
   window.addEventListener("blur", cancel, options);

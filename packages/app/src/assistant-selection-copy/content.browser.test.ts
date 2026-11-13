@@ -882,6 +882,7 @@ describe("Shift-drag selection controller", () => {
     const label = document.createElement("button");
     label.textContent = "  Label text  ";
     label.style.userSelect = "none";
+    label.style.whiteSpace = "pre-wrap";
     document.body.append(label);
     return { label, write, copied, failed };
   }
@@ -911,13 +912,15 @@ describe("Shift-drag selection controller", () => {
     const press = vi.fn();
     label.addEventListener("pointerdown", press);
     label.addEventListener("click", press);
+    label.addEventListener("dblclick", press);
     start(label);
     expect(getComputedStyle(label).userSelect).toBe("text");
     expect(press).not.toHaveBeenCalled();
     selectText(label, 0, textNode(label).length);
     window.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift" }));
     finish(label);
-    label.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    label.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    label.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, detail: 2 }));
     await expect.poll(() => copied.mock.calls.length).toBe(1);
     expect(write).toHaveBeenCalledExactlyOnceWith("  Label text  ");
     expect(window.getSelection()?.toString()).toBe("  Label text  ");

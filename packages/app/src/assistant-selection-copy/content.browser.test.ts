@@ -1021,6 +1021,23 @@ describe("Shift-drag selection controller", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it.each(["touch", "pen"])(
+    "preserves %s activation after a mouse selection",
+    async (pointerType) => {
+      const { label, copied } = setup();
+      start(label);
+      selectText(label, 2, 12);
+      finish(label);
+      await expect.poll(() => copied.mock.calls.length).toBe(1);
+      const press = vi.fn();
+      label.addEventListener("click", press);
+      label.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType }));
+      label.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      expect(press).toHaveBeenCalledTimes(1);
+      expect(getComputedStyle(label).userSelect).toBe("none");
+    },
+  );
+
   it("does not copy a range crossing an excluded editor", () => {
     const { label, write } = setup();
     const editor = document.createElement("div");

@@ -81,7 +81,12 @@ export function installSelectionCopy(feedback: SelectionCopyFeedback): () => voi
   }
 
   function pointerDown(event: PointerEvent) {
-    if (event.pointerType === "mouse") begin(event);
+    if (event.pointerType !== "mouse") {
+      blockClick = false;
+      cancel();
+      return;
+    }
+    begin(event);
   }
 
   function mouseDown(event: MouseEvent) {

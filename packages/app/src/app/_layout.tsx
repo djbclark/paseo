@@ -27,6 +27,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -130,9 +131,11 @@ import { getNextThemePreference, ICON_STROKE_WIDTH } from "@/styles/theme";
 import { useSessionStore } from "@/stores/session-store";
 import { WorkspaceLayoutModePublisher } from "@/workspace-tabs/layout-mode-publisher";
 import { installWebScrollbarStyles } from "@/styles/install-web-scrollbar-styles";
+import { WindowSearchBar } from "@/components/window-search-bar";
 import type { HostProfile } from "@/types/host-connection";
 import {
   useHasWindowChromeObstruction,
+  type WindowChromeCorners,
   WindowChromeProvider,
   WindowChromeRegion,
   WindowChromeSafeArea,
@@ -386,6 +389,140 @@ interface AppContainerProps {
 
 const WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING = 12;
 
+function resolveWorkspaceContentCorners(input: {
+  isCompactLayout: boolean;
+  chromeEnabled: boolean;
+  defaultCorners: WindowChromeCorners;
+}): WindowChromeCorners {
+  if (isWeb) return "none";
+  if (input.isCompactLayout && input.chromeEnabled) return "both";
+  return input.defaultCorners;
+}
+
+function WorkspaceContentContainer({
+  contentRef,
+  children,
+}: {
+  contentRef: React.RefObject<View | null>;
+  children: ReactNode;
+}) {
+  return (
+    <View ref={contentRef} style={flexStyle}>
+      {children}
+    </View>
+  );
+}
+
+function AppGlobalOverlays() {
+  return (
+    <AppearanceStyleBoundary>
+      <DownloadToast />
+      <RosettaCalloutSource />
+      <UpdateCalloutSource />
+      <LegacyAgentSkillsMigration />
+      <WorktreeSetupCalloutSource />
+      <CommandCenterRootActions />
+      <CommandCenterWorkspaceActions />
+      <PluginCommandCenterActions />
+      <WorkspacePinShortcutHandler />
+      <WorkspaceRenameHost />
+      <WorkspaceArchiveUndoShortcutHost />
+      <CommandCenter />
+      <AddProjectFlowHost />
+      <HostChooserModal />
+      <HostConfirmationSheet />
+      <ProviderSettingsHost />
+      <WorkspaceSetupDialog />
+      <KeyboardShortcutsDialog />
+      <AppDiagnosticHost />
+      <ChangelogHost />
+      <QuittingOverlay />
+    </AppearanceStyleBoundary>
+  );
+}
+
+function AppContainerSurface({
+  workspaceContentRef,
+  divisionLayout,
+  desktopSidebarVisible,
+  sidebarCorners,
+  contentCorners,
+  chromeEnabled,
+  showWindowSidebarToggle,
+  isCompactLayout,
+  themedSidebarChrome,
+  children,
+}: {
+  workspaceContentRef: React.RefObject<View | null>;
+  divisionLayout: ReturnType<typeof resolveDesktopDivisionLayout>;
+  desktopSidebarVisible: boolean;
+  sidebarCorners: WindowChromeCorners;
+  contentCorners: WindowChromeCorners;
+  chromeEnabled: boolean;
+  showWindowSidebarToggle: boolean;
+  isCompactLayout: boolean;
+  themedSidebarChrome: ReactNode;
+  children: ReactNode;
+}) {
+  // Native panel gesture hosts outlive appearance keys, like native navigators.
+  // Their tracked styles update in place; web numeric styles still need remounting.
+  return (
+    <View style={layoutStyles.surfaceFill}>
+      {isWeb ? (
+        <AppearanceStyleBoundary>
+          <WindowSearchBar
+            contentRef={workspaceContentRef}
+            showSidebarToggle={showWindowSidebarToggle}
+          />
+        </AppearanceStyleBoundary>
+      ) : null}
+      <WorkspaceContentContainer contentRef={workspaceContentRef}>
+        <WindowLayoutSurface compact={isCompactLayout} style={rowStyle}>
+          <WorkspaceLayoutModePublisher />
+          {!isCompactLayout ? (
+            <WindowChromeRegion corners={isWeb ? "none" : sidebarCorners}>
+              {themedSidebarChrome}
+            </WindowChromeRegion>
+          ) : null}
+          <WindowLayoutDivisionGap
+            layout={divisionLayout}
+            sidebarVisible={desktopSidebarVisible}
+            compact={isCompactLayout}
+          />
+          <WorkspaceExplorerOpenGesture enabled={chromeEnabled && isCompactLayout}>
+            <WindowChromeRegion corners={contentCorners}>
+              <View style={flexStyle}>{children}</View>
+            </WindowChromeRegion>
+          </WorkspaceExplorerOpenGesture>
+        </WindowLayoutSurface>
+      </WorkspaceContentContainer>
+      <AddHostFlowHost />
+      <AppearanceStyleBoundary>
+        {!isWeb && showWindowSidebarToggle ? (
+          <WindowChromeRegion corners="top-left">
+            <WindowChromeSafeArea
+              placement="inline"
+              horizontalPadding={WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING}
+              pointerEvents="box-none"
+              style={layoutStyles.windowSidebarToggle}
+            >
+              <WindowSidebarMenuToggle />
+            </WindowChromeSafeArea>
+          </WindowChromeRegion>
+        ) : null}
+        <DesktopWindowControls />
+        <FloatingPanelPortalHost />
+      </AppearanceStyleBoundary>
+      {isCompactLayout ? themedSidebarChrome : null}
+      <AppGlobalOverlays />
+      {/* Setup changes the theme while it is open, so it stays out of the remount above. Its
+          colors are CSS variables and themed props, which update in place, and setup changes no
+          font size. */}
+      <OnboardingHost />
+    </View>
+  );
+}
+
 function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppContainerProps) {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const daemons = useHosts();
@@ -501,85 +638,31 @@ function AppContainer({ children, chromeEnabled: chromeEnabledOverride }: AppCon
   if (isWeb) {
     themedSidebarChrome = <AppearanceStyleBoundary>{sidebarChrome}</AppearanceStyleBoundary>;
   }
-  const workspaceChrome = (
-    <WindowLayoutSurface compact={isCompactLayout} style={rowStyle}>
-      <WorkspaceLayoutModePublisher />
-      {!isCompactLayout ? (
-        <WindowChromeRegion corners={appChromeLayout.sidebarCorners}>
-          {themedSidebarChrome}
-        </WindowChromeRegion>
-      ) : null}
-      <WindowLayoutDivisionGap
-        layout={divisionLayout}
-        sidebarVisible={desktopSidebarVisible}
-        compact={isCompactLayout}
-      />
-      <WorkspaceExplorerOpenGesture enabled={chromeEnabled && isCompactLayout}>
-        <WindowChromeRegion
-          corners={isCompactLayout && chromeEnabled ? "both" : appChromeLayout.contentCorners}
-        >
-          <View style={flexStyle}>{children}</View>
-        </WindowChromeRegion>
-      </WorkspaceExplorerOpenGesture>
-    </WindowLayoutSurface>
-  );
-
-  // Native panel gesture hosts outlive appearance keys, like native navigators.
-  // Their tracked styles update in place; web numeric styles still need remounting.
-  const surface = (
-    <View style={layoutStyles.surfaceFill}>
-      {workspaceChrome}
-      <AddHostFlowHost />
-      <AppearanceStyleBoundary>
-        {!isCompactLayout && appChromeLayout.sidebarToggleOwner === "window" ? (
-          <WindowChromeRegion corners="top-left">
-            <WindowChromeSafeArea
-              placement="inline"
-              horizontalPadding={WINDOW_SIDEBAR_TOGGLE_HORIZONTAL_PADDING}
-              pointerEvents="box-none"
-              style={layoutStyles.windowSidebarToggle}
-            >
-              <WindowSidebarMenuToggle />
-            </WindowChromeSafeArea>
-          </WindowChromeRegion>
-        ) : null}
-        <DesktopWindowControls />
-        <FloatingPanelPortalHost />
-      </AppearanceStyleBoundary>
-      {isCompactLayout ? themedSidebarChrome : null}
-      <AppearanceStyleBoundary>
-        <DownloadToast />
-        <RosettaCalloutSource />
-        <UpdateCalloutSource />
-        <LegacyAgentSkillsMigration />
-        <WorktreeSetupCalloutSource />
-        <CommandCenterRootActions />
-        <CommandCenterWorkspaceActions />
-        <PluginCommandCenterActions />
-        <WorkspacePinShortcutHandler />
-        <WorkspaceRenameHost />
-        <WorkspaceArchiveUndoShortcutHost />
-        <CommandCenter />
-        <AddProjectFlowHost />
-        <HostChooserModal />
-        <HostConfirmationSheet />
-        <ProviderSettingsHost />
-        <WorkspaceSetupDialog />
-        <KeyboardShortcutsDialog />
-        <AppDiagnosticHost />
-        <ChangelogHost />
-        <QuittingOverlay />
-      </AppearanceStyleBoundary>
-      {/* Setup changes the theme while it is open, so it stays out of the remount above. Its
-          colors are CSS variables and themed props, which update in place, and setup changes no
-          font size. */}
-      <OnboardingHost />
-    </View>
-  );
-
+  const workspaceContentRef = useRef<View>(null);
+  const showWindowSidebarToggle =
+    !isCompactLayout && appChromeLayout.sidebarToggleOwner === "window";
+  const contentCorners = resolveWorkspaceContentCorners({
+    isCompactLayout,
+    chromeEnabled,
+    defaultCorners: appChromeLayout.contentCorners,
+  });
   return (
     <AppContainerLifetime sidebarGesturesEnabled={sidebarPresentation === "overlay"}>
-      <SheetHostScope enabled={isCompactLayout}>{surface}</SheetHostScope>
+      <SheetHostScope enabled={isCompactLayout}>
+        <AppContainerSurface
+          workspaceContentRef={workspaceContentRef}
+          divisionLayout={divisionLayout}
+          desktopSidebarVisible={desktopSidebarVisible}
+          sidebarCorners={appChromeLayout.sidebarCorners}
+          contentCorners={contentCorners}
+          chromeEnabled={chromeEnabled}
+          showWindowSidebarToggle={showWindowSidebarToggle}
+          isCompactLayout={isCompactLayout}
+          themedSidebarChrome={themedSidebarChrome}
+        >
+          {children}
+        </AppContainerSurface>
+      </SheetHostScope>
     </AppContainerLifetime>
   );
 }

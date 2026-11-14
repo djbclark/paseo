@@ -1,0 +1,105 @@
+name: Fork Desktop Build
+
+# Fork-only: builds the unsigned (ad-hoc signed) macOS arm64 desktop app and
+# records wall-clock time per phase, so runners can be compared on one commit.
+# Needs no Apple or release secrets. Not present upstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "runs-on label, e.g. macos-latest, warp-macos-15-arm64-6x"
+        required: true
+        default: "macos-latest"
+        type: string
+  # workflow_dispatch only registers for files on the default branch; a bench/*
+  # push runs the same job on the GitHub-hosted runner from any branch.
+  push:
+    branches: ["bench/**"]
+
+permissions:
+  contents: read
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+  RUNNER_LABEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner || 'macos-latest' }}
+
+jobs:
+  build:
+    name: build (${{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner || 'macos-latest' }})
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner || 'macos-latest' }}
+    timeout-minutes: 90
+    steps:
+      - name: Start clock
+        shell: bash
+        run: |
+          echo "T_START=$(date +%s)" >> "$GITHUB_ENV"
+          echo "T_PHASE=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Mark setup done
+        shell: bash
+        run: |
+          now=$(date +%s)
+          echo "T_SETUP=$((now - T_PHASE))" >> "$GITHUB_ENV"
+          echo "T_PHASE=$now" >> "$GITHUB_ENV"
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Mark install done
+        shell: bash
+        run: |
+          now=$(date +%s)
+          echo "T_INSTALL=$((now - T_PHASE))" >> "$GITHUB_ENV"
+          echo "T_PHASE=$now" >> "$GITHUB_ENV"
+
+      - name: Build desktop app (arm64, unsigned)
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EP_GH_IGNORE_TIME: "true"
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          npm run build:desktop -- --publish never --mac --arm64 --dir \
+            -c.mac.notarize=false -c.mac.identity=null
+          codesign --force --deep -s - packages/desktop/release/mac-arm64/Paseo.app
+          codesign --verify --deep --strict packages/desktop/release/mac-arm64/Paseo.app
+
+      - name: Report timings
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          now=$(date +%s)
+          build=$((now - T_PHASE))
+          total=$((now - T_START))
+          {
+            echo "### Fork desktop build timing"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| runner label | \`${{ env.RUNNER_LABEL }}\` |"
+            echo "| runner name / os / arch | ${RUNNER_NAME} / ${RUNNER_OS} / ${RUNNER_ARCH} |"
+            echo "| commit | \`${GITHUB_SHA}\` |"
+            echo "| cores | $(sysctl -n hw.ncpu 2>/dev/null || nproc) |"
+            echo "| memory (GiB) | $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 )) |"
+            echo "| checkout + node setup (s) | ${T_SETUP:-n/a} |"
+            echo "| npm ci (s) | ${T_INSTALL:-n/a} |"
+            echo "| build:desktop + codesign (s) | ${build} |"
+            echo "| **total (s)** | **${total}** |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Paseo-fork-mac-arm64-${{ github.sha }}
+          path: packages/desktop/release/mac-arm64/Paseo.app
+          retention-days: 7
+          if-no-files-found: error

@@ -10,13 +10,9 @@ import {
 import { Text, View, type ViewStyle } from "react-native";
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
-import { WindowSidebarMenuToggle } from "@/components/headers/sidebar-menu-toggle";
 import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { EditingTextInput, type EditingTextInputHandle } from "@/components/ui/text-input";
-import { DESKTOP_TRAFFIC_LIGHT_HEIGHT } from "@/constants/layout";
 import type { Theme } from "@/styles/theme";
-import { WindowChromeRegion, WindowChromeSafeArea } from "@/utils/desktop-window";
 import {
   applyWindowSearchHighlights,
   clearWindowSearchHighlights,
@@ -40,11 +36,18 @@ const noDragStyle = { WebkitAppRegion: "no-drag" } as unknown as ViewStyle;
 const WINDOW_SEARCH_BAR_DATASET = { windowSearchBar: "true" };
 
 export interface WindowSearchBarProps {
-  contentRef: RefObject<View | null>;
-  showSidebarToggle?: boolean;
+  contentRef?: RefObject<View | null>;
 }
 
 const MUTATION_DEBOUNCE_MS = 140;
+
+function resolveSearchRoot(contentRef?: RefObject<View | null>): HTMLElement | null {
+  if (contentRef?.current) {
+    return contentRef.current as unknown as HTMLElement;
+  }
+  if (typeof document === "undefined") return null;
+  return document.getElementById("root") ?? document.body;
+}
 
 function WindowSearchControls({
   matchCount,
@@ -74,7 +77,7 @@ function WindowSearchControls({
         label="Previous match"
         compact
       >
-        <ThemedChevronUp size={14} uniProps={mutedColorMapping} />
+        <ThemedChevronUp size={13} uniProps={mutedColorMapping} />
       </ToolbarButton>
       <ToolbarButton
         testID="window-search-next"
@@ -83,19 +86,16 @@ function WindowSearchControls({
         label="Next match"
         compact
       >
-        <ThemedChevronDown size={14} uniProps={mutedColorMapping} />
+        <ThemedChevronDown size={13} uniProps={mutedColorMapping} />
       </ToolbarButton>
       <ToolbarButton testID="window-search-clear" onPress={onClear} label="Clear search" compact>
-        <ThemedX size={14} uniProps={mutedColorMapping} />
+        <ThemedX size={13} uniProps={mutedColorMapping} />
       </ToolbarButton>
     </View>
   );
 }
 
-export function WindowSearchBar({
-  contentRef,
-  showSidebarToggle = false,
-}: WindowSearchBarProps): ReactElement {
+export function WindowSearchBar({ contentRef }: WindowSearchBarProps): ReactElement {
   const [query, setQuery] = useState("");
   const [isFocused, setIsFocused] = useState(false);
   const [matchCount, setMatchCount] = useState(0);
@@ -110,7 +110,7 @@ export function WindowSearchBar({
 
   const refreshMatches = useCallback(
     (nextQuery: string, options: { scrollToActive?: boolean; resetIndex?: boolean } = {}) => {
-      const root = contentRef.current as unknown as HTMLElement | null;
+      const root = resolveSearchRoot(contentRef);
       const trimmed = nextQuery.trim();
       if (!trimmed || !root) {
         rangesRef.current = [];
@@ -147,7 +147,7 @@ export function WindowSearchBar({
   }, [query, refreshMatches]);
 
   useEffect(() => {
-    const root = contentRef.current as unknown as HTMLElement | null;
+    const root = resolveSearchRoot(contentRef);
     if (!root || !query.trim() || typeof MutationObserver === "undefined") {
       return;
     }
@@ -227,95 +227,63 @@ export function WindowSearchBar({
   const hasQuery = query.trim().length > 0;
   const matchLabel = useMemo(() => {
     if (!hasQuery) return "";
-    if (matchCount === 0) return "0 matches";
-    return `${activeIndex + 1} / ${matchCount}`;
+    if (matchCount === 0) return "0";
+    return `${activeIndex + 1}/${matchCount}`;
   }, [activeIndex, hasQuery, matchCount]);
 
   return (
-    <WindowChromeRegion corners="both">
-      <View style={styles.bar} dataSet={WINDOW_SEARCH_BAR_DATASET}>
-        <TitlebarDragRegion />
-        <WindowChromeSafeArea placement="inline" horizontalPadding={12} style={styles.barInner}>
-          {showSidebarToggle ? (
-            <View style={[styles.leading, noDragStyle]}>
-              <WindowSidebarMenuToggle />
-            </View>
-          ) : null}
-          <View style={styles.searchSlot}>
-            <View style={[styles.searchField, isFocused && styles.searchFieldFocused, noDragStyle]}>
-              <ThemedSearch size={14} uniProps={mutedColorMapping} />
-              <ThemedTextInput
-                ref={inputRef}
-                testID="window-search-input"
-                initialValue={query}
-                onChangeText={setQuery}
-                onFocus={handleFocus}
-                onBlur={handleBlur}
-                onKeyPress={handleInputKeyPress}
-                placeholder="Search & highlight text… (⌘F)"
-                accessibilityLabel="Search and highlight text in window"
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="search"
-                style={styles.input}
-              />
-              {hasQuery ? (
-                <WindowSearchControls
-                  matchCount={matchCount}
-                  matchLabel={matchLabel}
-                  onPrev={handlePrev}
-                  onNext={handleNext}
-                  onClear={handleClear}
-                />
-              ) : null}
-            </View>
-          </View>
-        </WindowChromeSafeArea>
-      </View>
-    </WindowChromeRegion>
+    <View
+      dataSet={WINDOW_SEARCH_BAR_DATASET}
+      style={[
+        styles.searchField,
+        (isFocused || hasQuery) && styles.searchFieldActive,
+        isFocused && styles.searchFieldFocused,
+        noDragStyle,
+      ]}
+    >
+      <ThemedSearch size={13} uniProps={mutedColorMapping} />
+      <ThemedTextInput
+        ref={inputRef}
+        testID="window-search-input"
+        initialValue={query}
+        onChangeText={setQuery}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyPress={handleInputKeyPress}
+        accessibilityLabel="Filter and highlight text"
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+        style={styles.input}
+      />
+      {hasQuery ? (
+        <WindowSearchControls
+          matchCount={matchCount}
+          matchLabel={matchLabel}
+          onPrev={handlePrev}
+          onNext={handleNext}
+          onClear={handleClear}
+        />
+      ) : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  bar: {
-    position: "relative",
-    height: DESKTOP_TRAFFIC_LIGHT_HEIGHT,
-    backgroundColor: theme.colors.surface0,
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: theme.colors.border,
-    justifyContent: "center",
-    zIndex: 30,
-  },
-  barInner: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-  },
-  leading: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  searchSlot: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    minWidth: 0,
-  },
   searchField: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
-    minWidth: 0,
-    maxWidth: 520,
+    gap: theme.spacing[1.5],
+    width: 132,
     height: 28,
     paddingHorizontal: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
     backgroundColor: theme.colors.surface1,
     borderWidth: theme.borderWidth[1],
     borderColor: theme.colors.border,
+  },
+  searchFieldActive: {
+    width: 220,
   },
   searchFieldFocused: {
     borderColor: theme.colors.borderAccent,
@@ -333,12 +301,12 @@ const styles = StyleSheet.create((theme) => ({
   controls: {
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[1],
+    gap: 2,
   },
   countText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
-    marginRight: theme.spacing[1],
+    marginRight: 2,
   },
   countTextEmpty: {
     color: theme.colors.foregroundExtraMuted,

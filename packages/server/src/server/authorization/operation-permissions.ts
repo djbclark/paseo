@@ -139,6 +139,7 @@ const INBOUND_PERMISSION = {
   "plugin.catalog.get.request": "daemon.manage",
   "plugin.directory.inspect.request": "daemon.manage",
   "plugin.directory.install.request": "daemon.manage",
+  "plugin.directory.replace.request": "daemon.manage",
   "plugin.disable.request": "daemon.manage",
   "plugin.enable.request": "daemon.manage",
   "plugin.list.request": "daemon.manage",

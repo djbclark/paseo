@@ -1594,6 +1594,15 @@ export const PluginDirectoryInstallRequestSchema = z.object({
   id: PluginIdSchema.optional(),
 });
 
+export const PluginDirectoryReplaceRequestSchema = z.object({
+  type: z.literal("plugin.directory.replace.request"),
+  requestId: z.string(),
+  pluginId: PluginIdSchema,
+  path: z.string().min(1),
+  expectedPath: z.string().min(1),
+  expectedGeneration: z.number().int().nonnegative(),
+});
+
 export const PluginDirectoryInspectRequestSchema = z.object({
   type: z.literal("plugin.directory.inspect.request"),
   requestId: z.string(),
@@ -3557,6 +3566,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PluginListRequestSchema,
   PluginLogsGetRequestSchema,
   PluginDirectoryInstallRequestSchema,
+  PluginDirectoryReplaceRequestSchema,
   PluginDirectoryInspectRequestSchema,
   PluginSourceInstallRequestSchema,
   PluginSourceStatusRequestSchema,
@@ -3971,6 +3981,7 @@ export const ServerInfoStatusPayloadSchema = z
         pluginGitManagement: z.boolean().optional(),
         // COMPAT(pluginSourceInstallation): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports source identifiers.
         pluginSourceInstallation: z.boolean().optional(),
+        managedPluginPromotions: z.boolean().optional(),
         // COMPAT(pluginSourceUpdates): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports reviewed updates.
         pluginSourceUpdates: z.boolean().optional(),
         // COMPAT(pluginThemes): added in v0.5.0, remove gate after 2027-08-20.
@@ -7169,7 +7180,29 @@ export const PluginNpmInstallationSchema = z.object({
   integrity: z.string(),
 });
 
+export const PluginLoadedReceiptSchema = z.object({
+  pluginId: PluginIdSchema,
+  activationGeneration: z.number().int().nonnegative(),
+  sourcePath: z.string(),
+  serverBundleSha256: z.string(),
+  processStartToken: z.string(),
+  startedAt: z.string(),
+  pid: z.number().int().optional(),
+  snapshotRoot: z.string().optional(),
+  snapshotSha256: z.string().optional(),
+});
+export type PluginLoadedReceipt = z.infer<typeof PluginLoadedReceiptSchema>;
+
 export const PluginListItemSchema = z.object({
+  loaded: PluginLoadedReceiptSchema.optional(),
+  promotionState: z
+    .object({
+      generation: z.number(),
+      phase: z.string(),
+      oldPath: z.string().optional(),
+      candidatePath: z.string().optional(),
+    })
+    .optional(),
   id: PluginIdSchema,
   name: z.string().optional(),
   icon: z.string().optional(),
@@ -7212,6 +7245,11 @@ export const PluginLogsGetResponseSchema = z.object({
 
 export const PluginDirectoryInstallResponseSchema = z.object({
   type: z.literal("plugin.directory.install.response"),
+  payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
+});
+
+export const PluginDirectoryReplaceResponseSchema = z.object({
+  type: z.literal("plugin.directory.replace.response"),
   payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
 });
 
@@ -7387,6 +7425,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PluginListResponseSchema,
   PluginLogsGetResponseSchema,
   PluginDirectoryInstallResponseSchema,
+  PluginDirectoryReplaceResponseSchema,
   PluginDirectoryInspectResponseSchema,
   PluginSourceInstallResponseSchema,
   PluginSourceStatusResponseSchema,

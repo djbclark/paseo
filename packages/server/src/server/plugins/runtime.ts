@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { ManagedPluginActivationPolicy, type ActivationOperation } from "./activation-policy.js";
+import type { PluginLoadedReceipt } from "@getpaseo/protocol/messages";
 import { validateWorktreePath } from "../../utils/worktree-path.js";
 import type { PluginHookPayload } from "@getpaseo/plugin/server";
 import type { PluginWireBeforeRequests, PluginBeforeResults } from "./lifecycle/index.js";
@@ -54,6 +57,7 @@ interface PluginOutputStream {
 }
 
 interface PluginChild {
+  pid?: number;
   connected: boolean;
   killed: boolean;
   stdout?: PluginOutputStream | null;
@@ -72,6 +76,7 @@ interface PendingInvocation {
 }
 
 interface LoadedPlugin {
+  loadedReceipt?: PluginLoadedReceipt;
   id: string;
   instanceId: string;
   requirements: PluginRequirements | undefined;
@@ -131,6 +136,7 @@ interface RemoteProviderConnection {
 }
 
 interface PluginRuntimeDependencies {
+  activationPolicy?: ManagedPluginActivationPolicy;
   settingsDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
   spawnChild?: () => PluginChild;
@@ -239,10 +245,11 @@ function resolveWorkerExecArgv(): string[] {
   ];
 }
 
-function spawnPluginChild(): PluginChild {
+function spawnPluginChild(environment?: NodeJS.ProcessEnv): PluginChild {
   return fork(fileURLToPath(resolveWorkerUrl()), [], {
     execArgv: resolveWorkerExecArgv(),
     serialization: "advanced",
+    ...(environment ? { env: environment } : {}),
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   }) as PluginChild;
 }
@@ -281,6 +288,7 @@ function send(child: PluginChild, message: PluginProcessRequest): Promise<void> 
 
 export class PluginRuntime {
   private readonly plugins = new Map<string, LoadedPlugin>();
+  private readonly activationGenerations = new Map<string, number>();
   private readonly pendingEvents = new Set<Promise<void>>();
   private readonly logTails = new Map<string, PluginLogTail>();
   private readonly logger: pino.Logger;
@@ -324,19 +332,19 @@ export class PluginRuntime {
     pluginId: string,
     configuredPath: string,
     canPublish: () => boolean = () => true,
+    operation: ActivationOperation = "activate",
   ): Promise<void> {
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
-    const loaded = await this.loadDirectoryPlugin(pluginId, configuredPath, canPublish).catch(
-      (error) => {
-        this.appendLog(
-          pluginId,
-          "stderr",
-          `[paseo] Plugin failed to load: ${describeError(error)}`,
-        );
-        throw error;
-      },
-    );
+    const loaded = await this.loadDirectoryPlugin(
+      pluginId,
+      configuredPath,
+      canPublish,
+      operation,
+    ).catch((error) => {
+      this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
+      throw error;
+    });
     if (!canPublish()) {
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
@@ -364,6 +372,19 @@ export class PluginRuntime {
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
+  }
+
+  async validateActivation(pluginId: string, directory: string): Promise<void> {
+    const policy = this.dependencies.activationPolicy;
+    const ticket = await policy?.authorize(pluginId, directory);
+    const bundles = await compileDirectoryPlugin(directory, this.daemonVersion);
+    if (ticket && !bundles.serverBundle)
+      throw new Error("Managed activation requires a server bundle");
+    await policy?.authorize(pluginId, directory, "activate", bundles.serverBundle, ticket);
+  }
+
+  getLoadedReceipt(pluginId: string): PluginLoadedReceipt | undefined {
+    return this.plugins.get(pluginId)?.loadedReceipt;
   }
 
   async validatePlugin(configuredPath: string): Promise<void> {
@@ -812,13 +833,25 @@ export class PluginRuntime {
     pluginId: string,
     configuredPath: string,
     canPublish: () => boolean,
+    operation: ActivationOperation,
   ): Promise<LoadedPlugin> {
-    const directory = path.resolve(configuredPath);
+    const directory = await realpath(path.resolve(configuredPath));
+    const policy = this.dependencies.activationPolicy;
+    const ticket = await policy?.authorize(pluginId, configuredPath, operation);
     const bundles = await compileDirectoryPlugin(directory, this.daemonVersion);
     const { manifest } = bundles;
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
     const serverBundle = bundles.serverBundle;
     if (!serverBundle) {
+      const currentTicket = await policy?.authorize(
+        pluginId,
+        configuredPath,
+        operation,
+        undefined,
+        ticket,
+      );
+      if (currentTicket) throw new Error("Managed activation requires a server bundle");
+      if (ticket) throw new Error("Managed activation requires a server bundle");
       const clientBundle = bundles.clientBundle ?? "";
       return {
         id: pluginId,
@@ -841,14 +874,63 @@ export class PluginRuntime {
         sessionClosed: null,
       };
     }
-    return this.launchPlugin({
+    const currentTicket = await policy?.authorize(
       pluginId,
-      pluginDirectory: directory,
-      requirements: manifest.requirements,
-      child: this.spawnChild(),
-      bundle: serverBundle,
-      clientBundle: bundles.clientBundle ?? "",
-    });
+      configuredPath,
+      operation,
+      serverBundle,
+      ticket,
+    );
+    if (JSON.stringify(currentTicket) !== JSON.stringify(ticket))
+      throw new Error("Managed enrollment changed during compilation");
+    await policy?.arm(pluginId, ticket);
+    const startedAt = new Date().toISOString();
+    let launched: LoadedPlugin | undefined;
+    try {
+      const loaded = await this.launchPlugin({
+        pluginId,
+        pluginDirectory: directory,
+        requirements: manifest.requirements,
+        child: ticket && !this.dependencies.spawnChild ? spawnPluginChild({}) : this.spawnChild(),
+        bundle: serverBundle,
+        clientBundle: bundles.clientBundle ?? "",
+      });
+      launched = loaded;
+      {
+        const currentTicket = await policy?.authorize(
+          pluginId,
+          configuredPath,
+          operation,
+          serverBundle,
+          ticket,
+        );
+        if (JSON.stringify(currentTicket) !== JSON.stringify(ticket))
+          throw new Error("Managed enrollment changed during launch");
+      }
+      loaded.loadedReceipt = {
+        pluginId,
+        activationGeneration:
+          ticket?.generation ?? (this.activationGenerations.get(pluginId) ?? 0) + 1,
+        sourcePath: directory,
+        serverBundleSha256: createHash("sha256").update(serverBundle).digest("hex"),
+        processStartToken: loaded.instanceId,
+        startedAt,
+        ...(loaded.child?.pid ? { pid: loaded.child.pid } : {}),
+        ...(ticket
+          ? {
+              snapshotRoot: ticket.authorization.snapshotRoot,
+              snapshotSha256: ticket.authorization.snapshotSha256,
+            }
+          : {}),
+      };
+      this.activationGenerations.set(pluginId, loaded.loadedReceipt.activationGeneration);
+      await policy?.finish(pluginId, ticket, true);
+      return loaded;
+    } catch (error) {
+      if (launched) await this.stopPlugin(launched);
+      await policy?.finish(pluginId, ticket, false);
+      throw error;
+    }
   }
 
   private async launchPlugin(input: {

@@ -1,3 +1,4 @@
+import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
 import { unarchiveWorkspaceAgents } from "./workspace-archive-service.js";
 import { createRestartRecovery } from "./agent/restart-recovery/index.js";
 import { sendPromptToAgent, unarchiveAgentState } from "./agent/agent-prompt.js";
@@ -673,6 +674,10 @@ export async function createPaseoDaemon(
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
   const pluginRuntime: PluginService = new PluginService(logger, daemonConfigStore, daemonVersion, {
+    activationPolicy: new ManagedPluginActivationPolicy(
+      process.env.PASEO_MANAGED_PLUGIN_POLICY,
+      path.join(config.paseoHome, "plugin-promotions"),
+    ),
     usageAgents: {
       hasAgent: (id) => agentManager.getAgent(id) !== null,
       usageSession: (id) => agentManager.usageSession(id),

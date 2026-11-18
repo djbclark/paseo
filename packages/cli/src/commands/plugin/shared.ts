@@ -4,6 +4,7 @@ import type { CommandError } from "../../output/index.js";
 import { connectToDaemon } from "../../utils/client.js";
 
 type PluginFeature =
+  | "managedPluginPromotions"
   | "pluginManagement"
   | "pluginLogs"
   | "pluginSourceUpdates"
@@ -73,6 +74,18 @@ export async function withPluginUpdateClient<T>(
     target,
     "pluginSourceUpdates",
     "Update the host to review plugin updates.",
+    run,
+  );
+}
+
+export async function withManagedPluginClient<T>(
+  target: DaemonTarget,
+  run: (client: DaemonClient) => Promise<T>,
+): Promise<T> {
+  return withPluginClient(
+    target,
+    "managedPluginPromotions",
+    "Update the host to replace managed plugin sources.",
     run,
   );
 }

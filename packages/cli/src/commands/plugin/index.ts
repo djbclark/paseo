@@ -14,6 +14,7 @@ import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
 import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
 import {
+  withManagedPluginClient,
   withPluginLogsClient,
   withPluginUpdateClient,
   withPluginManagementClient,
@@ -22,6 +23,8 @@ import {
 
 interface PluginOptions extends CommandOptions {
   host?: string;
+  expectedPath?: string;
+  expectedGeneration?: string;
   id?: string;
   ref?: string;
   path?: string;
@@ -48,6 +51,13 @@ const pluginSchema: OutputSchema<PluginListItem> = {
       field: (plugin) => plugin.installation?.currentRevision ?? "-",
       width: 16,
     },
+    { header: "LOADED", field: (plugin) => plugin.loaded?.serverBundleSha256 ?? "-", width: 16 },
+    {
+      header: "GENERATION",
+      field: (plugin) => String(plugin.loaded?.activationGeneration ?? "-"),
+      width: 12,
+    },
+    { header: "PROMOTION", field: (plugin) => plugin.promotionState?.phase ?? "-", width: 18 },
     { header: "DIRECTORY", field: "path", width: 40 },
     { header: "ERROR", field: (plugin) => plugin.error ?? "", width: 40 },
   ],
@@ -207,8 +217,37 @@ async function remove(
   return { type: "single", data, schema: pluginSchema };
 }
 
+export async function runPluginReplaceCommand(
+  pluginId: string,
+  directory: string,
+  options: PluginOptions,
+): Promise<SingleResult<PluginListItem>> {
+  const expectedGeneration = Number(options.expectedGeneration);
+  if (
+    !options.expectedPath ||
+    !options.expectedGeneration ||
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0
+  )
+    throw new Error("Supply --expected-path and --expected-generation");
+  const expectedPath = options.expectedPath;
+  const data = await withManagedPluginClient(options.daemonTarget, (client) =>
+    client.replaceDirectoryPlugin({ pluginId, path: directory, expectedPath, expectedGeneration }),
+  );
+  return { type: "single", data, schema: pluginSchema };
+}
+
 export function createPluginCommand(): Command {
   const plugin = new Command("plugin").description("Manage trusted, unsandboxed plugins");
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("replace")
+      .description("Replace an authorized binary-only directory snapshot")
+      .argument("<id>")
+      .argument("<directory>")
+      .requiredOption("--expected-path <path>", "Exact current source identity")
+      .requiredOption("--expected-generation <generation>", "Current activation generation"),
+  ).action(withOutput(runPluginReplaceCommand));
   addJsonOption(
     plugin
       .command("init")

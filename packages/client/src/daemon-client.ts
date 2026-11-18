@@ -6526,6 +6526,21 @@ export class DaemonClient {
     });
   }
 
+  async replaceDirectoryPlugin(input: {
+    pluginId: string;
+    path: string;
+    expectedPath: string;
+    expectedGeneration: number;
+  }): Promise<PluginListItem> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "plugin.directory.replace.request", requestId, ...input },
+      responseType: "plugin.directory.replace.response",
+    });
+    return payload.plugin;
+  }
+
   async installDirectoryPlugin(path: string, id?: string): Promise<PluginListItem> {
     const requestId = this.createRequestId();
     const payload = await this.sendCorrelatedSessionRequest({

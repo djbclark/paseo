@@ -1,0 +1,28 @@
+name: Fork managed plugins
+on:
+  push:
+    branches: [fork/managed-plugin-promotions]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  plugins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node scripts/npm-retry.mjs ci
+      - run: npm run build:server-deps
+      - run: npm run typecheck:server
+      - run: npm run build --workspace=@getpaseo/server
+      - run: npm run typecheck --workspace=@getpaseo/cli
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run test:unit --workspace=@getpaseo/server -- src/server/plugins/index.posix.test.ts src/server/plugins/managed-source.posix.test.ts src/server/plugins/runtime.posix.test.ts src/server/plugins/requirements.posix.test.ts
+      - run: npm run test:unit --workspace=@getpaseo/cli -- src/commands/plugin/index.test.ts
+      - run: npm run test --workspace=@getpaseo/protocol -- src/messages.plugins.test.ts

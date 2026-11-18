@@ -6,6 +6,92 @@ Paseo executes `index.server.ts` in a subprocess and `index.client.tsx` in every
 
 > **Trust every plugin you add.** `paseo plugin add` and `paseo plugin install` mean “I trust this codebase.” Plugins are unsandboxed: server code and preparation commands run with the daemon user's access on the daemon host, and client contributions run inside Paseo. The repository's dependencies and future updates are part of that trust decision. With `--host`, preparation runs on that remote daemon host.
 
+## Managed activation policy (fork)
+
+Set `PASEO_MANAGED_PLUGIN_POLICY` in the daemon administrator's launch environment to an absolute
+JSON policy file. The daemon reads it again for each activation; no restart is needed for policy
+content changes. The configured file must stay readable and valid: an invalid file holds **all**
+external plugin starts. With no configured policy, existing unmanaged plugins work unchanged.
+Built-in plugins are outside this policy. This is an administrative deployment boundary for trusted,
+unsandboxed code, not isolation from malicious plugins running as the daemon user. Protect the policy,
+state directory, snapshots and daemon launch environment from candidate code and other writers.
+
+Version 1 has this shape (digest placeholders must be replaced with 64 lowercase hexadecimal digits):
+
+```json
+{
+  "version": 1,
+  "plugins": {
+    "example": {
+      "authorizations": [
+        {
+          "operation": "activate",
+          "expectedGeneration": 0,
+          "sourcePath": "/snapshots/full-immutable-revision/plugins/example",
+          "snapshotRoot": "/snapshots/full-immutable-revision",
+          "snapshotSha256": "FULL_SNAPSHOT_SHA256",
+          "serverBundleSha256": "ACTUAL_COMPILED_SERVER_BUNDLE_SHA256",
+          "state": "binary-only",
+          "forbiddenEnvironment": ["EXAMPLE_HELPER_OVERRIDE"]
+        }
+      ]
+    }
+  }
+}
+```
+
+An entry with no authorizations is revoked. Enrollment is remembered in the daemon's
+`plugin-promotions/<encoded-id>.json`; removing a policy entry does not unenroll it. Every activation
+consumes a new generation, including unsuccessful launches and recovery. Authorization names the
+**previous** generation, exact canonical source, complete snapshot digest and compiled server bundle
+digest. Moving Git refs, installed Git HEAD, client hashes, plugin reports and CI success alone do
+not authorize activation. There is no bypass flag. Configured policy failures never mean unmanaged.
+
+Prepare snapshots outside the daemon. Include the full helper dependency closure, not just the plugin
+subdirectory; no symlinks or special files are accepted. `hashPluginSnapshot` hashes every directory
+and file, in sorted name order: UTF-8 JSON `["directory", relativePath]` plus newline for directories;
+UTF-8 JSON `["file", relativePath, mode & 0777, byteLength]` plus newline, raw file bytes, and newline
+for files. Paths use `/`. The administrator must keep the snapshot immutable throughout activation
+and use qualified code that refuses mutable external helper fallbacks. Managed children receive an
+empty environment; the listed forbidden variables also cause activation to hold if present in the
+daemon environment. In particular, adapters with helper overrides must include every override key
+and resolve helpers only within the qualified snapshot. This API does not qualify an existing adapter
+or prove that its dependency declarations are complete.
+
+The server bundle digest is SHA256 over the exact UTF-8 bundle sent to the child. Produce the expected
+hash using the same compiler/runtime version during qualification. Compilation is not automatically
+equivalent to a published CI artifact. `plugin ls --json` and `plugin status ID --json` expose `loaded`
+separately from on-disk revision: canonical source, snapshot digest when managed, actual compiled
+server digest, activation generation, PID, daemon-issued instance token and launch timestamp. The
+receipt remains unchanged when disk changes and disappears on stop/failure. Verify its hash against
+independently compiled qualified bytes, snapshot digest and child identity. Unmanaged generations
+are daemon-local; managed generations persist across restarts.
+
+### Replace a managed directory
+
+```bash
+paseo plugin replace example /snapshots/new/plugins/example \
+  --expected-path /snapshots/old/plugins/example --expected-generation 1
+```
+
+The typed `plugin.directory.replace.request` operation requires the source path and generation CAS.
+It stages compatibility/compilation/authorization while old code runs, then records a replacement
+journal before stopping that one child. It retains ID, settings, logs, old path and old snapshot.
+No directory is rewritten or deleted. All lifecycle changes use the manager's existing serialized
+operation queue; disabling/removing still cancels an in-flight activation.
+
+Only administrator-declared `binary-only` state is supported. Qualify both versions as compatible
+with existing plugin settings and persistent effects. State migrations are held; never restore
+session databases or erase newly written state to undo a binary switch.
+
+Recovery requires a separate current `recover` authorization for the retained identity and next
+expected generation. Revoking a candidate does not revoke an independently authorized baseline.
+Missing recovery authorization leaves the plugin stopped and exposes held/recovery-required state.
+An interrupted `activating` or `replacing` journal prevents automatic startup replay. Retain both
+snapshots and journal for administrator reconciliation; this version offers no online journal-reset
+or migration command. Reconcile registration and runtime identity before restoring a ready state
+with the daemon stopped under separately approved maintenance.
+
 ## Install a directory source
 
 Create a typecheckable plugin project, install its development dependencies, then install it into

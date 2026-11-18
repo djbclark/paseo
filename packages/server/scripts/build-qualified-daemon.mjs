@@ -4,6 +4,7 @@ import { isBuiltin, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { buildQualifiedGit } from "./build-qualified-git.mjs";
 import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
 import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -191,7 +192,12 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     retainedBuiltins.sourceInputs,
     inputMetafile,
   );
-  const sourceInputs = [...retainedBuiltins.sourceInputs, ...compiledBuiltins.sourceInputs];
+  const finiteGit = await buildQualifiedGit(outDir);
+  const sourceInputs = [
+    ...retainedBuiltins.sourceInputs,
+    ...compiledBuiltins.sourceInputs,
+    ...finiteGit.sourceInputs,
+  ];
   const inputNames = [
     ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
   ].sort();
@@ -220,6 +226,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         ),
       ].sort(),
       packageLockSha256: digest(await readFile(path.join(repositoryRoot, "package-lock.json"))),
+      finiteGit,
       toolchain: {
         node: process.version,
         versions: process.versions,

@@ -95,9 +95,13 @@ function knownFailureIdentityValid(
     known.maintenance.recoveryRequired === true
   );
 }
-function knownFailureAPIAvailable(known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>): boolean {
+function knownFailureAPIAvailable(
+  known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>,
+): boolean {
   const features = known.maintenance.authority?.features;
-  return features?.maintenanceKnownFailedHeldV1 === true || features?.maintenanceHeldRecoveryV1 === true;
+  return (
+    features?.maintenanceKnownFailedHeldV1 === true || features?.maintenanceHeldRecoveryV1 === true
+  );
 }
 export function maintenancePluginOutput(payload: MaintenanceOperationPayload, supported: boolean) {
   if (payload.error) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };

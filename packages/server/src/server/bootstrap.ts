@@ -810,12 +810,15 @@ async function createPaseoDaemonInExecutionContext(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  const terminalManager = await startWorkerTerminalManager({
+  const terminalOptions = {
     paseoHome: config.paseoHome,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
-  });
+    qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
+  };
+  const terminalManager = await startWorkerTerminalManager(terminalOptions);
+  qualifiedDaemon.bindTerminalManager(terminalManager);
   guardMaintenanceMethod(terminalManager, "createTerminal", maintenance);
   applyTerminalAgentHookSetting({ store: daemonConfigStore, logger });
 

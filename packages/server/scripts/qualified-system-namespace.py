@@ -913,6 +913,61 @@ def launch_recipe(value, root, manifest_digest, caller):
     return {**environment, "HOME": caller.home, "USER": caller.name, "LOGNAME": caller.name}
 
 
+def verify_existing_namespace(root: str, expected_manifest_sha256: str) -> None:
+    """Read-only current-namespace recheck; no execution/owner qualification grant.
+
+    The caller authenticates the sealed bytes before importing this fixed member.
+    All exceptions are refusal. No Admin, privilege, mount or exec effects occur.
+    """
+    root = absolute(root)
+    digest = sha256(expected_manifest_sha256)
+    require(os.path.abspath(__file__) == root + "/system-closure/namespace-bootstrap.py",
+            "unexpected-verifier-member")
+    checks = []
+    distribution = None
+    try:
+        manifest = checked_file(root + ".manifest.json", 4 * 1024 * 1024, immutable=False)
+        checks.append(manifest)
+        require(hashlib.sha256(manifest.data).hexdigest() == digest, "unapproved-manifest")
+        namespace = namespace_identity()
+        mounts = verify_private_mounts()
+        # Keep the partially initialized object's descriptors reachable on refusal.
+        distribution = Distribution.__new__(Distribution)
+        distribution.__init__(root, decode_json(manifest.data))
+        bootstrap = distribution.open_member("system-closure/namespace-bootstrap.py")
+        require(stat.S_IMODE(bootstrap.before[2]) == 0o444, "unexpected-verifier-mode")
+        distribution.absent_selection.add("/etc/ld.so.preload")
+        targets = [(target, row["retainedPath"], row) for target, row in distribution.external.items()]
+        cache = distribution.loader["cache"]
+        targets.append((cache["path"], cache["retainedPath"], cache))
+        for target, member, row in targets:
+            source = distribution.open_member(member)
+            mounted = [mount for mount in mounts if mount["path"] == target]
+            require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"] and
+                    "noexec" not in mounted[0]["options"], "readonly-bind-unproved")
+            actual = checked_file(target, 512 * 1024 * 1024,
+                                  {key: row[key] for key in ("mode", "size", "sha256")})
+            checks.append(actual)
+            require(actual.before == source.before, "existing-bind-inode-mismatch")
+        distribution.verify_layout()
+        distribution.verify_search(distribution.loader["elf"])
+        for source in checks:
+            source.check()
+        distribution.check_sources()
+        distribution.check_layout()
+        require(namespace_identity() == namespace and verify_private_mounts() == mounts,
+                "existing-namespace-changed")
+    finally:
+        close_failed = False
+        sources = checks + list(getattr(distribution, "opened", {}).values())
+        for source in sources:
+            try:
+                source.close()
+            except OSError:
+                close_failed = True
+        require(not close_failed, "readonly-descriptor-close-failed")
+
+
 def execute_namespace(distribution, admin, caller, checks, executable, arguments, environment):
     """Actual syscall seam; injectable source-unit doubles never establish proof."""
     caller.check_alive()

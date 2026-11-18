@@ -96,6 +96,7 @@ export interface QualifiedDaemonObservation {
     artifactSha256: string;
     qualifiedOrigin: string;
   }[];
+  pluginHosts: readonly { pid: number; incarnation: string; hostEvidence: HostEvidence }[];
   ownedHandles: readonly {
     kind: "plugin-child" | "compiler" | "terminal-worker";
     pid: number;

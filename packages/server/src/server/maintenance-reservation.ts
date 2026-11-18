@@ -109,6 +109,7 @@ export class MaintenanceReservation {
 
   private transport?: { serverId: string; authority: QualifiedDaemonAccess };
   private pluginOperation?: HeldPluginOperationDriver;
+  private managedPluginCohortV2 = false;
   private ready = false;
   private revision = 0;
   private storageTail: Promise<void> = Promise.resolve();
@@ -209,11 +210,13 @@ export class MaintenanceReservation {
     serverId: string,
     authority: QualifiedDaemonAccess,
     operation?: HeldPluginOperationDriver,
+    managedPluginCohortV2 = false,
   ): void {
     if (this.ready || this.pending)
       throw new Error("Maintenance transport must bind before startup");
     this.transport = { serverId, authority };
     this.pluginOperation = operation;
+    this.managedPluginCohortV2 = managedPluginCohortV2;
   }
 
   transportAuthority() {
@@ -231,6 +234,8 @@ export class MaintenanceReservation {
       daemonIncarnation,
       qualified,
       features: {
+        // API availability only; enclosing/cohort qualification remains independently required.
+        ...(this.managedPluginCohortV2 ? { managedPluginCohortV2: true } : {}),
         maintenanceReservationV1: supported,
         maintenancePluginOperationV1: supported && this.pluginOperation !== undefined,
         maintenanceKnownFailedHeldV1:

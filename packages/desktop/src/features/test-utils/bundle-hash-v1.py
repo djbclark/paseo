@@ -29,7 +29,26 @@ def visit(file, relative):
             name.encode("utf-8", errors="strict")
             visit(child, relative + "/" + name if relative else name)
     elif stat.S_ISREG(before.st_mode):
-        data = file.read_bytes()
+        descriptor = os.open(file, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or stamp(opened) != stamp(before):
+                raise ValueError("not a stable regular file")
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(1024 * 1024, before.st_size - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > before.st_size:
+                    raise ValueError("file grew while reading")
+                chunks.append(chunk)
+            if stamp(os.fstat(descriptor)) != stamp(before):
+                raise ValueError("unstable descriptor")
+            data = b"".join(chunks)
+        finally:
+            os.close(descriptor)
         if len(data) != before.st_size:
             raise ValueError("unstable file")
         rows.append((relative, ["f", relative, mode, len(data), hashlib.sha256(data).hexdigest()]))

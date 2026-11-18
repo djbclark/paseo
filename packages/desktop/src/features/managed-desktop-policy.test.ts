@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  rmSync,
+  readFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -234,5 +243,91 @@ describe("runtime plugin cohort authority", () => {
     expect(() =>
       new ManagedDesktopAuthority(() => current).downloadMetadata("1.2.4", metadata),
     ).not.toThrow();
+  });
+});
+
+describe("bounded production filesystem readers", () => {
+  const require = createRequire(import.meta.url);
+  function compileReaders(root: string) {
+    const compiler = require("typescript") as typeof import("typescript");
+    for (const name of ["managed-bundle", "managed-desktop-policy"]) {
+      const source = readFileSync(path.resolve(`src/features/${name}.ts`), "utf8");
+      const output = compiler.transpileModule(source, {
+        compilerOptions: {
+          module: compiler.ModuleKind.CommonJS,
+          target: compiler.ScriptTarget.ES2022,
+          esModuleInterop: true,
+        },
+      }).outputText;
+      writeFileSync(
+        path.join(root, `${name}.js`),
+        output.replaceAll('require("zod")', `require(${JSON.stringify(require.resolve("zod"))})`),
+      );
+    }
+  }
+  function runReader(root: string, action: string, home: string, target: string) {
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.resolve("src/features/test-utils/managed-reader-child.cjs"),
+        root,
+        action,
+        home,
+        target,
+      ],
+      { timeout: 2500, encoding: "utf8" },
+    );
+    expect(result.error, result.stderr).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).not.toBe("");
+    return result.stdout;
+  }
+  it.each(["policy", "archive", "bundle"])(
+    "rejects no-writer FIFO in %s without blocking open",
+    (action) => {
+      const root = temporary();
+      compileReaders(root);
+      const home = path.join(root, "home");
+      const directory = path.join(home, ".local/state/djbclark-ade/forks");
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const artifact = path.join(root, "artifact");
+      mkdirSync(artifact);
+      const fifo =
+        action === "policy"
+          ? path.join(directory, "paseo-desktop-policy.json")
+          : path.join(artifact, "fifo");
+      const made = spawnSync("mkfifo", [fifo], { timeout: 2500, encoding: "utf8" });
+      expect(made.status, made.stderr).toBe(0);
+      expect(runReader(root, action, home, action === "bundle" ? artifact : fifo)).toMatch(
+        /regular|Unsupported|protected/,
+      );
+    },
+  );
+  it("rejects a regular bundle leaf replaced by a FIFO at open", () => {
+    const root = temporary();
+    compileReaders(root);
+    const artifact = path.join(root, "artifact");
+    mkdirSync(artifact);
+    writeFileSync(path.join(artifact, "regular"), "content");
+    expect(runReader(root, "bundle-swap", root, artifact)).toContain("regular");
+  });
+  it("rejects archive growth during hashing", () => {
+    const root = temporary();
+    compileReaders(root);
+    const file = path.join(root, "archive");
+    writeFileSync(file, "a");
+    expect(runReader(root, "archive-growth", root, file)).toContain("grew");
+  });
+  it("bounds the policy read even when the file grows after its initial stat", () => {
+    const root = temporary();
+    compileReaders(root);
+    const home = path.join(root, "home");
+    const directory = path.join(home, ".local/state/djbclark-ade/forks");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(directory, "paseo-desktop-policy.json"), " ".repeat(65537), {
+      mode: 0o600,
+    });
+    expect(runReader(root, "policy-growth", home, "")).toContain("too large");
   });
 });

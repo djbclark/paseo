@@ -4,7 +4,7 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
 } from "node:fs";
 import { userInfo } from "node:os";
@@ -110,14 +110,24 @@ export function readManagedDesktopPolicy(): ManagedDesktopPolicy {
     )
       throw new Error("Managed desktop authority ancestor is not protected");
   }
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.uid !== account.uid || (stat.mode & 0o022) !== 0) {
       throw new Error("Managed desktop authority is not protected");
     }
     if (stat.size > 65536) throw new Error("Managed desktop authority too large");
-    const parsed = schema.parse(JSON.parse(readFileSync(fd, "utf8")));
+    // Bound the read itself: a concurrent writer cannot grow an endless input
+    // after the initial size check. The extra byte detects crossing the limit.
+    const buffer = Buffer.alloc(65537);
+    let size = 0;
+    while (size < buffer.length) {
+      const count = readSync(fd, buffer, size, buffer.length - size, null);
+      if (!count) break;
+      size += count;
+    }
+    if (size > 65536) throw new Error("Managed desktop authority too large");
+    const parsed = schema.parse(JSON.parse(buffer.subarray(0, size).toString("utf8")));
     const after = fstatSync(fd);
     const current = lstatSync(file);
     if (

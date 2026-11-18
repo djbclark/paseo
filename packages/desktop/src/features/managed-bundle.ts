@@ -29,7 +29,7 @@ const order = (a: string, b: string) => {
 
 /** Hash a stable regular file without following a substituted symlink. */
 export function stableFileSha256(file: string): string {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) throw new Error("Expected regular artifact file");
@@ -40,6 +40,7 @@ export function stableFileSha256(file: string): string {
       const count = readSync(fd, buffer, 0, buffer.length, null);
       if (!count) break;
       total += BigInt(count);
+      if (total > before.size) throw new Error("Artifact grew while reading");
       hash.update(buffer.subarray(0, count));
     }
     const after = fstatSync(fd, { bigint: true });

@@ -27,9 +27,9 @@ jobs:
       - name: Desktop typecheck
         run: npm run typecheck --workspace=@getpaseo/desktop
       - name: Focused lint
-        run: npm run lint -- packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts
+        run: npm run lint -- packages/desktop/src/features/test-utils/managed-reader-child.cjs packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts
       - name: Focused formatting
-        run: npm run format:check:files -- packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts .github/workflows/fork-qualified-desktop.yml
+        run: npm run format:check:files -- packages/desktop/src/features/test-utils/managed-reader-child.cjs packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts .github/workflows/fork-qualified-desktop.yml
       - name: Updater integration and Python Unicode bundle parity
         working-directory: packages/desktop
         run: npx vitest run src/features/app-update-service.test.ts src/features/auto-updater.test.ts src/features/managed-desktop-policy.test.ts --bail=1

@@ -17,7 +17,7 @@ static int protected_elf(int fd) {
   struct stat info;
   unsigned char magic[4];
   return fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == 0 &&
-         !(info.st_mode & 0222) && pread(fd, magic, 4, 0) == 4 &&
+         !(info.st_mode & 07222) && pread(fd, magic, 4, 0) == 4 &&
          memcmp(magic, "\177ELF", 4) == 0;
 }
 
@@ -105,6 +105,10 @@ int main(int argc, char **argv) {
     if (result == child) {
       leader_status = status;
       have_leader = 1;
+      snprintf(record, sizeof record, "leader %s %ld %d %d\n", argv[1], (long)child,
+               WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+               WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+      if (!git_write(3, record)) observed = 0;
     } else {
       /* Adoption proves lifetime but does not grant image provenance. */
       unexpected = 1;

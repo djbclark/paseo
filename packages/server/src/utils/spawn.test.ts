@@ -264,7 +264,9 @@ describe("admitted execution continuations", () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "continuation-maintenance-")));
     const reservation = new MaintenanceReservation(home, async () => true);
     let finish!: () => void;
-    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
     const admitted = reservation.run(async () => {
       await gate;
       return execCommand(process.execPath, ["-e", "process.stdout.write('continued')"]);
@@ -275,13 +277,19 @@ describe("admitted execution continuations", () => {
       finish();
       expect((await admitted).stdout).toBe("continued");
       expect(reservation.status().state).toBe("recovery-required");
-    } finally { finish(); await admitted; rmSync(home, { recursive: true, force: true }); }
+    } finally {
+      finish();
+      await admitted;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
   test("expired async scope cannot revive helper authority after reservation is held", async () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "expired-maintenance-")));
     const reservation = new MaintenanceReservation(home, async () => true);
     let finish!: () => void;
-    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
     const release = reservation.enter();
     const detached = reservation.executeAdmitted(release, async () => {
       await gate;
@@ -290,8 +298,13 @@ describe("admitted execution continuations", () => {
     try {
       release();
       const held = await reservation.begin(1, "late-callback");
-      finish(); await expect(detached).rejects.toThrow("maintenance");
+      finish();
+      await expect(detached).rejects.toThrow("maintenance");
       await reservation.end(1, held.ownerToken);
-    } finally { finish(); await detached.catch(() => undefined); rmSync(home, { recursive: true, force: true }); }
+    } finally {
+      finish();
+      await detached.catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

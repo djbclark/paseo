@@ -1,4 +1,8 @@
-import { emptyMaintenanceParticipant, type PluginMaintenancePort, type MaintenanceIdentity } from "./maintenance-participant.js";
+import {
+  emptyMaintenanceParticipant,
+  type PluginMaintenancePort,
+  type MaintenanceIdentity,
+} from "./maintenance-participant.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   MISSING_MAINTENANCE_AUTHORITY,
@@ -96,19 +100,27 @@ export class MaintenanceReservation {
   }
 
   isReady(): boolean {
-    try { return this.ready && this.participant.supportsV1() === true; } catch { return false; }
+    try {
+      return this.ready && this.participant.supportsV1() === true;
+    } catch {
+      return false;
+    }
   }
 
   bindParticipant(participant: PluginMaintenancePort): void {
-    if (this.ready || this.pending) throw new Error("Maintenance participant must bind before startup");
+    if (this.ready || this.pending)
+      throw new Error("Maintenance participant must bind before startup");
     this.participant = participant;
   }
 
-  hasPersistedHold(): boolean { return Boolean(this.record?.tokenDigest || this.record?.uncertain); }
+  hasPersistedHold(): boolean {
+    return Boolean(this.record?.tokenDigest || this.record?.uncertain);
+  }
 
   private heldIdentity(): MaintenanceIdentity | null {
     if (!this.hasPersistedHold()) return null;
-    if (!this.record || this.record.generation <= 0 || !this.record.transactionId) throw new Error("Unowned maintenance recovery requires operator");
+    if (!this.record || this.record.generation <= 0 || !this.record.transactionId)
+      throw new Error("Unowned maintenance recovery requires operator");
     return { generation: this.record.generation, transactionId: this.record.transactionId };
   }
 
@@ -116,7 +128,8 @@ export class MaintenanceReservation {
     const identity = this.heldIdentity();
     if (!identity) return;
     const result = await this.participant.begin(identity);
-    if (result === "known-busy") throw new Error("Cannot restore maintenance barrier before startup");
+    if (result === "known-busy")
+      throw new Error("Cannot restore maintenance barrier before startup");
     // Unknown retains parent admission closed; only the participant's independently
     // qualified passive initialization may run next. Missing port never reaches here.
   }
@@ -126,16 +139,26 @@ export class MaintenanceReservation {
     if (!identity) return;
     try {
       const result = await this.participant.begin(identity);
-      if (result === "unknown") { this.failed = true; this.recovery = true; }
+      if (result === "unknown") {
+        this.failed = true;
+        this.recovery = true;
+      }
       // Known busy keeps the existing hold and admitted initialization alive.
-    } catch { this.failed = true; this.recovery = true; }
+    } catch {
+      this.failed = true;
+      this.recovery = true;
+    }
   }
 
   async runQualifiedInitialization<T>(operation: () => Promise<T>): Promise<T> {
     const release = this.hasPersistedHold() ? this.lease() : this.enter();
     // Only bootstrap's protected-qualification bridge calls this. The participant
     // owns actual initialization/helper accounting; the resident transport is not work.
-    try { return await executionOwner.run(undefined, operation); } finally { release(); }
+    try {
+      return await executionOwner.run(undefined, operation);
+    } finally {
+      release();
+    }
   }
   setReady(ready: boolean): void {
     this.ready = ready;
@@ -216,10 +239,27 @@ export class MaintenanceReservation {
     };
   }
 
-  async begin(generation: number, transactionId: string): Promise<MaintenanceStatus & { ownerToken: string }> {
-    if (!Number.isSafeInteger(generation) || generation <= 0 || !transactionId || transactionId.length > 256) throw new Error("Invalid maintenance transaction");
-    if (this.failed || this.pending || this.record?.tokenDigest || this.inFlight || generation <= (this.record?.generation ?? 0)) throw new Error("Maintenance busy or stale generation");
-    if (!this.isReady()) throw new Error("Maintenance reservation unsupported or startup incomplete");
+  async begin(
+    generation: number,
+    transactionId: string,
+  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+    if (
+      !Number.isSafeInteger(generation) ||
+      generation <= 0 ||
+      !transactionId ||
+      transactionId.length > 256
+    )
+      throw new Error("Invalid maintenance transaction");
+    if (
+      this.failed ||
+      this.pending ||
+      this.record?.tokenDigest ||
+      this.inFlight ||
+      generation <= (this.record?.generation ?? 0)
+    )
+      throw new Error("Maintenance busy or stale generation");
+    if (!this.isReady())
+      throw new Error("Maintenance reservation unsupported or startup incomplete");
     const identity = { generation, transactionId };
     this.pending = true;
     this.attempt = identity;
@@ -227,7 +267,10 @@ export class MaintenanceReservation {
     try {
       this.enroll();
       const initial = await this.participant.begin(identity);
-      if (initial === "known-busy") { knownBusy = true; throw new Error("Maintenance known busy"); }
+      if (initial === "known-busy") {
+        knownBusy = true;
+        throw new Error("Maintenance known busy");
+      }
       if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
       const quiet = await this.isQuiet();
       if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
@@ -243,19 +286,33 @@ export class MaintenanceReservation {
         knownBusy = true;
         throw new Error("Maintenance known busy");
       }
-      if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight) throw new Error("Plugin maintenance cohort changed or unknown");
+      if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
+        throw new Error("Plugin maintenance cohort changed or unknown");
       const ownerToken = randomBytes(32).toString("base64url");
-      this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) });
+      this.persist({
+        schemaVersion: 1,
+        generation,
+        transactionId,
+        tokenDigest: digest(ownerToken),
+      });
       this.recovery = false;
       this.pending = false;
       return { ...this.status(), ownerToken };
     } catch (error) {
       if (!knownBusy) {
         const failedPersistence = this.failed;
-        this.failed = true; this.recovery = true;
+        this.failed = true;
+        this.recovery = true;
         // No owner token was issued. Preserve uncertainty across restart where
         // storage works; do not retry/overwrite a failed persistence commit point.
-        if (!failedPersistence && !this.record?.tokenDigest) this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: null, uncertain: true });
+        if (!failedPersistence && !this.record?.tokenDigest)
+          this.persist({
+            schemaVersion: 1,
+            generation,
+            transactionId,
+            tokenDigest: null,
+            uncertain: true,
+          });
         // Unknown never releases a possibly established participant barrier.
       }
       throw error;
@@ -269,25 +326,44 @@ export class MaintenanceReservation {
     const record = this.record;
     const expected = record?.tokenDigest;
     // Authenticate before any participant call; token is never forwarded.
-    if (this.failed || this.pending || this.inFlight || !record || !expected || generation !== record.generation || !record.transactionId ||
-      !timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(digest(ownerToken), "hex"))) throw new Error("Maintenance ownership mismatch or busy");
-    if (!this.isReady()) throw new Error("Maintenance participant unsupported or initialization incomplete");
+    if (
+      this.failed ||
+      this.pending ||
+      this.inFlight ||
+      !record ||
+      !expected ||
+      generation !== record.generation ||
+      !record.transactionId ||
+      !timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(digest(ownerToken), "hex"))
+    )
+      throw new Error("Maintenance ownership mismatch or busy");
+    if (!this.isReady())
+      throw new Error("Maintenance participant unsupported or initialization incomplete");
     const identity = { generation, transactionId: record.transactionId };
     this.pending = true;
     let knownBusy = false;
     try {
       const fresh = await this.participant.begin(identity);
-      if (fresh === "known-busy" || this.inFlight || !this.ready) { knownBusy = true; throw new Error("Maintenance known busy"); }
-      if (fresh !== "held" || !this.participant.supportsV1()) throw new Error("Maintenance participant not safely held");
+      if (fresh === "known-busy" || this.inFlight || !this.ready) {
+        knownBusy = true;
+        throw new Error("Maintenance known busy");
+      }
+      if (fresh !== "held" || !this.participant.supportsV1())
+        throw new Error("Maintenance participant not safely held");
       this.persist({ ...record, tokenDigest: null });
       await this.participant.end(identity);
       this.recovery = false;
     } catch (error) {
-      if (!knownBusy) { this.failed = true; this.recovery = true; }
+      if (!knownBusy) {
+        this.failed = true;
+        this.recovery = true;
+      }
       // The stable idle rename remains authorized release on restart. No automatic
       // rollback, bearer replay, participant END retry or second journal is introduced.
       throw error;
-    } finally { this.pending = false; }
+    } finally {
+      this.pending = false;
+    }
     return this.status();
   }
 

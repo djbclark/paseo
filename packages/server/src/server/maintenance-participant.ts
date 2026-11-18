@@ -25,12 +25,20 @@ export const emptyMaintenanceParticipant: PluginMaintenancePort = {
 export const unsupportedMaintenanceParticipant: PluginMaintenancePort = {
   supportsV1: () => false,
   begin: async () => "unknown",
-  end: async () => { throw new Error("Plugin maintenance participant unsupported"); },
+  end: async () => {
+    throw new Error("Plugin maintenance participant unsupported");
+  },
 };
 
 export function pluginMaintenancePort(service: object): PluginMaintenancePort | undefined {
   const port = (service as { maintenance?: Partial<PluginMaintenancePort> }).maintenance;
-  if (!port || typeof port.supportsV1 !== "function" || typeof port.begin !== "function" || typeof port.end !== "function") return undefined;
+  if (
+    !port ||
+    typeof port.supportsV1 !== "function" ||
+    typeof port.begin !== "function" ||
+    typeof port.end !== "function"
+  )
+    return undefined;
   return port as PluginMaintenancePort;
 }
 
@@ -62,34 +70,58 @@ export async function qualifiedParentExecutionAssertion(
         isBinding = producer.isQualifiedExecutionBinding as typeof isBinding;
       if (typeof producer.assertQualifiedParentExecutionChain === "function")
         assertChain = producer.assertQualifiedParentExecutionChain as typeof assertChain;
-    } catch { /* Absent producer is unsupported, never a disk/JSON fallback. */ }
+    } catch {
+      /* Absent producer is unsupported, never a disk/JSON fallback. */
+    }
   }
   const assertQualified = () => {
     // Producer-private role/incarnation/parent-link bindings reject a real child
     // capability relabeled as a parent role, as well as fake duck callbacks.
-    if (!chain || !assertChain || !isBinding) throw new Error("Qualified parent execution unavailable");
+    if (!chain || !assertChain || !isBinding)
+      throw new Error("Qualified parent execution unavailable");
     for (const role of ["supervisor", "daemon", "compiler"] as const) {
       if (isBinding(chain[role], role) !== true) throw new Error("Unqualified parent role");
     }
     const chainResult: unknown = assertChain(chain);
     if (chainResult !== undefined) throw new Error("Invalid qualified parent assertion");
     for (const binding of [chain.supervisor, chain.daemon, chain.compiler]) {
-      const result: unknown = binding.capability.assertQualifiedExecution(binding.expectedClosure, binding.expectedIncarnation);
+      const result: unknown = binding.capability.assertQualifiedExecution(
+        binding.expectedClosure,
+        binding.expectedIncarnation,
+      );
       if (result !== undefined) throw new Error("Invalid qualified execution assertion");
     }
   };
   return assertQualified;
 }
 
-export function qualifiedMaintenanceParticipant(participant: PluginMaintenancePort, assertQualified: () => void): PluginMaintenancePort {
+export function qualifiedMaintenanceParticipant(
+  participant: PluginMaintenancePort,
+  assertQualified: () => void,
+): PluginMaintenancePort {
   return {
-    supportsV1() { try { assertQualified(); return participant.supportsV1() === true; } catch { return false; } },
+    supportsV1() {
+      try {
+        assertQualified();
+        return participant.supportsV1() === true;
+      } catch {
+        return false;
+      }
+    },
     async begin(identity) {
       // Restore must close the real parent barrier before startup even if complete
       // executing-role qualification is not yet available. Never END to gain receipts.
       const result = await participant.begin(identity);
-      try { assertQualified(); return result; } catch { return "unknown"; }
+      try {
+        assertQualified();
+        return result;
+      } catch {
+        return "unknown";
+      }
     },
-    async end(identity) { assertQualified(); await participant.end(identity); },
+    async end(identity) {
+      assertQualified();
+      await participant.end(identity);
+    },
   };
 }

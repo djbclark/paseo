@@ -749,7 +749,11 @@ it("ordinary unavailable/unsupported discovery with confirmed cleanup does not m
   const home = realpathSync(mkdtempSync(join(tmpdir(), "provider-known-refusal-")));
   let available = false;
   let closes = 0;
-  const clients = createTestAgentClients({ closeSession: async () => { closes++; } });
+  const clients = createTestAgentClients({
+    closeSession: async () => {
+      closes++;
+    },
+  });
   clients.codex!.isAvailable = async () => available;
   Object.defineProperty(clients.codex, "listCommands", { value: undefined, configurable: true });
   const create = clients.codex!.createSession.bind(clients.codex);
@@ -761,16 +765,29 @@ it("ordinary unavailable/unsupported discovery with confirmed cleanup does not m
   const manager = new AgentManager({ clients, logger: pino({ level: "silent" }) });
   const reservation = new MaintenanceReservation(home, async () => manager.isMaintenanceQuiet());
   manager.installMaintenanceReservation(reservation);
-  const { subsystem, emitted } = makeSubsystem({ host: { listDraftControls: config => manager.listDraftControls(config) } });
+  const { subsystem, emitted } = makeSubsystem({
+    host: { listDraftControls: (config) => manager.listDraftControls(config) },
+  });
   try {
-    await subsystem.handleProviderControlsListRequest({ type: "provider.controls.list.request", requestId: "known-unavailable", draftConfig: { provider: "codex", cwd: home, model: "test-model" } });
-    expect(findByType(emitted, "provider.controls.list.response")?.payload.error).toContain("not available");
+    await subsystem.handleProviderControlsListRequest({
+      type: "provider.controls.list.request",
+      requestId: "known-unavailable",
+      draftConfig: { provider: "codex", cwd: home, model: "test-model" },
+    });
+    expect(findByType(emitted, "provider.controls.list.response")?.payload.error).toContain(
+      "not available",
+    );
     expect(reservation.status().state).toBe("idle");
     available = true;
-    await expect(manager.listDraftCommands({ provider: "codex", cwd: home, model: "test-model" })).rejects.toThrow("does not support");
+    await expect(
+      manager.listDraftCommands({ provider: "codex", cwd: home, model: "test-model" }),
+    ).rejects.toThrow("does not support");
     expect(closes).toBe(1);
     expect(reservation.status().state).toBe("idle");
     const held = await reservation.begin(1, "unit-after-known-refusal");
     await reservation.end(1, held.ownerToken);
-  } finally { await manager.flush(); rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    await manager.flush();
+    rmSync(home, { recursive: true, force: true });
+  }
 });

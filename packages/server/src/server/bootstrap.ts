@@ -1,4 +1,11 @@
-import { pluginMaintenancePort, qualifiedMaintenanceParticipant, qualifiedParentExecutionAssertion, unsupportedMaintenanceParticipant, type NativePluginAdmission, type QualifiedParentExecution } from "./maintenance-participant.js";
+import {
+  pluginMaintenancePort,
+  qualifiedMaintenanceParticipant,
+  qualifiedParentExecutionAssertion,
+  unsupportedMaintenanceParticipant,
+  type NativePluginAdmission,
+  type QualifiedParentExecution,
+} from "./maintenance-participant.js";
 import { MaintenanceReservation, guardMaintenanceMethod } from "./maintenance-reservation.js";
 import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
 import { unarchiveWorkspaceAgents } from "./workspace-archive-service.js";
@@ -710,7 +717,9 @@ async function createPaseoDaemonInExecutionContext(
     });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
-  const assertQualifiedParent = await qualifiedParentExecutionAssertion(dependencies.qualifiedExecution);
+  const assertQualifiedParent = await qualifiedParentExecutionAssertion(
+    dependencies.qualifiedExecution,
+  );
   let pluginBootstrapWindow = false;
   const nativeMaintenance: NativePluginAdmission = {
     enterWork: () => maintenance.enter(),
@@ -720,7 +729,11 @@ async function createPaseoDaemonInExecutionContext(
       if (pluginBootstrapWindow) return maintenance.runQualifiedInitialization(operation);
       // A normal reload is a new admission, never a bootstrap/recovery bypass.
       const release = maintenance.enter();
-      try { return await maintenance.runQualifiedInitialization(operation); } finally { release(); }
+      try {
+        return await maintenance.runQualifiedInitialization(operation);
+      } finally {
+        release();
+      }
     },
   };
   const pluginDependencies = {
@@ -740,9 +753,19 @@ async function createPaseoDaemonInExecutionContext(
     builtinPlugins: resolveBuiltinPluginLoader(dependencies),
     settingsDirectory: path.join(config.paseoHome, "plugin-settings"),
   };
-  const pluginRuntime: PluginService = new PluginService(logger, daemonConfigStore, daemonVersion, pluginDependencies);
+  const pluginRuntime: PluginService = new PluginService(
+    logger,
+    daemonConfigStore,
+    daemonVersion,
+    pluginDependencies,
+  );
   const rawPluginMaintenance = pluginMaintenancePort(pluginRuntime);
-  maintenance.bindParticipant(qualifiedMaintenanceParticipant(rawPluginMaintenance ?? unsupportedMaintenanceParticipant, assertQualifiedParent));
+  maintenance.bindParticipant(
+    qualifiedMaintenanceParticipant(
+      rawPluginMaintenance ?? unsupportedMaintenanceParticipant,
+      assertQualifiedParent,
+    ),
+  );
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -1969,11 +1992,16 @@ async function createPaseoDaemonInExecutionContext(
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             if (maintenance.hasPersistedHold()) {
-              if (!rawPluginMaintenance) throw new Error("Plugin maintenance recovery port unavailable");
+              if (!rawPluginMaintenance)
+                throw new Error("Plugin maintenance recovery port unavailable");
               await maintenance.restoreParticipantBeforeStart();
             }
             pluginBootstrapWindow = true;
-            try { await pluginRuntime.start(); } finally { pluginBootstrapWindow = false; }
+            try {
+              await pluginRuntime.start();
+            } finally {
+              pluginBootstrapWindow = false;
+            }
             await maintenance.recheckRestoredParticipant();
             providerSnapshotManager.settlePluginProviders();
             restartRecovery.resumePending();

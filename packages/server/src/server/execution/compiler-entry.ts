@@ -39,13 +39,17 @@ port.on("message", (raw: unknown) => {
     let admitted: Promise<void>;
     try {
       admitted = retire();
-      helperOwner.sealAdmission();
     } catch {
       port.postMessage({ type: "qualified.execution.unknown" });
       return;
     }
     void admitted
-      .then(() => helperOwner.stop())
+      .then(() => {
+        // A task admitted before retirement may still be reading its manifest.
+        // Keep the exact retained-helper gate open until that real task settles.
+        helperOwner.sealAdmission();
+        return helperOwner.stop();
+      })
       .then(() => {
         port.postMessage({
           type: "qualified.execution.stopped",

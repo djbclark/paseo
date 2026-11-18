@@ -136,7 +136,8 @@ int main(void) {
                 const startToken = birth.slice(birth.lastIndexOf(")") + 2).split(" ")[19];
                 assert.match(startToken, /^[1-9][0-9]*$/);
                 observed = true;
-                if (behavior === "resume") child.stdio[4].end(`resume ${nonce}\n`);
+                if (behavior === "observer-loss") child.kill("SIGKILL");
+                else if (behavior === "resume") child.stdio[4].end(`resume ${nonce}\n`);
                 else if (behavior === "stale") child.stdio[4].end(`resume ${"0".repeat(64)}\n`);
                 else child.stdio[4].end();
                 return undefined;
@@ -152,12 +153,18 @@ int main(void) {
           child.once("close", (...args) => resolve(args));
         });
         await Promise.all(checks);
-        assert.equal(signal, null);
+        assert.equal(signal, behavior === "observer-loss" ? "SIGKILL" : null);
         assert.equal(error, fault ? "descendant-complete\n" : "");
         assert.equal(observed, true);
-        assert.ok(
-          observations.at(-1).endsWith(behavior === "resume" && !fault ? " observed" : " unknown"),
-        );
+        if (behavior === "observer-loss") {
+          assert.ok(!observations.some((row) => row.startsWith("complete ")));
+        } else {
+          assert.ok(
+            observations
+              .at(-1)
+              .endsWith(behavior === "resume" && !fault ? " observed" : " unknown"),
+          );
+        }
         return { code, output };
       }
       assert.deepEqual(await run("ls-files"), { code: 0, output: "kept.txt\0" });
@@ -169,6 +176,10 @@ int main(void) {
       assert.deepEqual(await run("ls-files", "", "stale"), { code: 0, output: "kept.txt\0" });
       assert.deepEqual(await run("ls-files", "", "lost"), { code: 0, output: "kept.txt\0" });
       assert.deepEqual(await run("ls-files", "", "resume", true), { code: 0, output: "" });
+      assert.deepEqual(await run("ls-files", "", "observer-loss"), {
+        code: null,
+        output: "kept.txt\0",
+      });
       // These are native source assertions; a recipe/instance grant is deliberately absent.
     } finally {
       execFileSync("sudo", ["-k", "-n", "/usr/bin/rm", "-rf", retained]);

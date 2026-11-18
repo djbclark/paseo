@@ -221,6 +221,7 @@ export async function runPluginReplaceCommand(
   pluginId: string,
   directory: string,
   options: PluginOptions,
+  _command: Command,
 ): Promise<SingleResult<PluginListItem>> {
   const expectedGeneration = Number(options.expectedGeneration);
   if (
@@ -240,6 +241,7 @@ export async function runPluginReplaceCommand(
 export async function runPluginRecoverCommand(
   pluginId: string,
   options: PluginOptions,
+  _command: Command,
 ): Promise<SingleResult<PluginListItem>> {
   const expectedGeneration = Number(options.expectedGeneration);
   if (

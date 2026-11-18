@@ -918,6 +918,8 @@ export class PluginRuntime {
       held,
       snapshotRoot: ticket.authorization.snapshotRoot,
     });
+    if (attempt.outcome === "compiled" && !attempt.bundles.serverBundle)
+      throw new Error("Managed activation requires a server bundle");
     await policy.authorize(
       pluginId,
       directory,

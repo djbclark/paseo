@@ -202,6 +202,9 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         [path.join(root, "plugin-child-entry.mjs")],
         { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
       );
+      child.once("error", () => {
+        failed = true;
+      });
       const port = childPort(child);
       const consumedReplies = new WeakSet<object>();
       const challenge = randomUUID();
@@ -370,6 +373,9 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         env: { PATH: "/usr/bin:/bin", ESBUILD_BINARY_PATH: path.join(root, "runtime/esbuild") },
         workerData: { qualificationPort: port2 },
         transferList: [port2],
+      });
+      worker.once("error", () => {
+        failed = true;
       });
       port1.on("message", (raw: unknown) => {
         if (

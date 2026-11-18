@@ -400,12 +400,14 @@ describe("reviewed plugin update workflow", () => {
 it("sends recovery source/generation CAS through the supported typed client after feature gating", async () => {
   features.managedPluginPromotions = false;
   const options = { daemonTarget, expectedPath: "/snapshots/candidate", expectedGeneration: "4" };
-  await expect(runPluginRecoverCommand("managed", options)).rejects.toMatchObject({
+  await expect(
+    runPluginRecoverCommand("managed", options, createPluginCommand()),
+  ).rejects.toMatchObject({
     code: "DAEMON_UPDATE_REQUIRED",
   });
   expect(recoverPlugin).not.toHaveBeenCalled();
   features.managedPluginPromotions = true;
-  const result = await runPluginRecoverCommand("managed", options);
+  const result = await runPluginRecoverCommand("managed", options, createPluginCommand());
   expect(recoverPlugin).toHaveBeenCalledWith({
     pluginId: "managed",
     expectedPath: "/snapshots/candidate",

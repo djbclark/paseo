@@ -13,8 +13,31 @@ function sudo(args) {
   const result = spawnSync("sudo", ["-n", ...args], { encoding: "utf8", timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
 }
-function probe(root) {
-  const source = `import {createQualifiedDaemonInvocation} from ${JSON.stringify(`${root}/daemon-launcher.mjs`)}; const result=await createQualifiedDaemonInvocation(${JSON.stringify(root)},"/disposable/home"); console.log(JSON.stringify(result));`;
+function probe(root, race) {
+  const instrumentation = race
+    ? `
+    import fs from "node:fs";
+    import {syncBuiltinESMExports} from "node:module";
+    const originalOpen=fs.promises.open;
+    let intercepted=false;
+    const wrappedOpen=async (...args)=>{
+      const handle=await originalOpen(...args);
+      if(!intercepted && args[0]===${JSON.stringify(`${root}/role.cjs`)}){
+        intercepted=true;
+        await fs.promises.writeFile(${JSON.stringify(race.policyPath)},JSON.stringify({schemaVersion:1,qualifications:[]}));
+        if(${JSON.stringify(race.restore)}) await fs.promises.writeFile(${JSON.stringify(race.policyPath)},Buffer.from(${JSON.stringify(race.original)},"base64"));
+        process.stderr.write("AUTHORITY_RACE_OBSERVED\\n");
+      }
+      return handle;
+    };
+    fs.promises.open=wrappedOpen;
+    syncBuiltinESMExports();
+    if((await import("node:fs/promises")).open!==wrappedOpen) throw new Error("Race fixture did not intercept actual IO");
+  `
+    : "";
+  const source = `${instrumentation}
+    const {createQualifiedDaemonInvocation}=await import(${JSON.stringify(`${root}/daemon-launcher.mjs`)});
+    const result=await createQualifiedDaemonInvocation(${JSON.stringify(root)},"/disposable/home"); console.log(JSON.stringify(result));`;
   // Separate bounded process makes FIFO regressions fail instead of hanging CI.
   return spawnSync(process.execPath, ["--input-type=module", "-e", source], {
     encoding: "utf8",
@@ -22,6 +45,7 @@ function probe(root) {
     env: { PATH: "/usr/bin:/bin" },
   });
 }
+
 async function exists(file) {
   try {
     await access(file);
@@ -77,6 +101,30 @@ test(
       assert.notEqual(probe(root).status, 0, "missing enrollment must hold");
       await enroll();
       assert.equal(probe(root).status, 0, "restore baseline before single-member mutation");
+      for (const restore of [false, true]) {
+        await enroll();
+        assert.equal(probe(root).status, 0, "restore positive before authority race");
+        const raced = probe(root, {
+          policyPath,
+          restore,
+          original: (await readFile(policyPath)).toString("base64"),
+        });
+        assert.equal(raced.error, undefined, "authority race must finish within bounded process");
+        assert.match(
+          raced.stderr,
+          /AUTHORITY_RACE_OBSERVED/,
+          "must reach actual leaf read, not fail at setup",
+        );
+        assert.notEqual(
+          raced.status,
+          0,
+          restore
+            ? "identical policy bytes restored during scan must fail authority CAS"
+            : "revocation during scan must hold",
+        );
+      }
+      await enroll();
+      assert.equal(probe(root).status, 0, "restore positive after authority races");
       sudo(["chmod", "0644", `${root}/role.cjs`]);
       sudo(["sh", "-c", 'printf x >> "$1"', "fixture", `${root}/role.cjs`]);
       sudo(["chmod", "0444", `${root}/role.cjs`]);

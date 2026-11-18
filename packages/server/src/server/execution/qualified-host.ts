@@ -1,7 +1,11 @@
 import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { verifyEnclosingProcess, unsupported } from "./daemon-verifier.js";
+import {
+  assertEnclosingAuthorityUnchanged,
+  verifyEnclosingProcess,
+  unsupported,
+} from "./daemon-verifier.js";
 import { assertQualifiedDaemonEvaluation, isQualifiedDaemonBinding } from "./daemon-owner.js";
 export { getQualifiedDaemonOwner, isQualifiedDaemonOwner } from "./daemon-owner.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
@@ -244,6 +248,7 @@ export async function initializeQualifiedChildHost(): Promise<void> {
       return unsupported();
     fresh = true;
   };
+  await assertEnclosingAuthorityUnchanged(initial);
   installQualifiedPluginHelperGuard();
   branded.set(binding, { role: "plugin-host", binding });
   current = Object.freeze({ binding, evidence, bindings: qualifiedBindings });

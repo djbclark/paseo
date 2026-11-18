@@ -12,7 +12,12 @@ import { Worker, MessageChannel } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { qualifiedBindings } from "./qualified-bindings.js";
-import { observeLinuxProcess, verifyEnclosingProcess, unsupported } from "./daemon-verifier.js";
+import {
+  assertEnclosingAuthorityUnchanged,
+  observeLinuxProcess,
+  verifyEnclosingProcess,
+  unsupported,
+} from "./daemon-verifier.js";
 import type { QualifiedExecutionBinding } from "./types.js";
 import type { QualifiedDaemonOwner, OwnedObservation } from "./daemon-types.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
@@ -152,6 +157,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         )
           return unsupported();
         for (const observe of observers.values()) await observe();
+        await assertEnclosingAuthorityUnchanged(current);
         fresh = true;
       } catch (error) {
         failed = true;
@@ -492,6 +498,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       }
     },
   });
+  await assertEnclosingAuthorityUnchanged(initial);
   installQualifiedPluginHelperGuard();
   owners.add(owner);
   bindings.add(binding);

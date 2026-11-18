@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { installCompilerHelperOwner } from "./compiler-helpers.js";
-import { verifyEnclosingProcess } from "./daemon-verifier.js";
+import { assertEnclosingAuthorityUnchanged, verifyEnclosingProcess } from "./daemon-verifier.js";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const transferred: unknown = workerData?.qualificationPort;
 if (!(transferred instanceof MessagePort))
@@ -52,8 +52,9 @@ port.on("message", (raw: unknown) => {
   else if (queued.length < 8) queued.push(challenge);
 });
 async function respond(challenge: string): Promise<void> {
-  await verifyEnclosingProcess(root);
+  const current = await verifyEnclosingProcess(root);
   await helperOwner.settled();
+  await assertEnclosingAuthorityUnchanged(current);
   port.postMessage({
     challenge,
     incarnation,
@@ -63,6 +64,7 @@ async function respond(challenge: string): Promise<void> {
     distributionBuildId: initial.manifest.distributionBuildId,
   });
 }
+await assertEnclosingAuthorityUnchanged(initial);
 await import(path.join(root, "compiler-code.mjs"));
 initialized = true;
 for (const challenge of queued.splice(0)) await respond(challenge);

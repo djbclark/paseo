@@ -69,7 +69,11 @@ are daemon-local; managed generations persist across restarts.
 
 Managed native Git/npm install/update is explicitly unsupported for enrolled IDs. The manager checks
 before acquisition and again before/after preparation for an enrollment change. With configured policy,
-an unspecified install ID is refused if managed entries exist because its identity is not yet known.
+native source installation requires an explicit `--id`, even when the current `plugins` policy object
+is empty. Without a configured policy, unknown-ID acquisition is also refused if the promotion journal
+directory contains any history. A fresh policy instance recognizes persisted history after restart;
+removing a policy entry does not restore unknown-ID acquisition. With neither policy nor history,
+ordinary unmanaged installations can still infer the manifest ID.
 Use an externally prepared, immutable, qualified directory. A running unmanaged plugin cannot be
 silently adopted: replacement/reload holds before stopping it unless its loaded receipt already binds
 a complete managed snapshot. Initial qualification/adoption needs explicitly approved maintenance;

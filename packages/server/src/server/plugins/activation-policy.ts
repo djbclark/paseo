@@ -135,15 +135,17 @@ export class ManagedPluginActivationPolicy {
     return { generation: generation + 1, authorization, policyRevision };
   }
   async assertNativeAcquisitionAllowed(id?: string): Promise<void> {
-    if (this.policyFile === undefined) return;
+    if (this.policyFile === undefined) {
+      await this.assertUnconfiguredNativeAcquisition(id);
+      return;
+    }
     const policy = ManagedPluginPolicySchema.parse(
       JSON.parse(await readFile(this.policyFile, "utf8")),
     );
-    if (id === undefined) {
-      if (Object.keys(policy.plugins).length)
-        throw new Error("Managed policy requires externally qualified directory installation");
-      return;
-    }
+    if (id === undefined)
+      throw new Error(
+        "Configured managed policy requires an explicit runtime ID before native acquisition",
+      );
     const state = await this.status(id);
     if (policy.plugins[id]) {
       this.enrolled.add(id);
@@ -153,6 +155,24 @@ export class ManagedPluginActivationPolicy {
       throw new Error(
         "Managed native acquisition is unsupported; use qualified directory replacement",
       );
+  }
+
+  private async assertUnconfiguredNativeAcquisition(id: string | undefined): Promise<void> {
+    if (id !== undefined) {
+      const state = await this.status(id);
+      if (state.enrolled || state.generation > 0)
+        throw new Error("Managed native acquisition requires configured policy");
+      return;
+    }
+    let entries: string[];
+    try {
+      entries = await readdir(this.stateDirectory);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+      throw error;
+    }
+    if (entries.length || this.enrolled.size)
+      throw new Error("Managed history requires an explicit runtime ID before native acquisition");
   }
 
   async dispatchAuthorized(input: PluginDispatch): Promise<void> {

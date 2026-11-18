@@ -317,11 +317,14 @@ function send(child: PluginChild, message: PluginProcessRequest): Promise<void> 
 }
 
 function observeChildTermination(child: PluginChild): ChildTermination {
-  const completion = Promise.withResolvers<void>();
-  const state: ChildTermination = { closed: false, completion: completion.promise };
+  let resolveCompletion = () => {};
+  const completion = new Promise<void>((resolve) => {
+    resolveCompletion = resolve;
+  });
+  const state: ChildTermination = { closed: false, completion };
   child.on("close", () => {
     state.closed = true;
-    completion.resolve();
+    resolveCompletion();
   });
   return state;
 }

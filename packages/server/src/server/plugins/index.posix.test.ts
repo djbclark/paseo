@@ -2195,7 +2195,10 @@ describe("managed plugin promotion boundary", () => {
     );
     try {
       await service.start();
-      const baseline = await service.installSource({ source: pathToFileURL(repository).href });
+      const baseline = await service.installSource({
+        source: pathToFileURL(repository).href,
+        id: "managed",
+      });
       await writeFile(
         path.join(repository, "paseo-plugin.json"),
         JSON.stringify({
@@ -2271,7 +2274,10 @@ describe("managed plugin promotion boundary", () => {
     const sentinel = path.join(f.home, "must-not-build");
     try {
       await service.start();
-      const baseline = await service.installSource({ source: pathToFileURL(repository).href });
+      const baseline = await service.installSource({
+        source: pathToFileURL(repository).href,
+        id: "managed",
+      });
       await writeFile(
         path.join(repository, "paseo-plugin.json"),
         JSON.stringify({
@@ -2511,4 +2517,63 @@ describe("managed plugin promotion boundary", () => {
       }
     },
   );
+  it.each([true, false])(
+    "refuses unknown-ID acquisition from persisted enrollment after restart with configured policy=%s",
+    async (configured) => {
+      const f = await fixture();
+      const directory = await createPlugin("managed", "export default () => () => {};");
+      await allow(f.policyFile, [await authorization(directory, 0)]);
+      await f.policy.authorize("managed", directory);
+      expect((await f.policy.status("managed")).enrolled).toBe(true);
+      await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+      const policy = new ManagedPluginActivationPolicy(
+        configured ? f.policyFile : undefined,
+        path.join(f.home, "promotions"),
+      );
+      const sources = new ManagedPluginSources(f.home);
+      const preparing = vi.spyOn(sources, "prepareInstall");
+      const service = createService(
+        f.home,
+        {},
+        { managedSources: sources, activationPolicy: policy },
+      );
+      try {
+        await service.start();
+        await expect(
+          service.installSource({ source: pathToFileURL(directory).href }),
+        ).rejects.toThrow("explicit runtime ID");
+        expect(preparing).not.toHaveBeenCalled();
+      } finally {
+        await service.stopAllPlugins();
+      }
+    },
+  );
+
+  it("preserves unknown-ID native install compatibility without policy or enrollment history", async () => {
+    const f = await fixture();
+    const directory = await createPlugin("unmanaged", "export default () => () => {};");
+    for (const args of [
+      ["init", "-b", "main"],
+      ["config", "user.name", "Paseo Tests"],
+      ["config", "user.email", "paseo@example.test"],
+      ["add", "-A"],
+      ["commit", "-m", "baseline"],
+    ])
+      await runGitCommand(args, { cwd: directory });
+    const policy = new ManagedPluginActivationPolicy(undefined, path.join(f.home, "promotions"));
+    const service = createService(
+      f.home,
+      {},
+      { managedSources: new ManagedPluginSources(f.home), activationPolicy: policy },
+    );
+    try {
+      await service.start();
+      expect(await service.installSource({ source: pathToFileURL(directory).href })).toMatchObject({
+        id: "unmanaged",
+        status: "running",
+      });
+    } finally {
+      await service.stopAllPlugins();
+    }
+  }, 30_000);
 });

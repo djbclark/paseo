@@ -1,3 +1,4 @@
+import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
 import {
   readTerminalWorkerRecord,
@@ -431,12 +432,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       }
     },
   });
-  const activity = qualifiedBindings["@getpaseo/plugin/internal/activity"];
-  const install = activity ? Reflect.get(activity, "installQualifiedHelperAdmission") : undefined;
-  if (typeof install !== "function") return unsupported();
-  install(() => {
-    throw new Error("Qualified plugin external helper unsupported");
-  });
+  installQualifiedPluginHelperGuard();
   owners.add(owner);
   bindings.add(binding);
   executingOwner = owner;

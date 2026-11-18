@@ -4,6 +4,23 @@ import { verifyQualifiedLaunch } from "./launch-verifier.js";
 verifyQualifiedLaunch(__filename);
 const host = require(path.join(__dirname, "host.cjs")) as typeof import("./qualified-host.js");
 host.getQualifiedHost();
+function helperAdmissionProbe(): boolean {
+  const server = host.getQualifiedHost().bindings["@getpaseo/plugin/server"];
+  const spawnHelper = server ? Reflect.get(server, "spawnProcess") : undefined;
+  if (typeof spawnHelper !== "function") return false;
+  try {
+    const child = spawnHelper(process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ]) as import("node:child_process").ChildProcess;
+    child.kill();
+    return false;
+  } catch (error) {
+    return (
+      error instanceof Error && error.message === "Qualified plugin external helper unsupported"
+    );
+  }
+}
 process.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object" || !("challenge" in raw) || typeof raw.challenge !== "string")
     return;
@@ -17,6 +34,7 @@ process.on("message", (raw: unknown) => {
     challenge: raw.challenge,
     ...observation,
     bindingProbe: probe,
+    rejectedSdkHelperOutsideOwner: observation.supported ? helperAdmissionProbe() : true,
     rejectedPrivateImports: [
       "@getpaseo/plugin/internal/activity",
       "@getpaseo/client/internal/daemon-client",

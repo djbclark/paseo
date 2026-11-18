@@ -1,3 +1,4 @@
+import type { PluginActivityOwner, PluginActivityLease } from "@getpaseo/plugin/internal/activity";
 import type { PluginSubscriptionContract } from "@getpaseo/plugin";
 import type { PluginSubscriptionContext } from "@getpaseo/plugin/server";
 import type { PaseoApi } from "@getpaseo/client";
@@ -11,6 +12,9 @@ export type PluginSubscriptionHandler = (
 
 interface ActiveSubscription {
   controller: AbortController;
+  activity: PluginActivityLease | undefined;
+  settled: boolean;
+  released: boolean;
 }
 
 interface SubscriptionChannel {
@@ -33,7 +37,10 @@ export class PluginSubscriptionHandlers {
   private readonly active = new Map<string, ActiveSubscription>();
   private readonly channel: SubscriptionChannel;
 
-  constructor(channel: SubscriptionChannel) {
+  constructor(
+    channel: SubscriptionChannel,
+    private readonly activityOwner?: PluginActivityOwner,
+  ) {
     this.channel = channel;
   }
 
@@ -85,13 +92,20 @@ export class PluginSubscriptionHandlers {
       if (signal.aborted) return;
       await this.channel.sendAndWait({ type: "subscription.event", subscriptionId, event });
     };
-    this.active.set(subscriptionId, { controller });
+    const active: ActiveSubscription = {
+      controller,
+      activity: this.activityOwner?.retainCurrent(),
+      settled: false,
+      released: false,
+    };
+    this.active.set(subscriptionId, active);
     let result: unknown;
     try {
-      result = registered.handler(parsed.data, { paseo, push, signal });
+      const invoke = () => registered.handler(parsed.data, { paseo, push, signal });
+      result = active.activity ? active.activity.run(invoke) : invoke();
     } catch (error) {
-      this.active.delete(subscriptionId);
-      controller.abort();
+      active.settled = true;
+      this.release(subscriptionId);
       this.channel.send({ type: "error", requestId, error: describeError(error) });
       return;
     }
@@ -99,9 +113,10 @@ export class PluginSubscriptionHandlers {
     acknowledge();
     if (result instanceof Promise)
       result.then(
-        () => this.close(subscriptionId),
-        (error: unknown) => this.close(subscriptionId, describeError(error)),
+        () => this.handlerSettled(subscriptionId, active),
+        (error: unknown) => this.handlerSettled(subscriptionId, active, describeError(error)),
       );
+    else active.settled = true;
   }
 
   /** The daemon released the subscription; it needs no closed message back. */
@@ -109,11 +124,20 @@ export class PluginSubscriptionHandlers {
     const active = this.active.get(subscriptionId);
     if (!active) return;
     this.active.delete(subscriptionId);
-    active.controller.abort();
+    active.released = true;
+    if (active.activity) active.activity.run(() => active.controller.abort());
+    else active.controller.abort();
+    if (active.settled) active.activity?.release();
   }
 
   releaseAll(): void {
     for (const subscriptionId of this.active.keys()) this.release(subscriptionId);
+  }
+
+  private handlerSettled(subscriptionId: string, active: ActiveSubscription, error?: string): void {
+    active.settled = true;
+    if (active.released) active.activity?.release();
+    this.close(subscriptionId, error);
   }
 
   private close(subscriptionId: string, error?: string): void {

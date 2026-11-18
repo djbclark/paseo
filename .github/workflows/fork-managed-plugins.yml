@@ -23,6 +23,7 @@ jobs:
       - run: npm run typecheck --workspace=@getpaseo/cli
       - run: npm run lint
       - run: npm run format:check
-      - run: npm run test:unit --workspace=@getpaseo/server -- src/server/plugins/index.posix.test.ts src/server/plugins/managed-source.posix.test.ts src/server/plugins/runtime.posix.test.ts src/server/plugins/requirements.posix.test.ts src/server/session.test.ts
+      - run: npm run test:unit --workspace=@getpaseo/server -- src/server/plugins/index.posix.test.ts src/server/plugins/managed-source.posix.test.ts src/server/plugins/runtime.posix.test.ts src/server/plugins/requirements.posix.test.ts src/server/plugins/execution-owner.test.ts src/server/session.test.ts
+      - run: npm exec --workspace=@getpaseo/plugin -- vitest run src/server/process.test.ts src/server/process-internal/activity.test.ts
       - run: npm exec --workspace=@getpaseo/cli -- vitest run src/commands/plugin src/cli-surface.test.ts
       - run: npm run test --workspace=@getpaseo/protocol -- src/messages.plugins.test.ts

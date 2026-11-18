@@ -6,13 +6,12 @@ import {
   type SpawnOptions,
 } from "node:child_process";
 import { extname } from "node:path";
-import { promisify } from "node:util";
+import { acquirePluginHelper } from "./process-internal/activity.js";
 import {
   isWindowsCommandScript,
   quoteWindowsArgument,
   quoteWindowsCommand,
 } from "./process-internal/windows-command.js";
-const execFileAsync = promisify(execFile);
 export interface ExecCommandOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -64,13 +63,21 @@ export function spawnProcess(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
-  return spawn(resolvedCommand, resolvedArgs, {
-    ...spawnOptions,
-    env: options?.env,
-    shell,
-    signal: options?.signal,
-    windowsHide: true,
-  });
+  const release = acquirePluginHelper();
+  try {
+    const child = spawn(resolvedCommand, resolvedArgs, {
+      ...spawnOptions,
+      env: options?.env,
+      shell,
+      signal: options?.signal,
+      windowsHide: true,
+    });
+    child.once("close", release);
+    return child;
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
 export async function execCommand(
@@ -84,17 +91,36 @@ export async function execCommand(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
-  return execFileAsync(resolvedCommand, resolvedArgs, {
-    cwd: options?.cwd,
-    env: options?.env,
-    encoding: options?.encoding ?? "utf8",
-    signal: options?.signal,
-    killSignal: options?.killSignal,
-    timeout: options?.timeout,
-    maxBuffer: options?.maxBuffer,
-    shell,
-    windowsHide: true,
-  }) as Promise<ExecCommandResult>;
+  const release = acquirePluginHelper();
+  return new Promise<ExecCommandResult>((resolve, reject) => {
+    try {
+      const child = execFile(
+        resolvedCommand,
+        resolvedArgs,
+        {
+          cwd: options?.cwd,
+          env: options?.env,
+          encoding: options?.encoding ?? "utf8",
+          signal: options?.signal,
+          killSignal: options?.killSignal,
+          timeout: options?.timeout,
+          maxBuffer: options?.maxBuffer,
+          shell,
+          windowsHide: true,
+        },
+        (error, stdout, stderr) => {
+          if (error) {
+            Object.assign(error, { stdout, stderr });
+            reject(error);
+          } else resolve({ stdout, stderr });
+        },
+      );
+      child.once("close", release);
+    } catch (error) {
+      release();
+      reject(error);
+    }
+  });
 }
 
 /** Force-stop a CLI, including descendants behind Windows command-script launchers. */

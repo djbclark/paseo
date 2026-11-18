@@ -1,3 +1,9 @@
+import {
+  samePluginMaintenanceIdentity,
+  type NativePluginAdmission,
+  type PluginMaintenanceIdentity,
+  type PluginMaintenancePort,
+} from "./maintenance.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   ManagedPluginActivationPolicy,
@@ -87,6 +93,7 @@ interface NativeUpdateActivation {
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS);
 
 interface PluginRuntimePort {
+  readonly maintenance?: PluginMaintenancePort;
   subscribeSessionOpenChanges?: PluginRuntime["subscribeSessionOpenChanges"];
   isToolPluginAvailable?: PluginRuntime["isToolPluginAvailable"];
   callTool?: PluginRuntime["callTool"];
@@ -124,6 +131,7 @@ interface PluginRuntimePort {
 }
 
 interface PluginServiceDependencies {
+  nativeMaintenance?: NativePluginAdmission;
   activationPolicy?: ManagedPluginActivationPolicy;
   usageAgents?: AgentUsageLookup;
   settingsDirectory?: string;
@@ -142,6 +150,30 @@ function resolvePluginStatus(input: {
 }
 
 export class PluginService {
+  private maintenanceIdentity: PluginMaintenanceIdentity | null = null;
+  private maintenanceUncertain = false;
+  readonly maintenance: PluginMaintenancePort = {
+    supportsV1: () => false,
+    begin: (identity) => {
+      if (
+        this.maintenanceIdentity &&
+        !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity)
+      ) {
+        this.maintenanceUncertain = true;
+        return Promise.resolve("unknown");
+      }
+      this.maintenanceIdentity = { ...identity };
+      return this.runtime.maintenance?.begin(identity) ?? Promise.resolve("unknown");
+    },
+    end: async () => {
+      throw new Error("Plugin executing closure is not qualified for maintenance release");
+    },
+  };
+  private requireLifecycleAdmission(): void {
+    if (this.maintenanceIdentity || this.maintenanceUncertain)
+      throw new Error("Plugin maintenance admission is closed");
+  }
+
   private readonly runtime: PluginRuntimePort;
   private readonly managedSources: ManagedPluginSources | null;
   private readonly builtinPluginIds: ReadonlySet<string>;
@@ -181,6 +213,7 @@ export class PluginService {
       new PluginRuntime(logger, daemonVersion, {
         settingsDirectory: dependencies.settingsDirectory,
         activationPolicy: dependencies.activationPolicy,
+        nativeMaintenance: dependencies.nativeMaintenance,
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
@@ -275,6 +308,8 @@ export class PluginService {
   }
 
   async start(): Promise<void> {
+    // An unsupported restored hold keeps plugin code uninitialized. No early END for startup.
+    if (this.maintenanceIdentity || this.maintenanceUncertain) return;
     if (this.started) return;
     this.started = true;
     const config = this.configStore.get();
@@ -715,6 +750,7 @@ export class PluginService {
   }
 
   async enablePlugin(pluginId: string): Promise<PluginListItem> {
+    this.requireLifecycleAdmission();
     await this.patchSource(pluginId, (source) => ({ ...source, enabled: true }));
     this.errors.delete(pluginId);
     return this.enqueue(async () => {
@@ -730,6 +766,7 @@ export class PluginService {
   }
 
   async disablePlugin(pluginId: string): Promise<PluginListItem> {
+    this.requireLifecycleAdmission();
     const operation = {
       kind: "disable",
       completion: this.patchSource(pluginId, (source) => ({ ...source, enabled: false })),
@@ -751,6 +788,7 @@ export class PluginService {
   }
 
   async removePlugin(pluginId: string): Promise<void> {
+    this.requireLifecycleAdmission();
     this.requireSource(pluginId);
     const operation = { kind: "remove", completion: this.removeSource(pluginId) } as const;
     this.pendingOperations.set(pluginId, operation);
@@ -1017,7 +1055,9 @@ export class PluginService {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.lifecycle.then(operation, operation);
+    this.requireLifecycleAdmission();
+    const release = this.dependencies.nativeMaintenance?.enterWork();
+    const result = this.lifecycle.then(operation, operation).finally(() => release?.());
     this.lifecycle = result.then(
       () => undefined,
       () => undefined,

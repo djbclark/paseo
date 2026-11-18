@@ -32,7 +32,21 @@ export interface PluginUsageSourceMetadata {
   icon?: string;
 }
 
+export interface PluginMaintenanceIdentity {
+  generation: number;
+  transactionId: string;
+  instanceId: string;
+}
+const maintenanceIdentityFields = {
+  generation: z.number().int().nonnegative(),
+  transactionId: z.string().min(1),
+  instanceId: z.string().min(1),
+};
 export type PluginProcessRequest =
+  | ({
+      type: "maintenance.begin" | "maintenance.end";
+      requestId: string;
+    } & PluginMaintenanceIdentity)
   | { type: "tool.call"; requestId: string; agent: PluginHookAgent; name: string; input: unknown }
   | { type: "tool.cancel"; requestId: string }
   | { type: "tools.detach"; agentId: string }
@@ -48,6 +62,11 @@ export type PluginProcessRequest =
       bundle: string;
       appVersion: string;
       pluginDirectory: string;
+      hostInstanceId?: string;
+      passiveInitialization?: {
+        contract: "native-passive-contract-1";
+        hold?: PluginMaintenanceIdentity;
+      };
       settingsDirectory?: string;
     }
   | {
@@ -87,6 +106,8 @@ export type PluginProcessRequest =
   | { type: "paseo_close" };
 
 export type PluginProcessMessage =
+  | { type: "execution.unknown"; instanceId: string }
+  | { type: "execution.settled"; requestKey: string; instanceId: string }
   | { type: "settings.changed"; settingsId: string }
   | { type: "hooks.changed"; hooks: string[] }
   | {
@@ -159,6 +180,20 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
   [
     z
       .object({
+        type: z.literal("maintenance.begin"),
+        requestId: z.string(),
+        ...maintenanceIdentityFields,
+      })
+      .strict(),
+    z
+      .object({
+        type: z.literal("maintenance.end"),
+        requestId: z.string(),
+        ...maintenanceIdentityFields,
+      })
+      .strict(),
+    z
+      .object({
         type: z.literal("tool.call"),
         requestId: z.string(),
         agent: z
@@ -194,6 +229,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
         bundle: z.string(),
         appVersion: z.string(),
         pluginDirectory: z.string(),
+        hostInstanceId: z.string().min(1).optional(),
+        passiveInitialization: z
+          .object({
+            contract: z.literal("native-passive-contract-1"),
+            hold: z.object(maintenanceIdentityFields).strict().optional(),
+          })
+          .strict()
+          .optional(),
         settingsDirectory: z.string().optional(),
       })
       .strict(),
@@ -290,6 +333,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
 export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.discriminatedUnion(
   "type",
   [
+    z.object({ type: z.literal("execution.unknown"), instanceId: z.string() }).strict(),
+    z
+      .object({
+        type: z.literal("execution.settled"),
+        requestKey: z.string(),
+        instanceId: z.string(),
+      })
+      .strict(),
     z.object({ type: z.literal("settings.changed"), settingsId: z.string() }).strict(),
     z.object({ type: z.literal("hooks.changed"), hooks: hooksSchema }).strict(),
     z

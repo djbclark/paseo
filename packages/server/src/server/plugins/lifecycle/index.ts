@@ -1,3 +1,4 @@
+import { bindPluginActivity } from "@getpaseo/plugin/internal/activity";
 import { validateBranchSlug } from "@getpaseo/protocol/branch-slug";
 import {
   createLifecycleRegistration,
@@ -284,7 +285,7 @@ type Handler = (input: unknown, context: PluginHookContext) => unknown;
 
 export class PluginHookHandlers implements PluginLifecycleRegistration {
   private readonly handlers = new Map<string, Set<Handler>>();
-  private readonly active = new Map<string, AbortController>();
+  private readonly active = new Map<string, { controller: AbortController; abort: () => void }>();
 
   private readonly changed: () => void;
 
@@ -316,7 +317,7 @@ export class PluginHookHandlers implements PluginLifecycleRegistration {
     paseo: PluginHookContext["paseo"],
   ): Promise<unknown> {
     const controller = new AbortController();
-    this.active.set(id, controller);
+    this.active.set(id, { controller, abort: bindPluginActivity(() => controller.abort()) });
     try {
       if (Object.hasOwn(beforeSchemas, name)) {
         const hookName = name as keyof PluginHookRequests;

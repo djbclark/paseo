@@ -6,16 +6,7 @@ import {
 } from "@getpaseo/protocol/messages";
 import { PluginSourceSchema, type PluginSource } from "@getpaseo/protocol/plugin-config";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  lstat,
-  readdir,
-  readFile,
-  open,
-  realpath,
-  mkdir,
-  writeFile,
-  rename,
-} from "node:fs/promises";
+import { lstat, readdir, readFile, open, realpath, mkdir, rm, rename } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
@@ -107,7 +98,7 @@ export class ManagedPluginActivationPolicy {
   }
   async status(id: string): Promise<z.infer<typeof State>> {
     try {
-      return State.parse(JSON.parse(await readFile(this.stateFile(id), "utf8")));
+      return (await this.observeStatus(id)).state;
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT")
         return { version: 1, generation: 0, phase: "ready" };
@@ -169,8 +160,25 @@ export class ManagedPluginActivationPolicy {
     await mkdir(this.stateDirectory, { recursive: true });
     const target = this.stateFile(id);
     const temp = `${target}.${randomUUID()}.tmp`;
-    await writeFile(temp, JSON.stringify(state), { mode: 0o600 });
-    await rename(temp, target);
+    const descriptor = await open(temp, "wx", 0o600);
+    try {
+      await descriptor.writeFile(JSON.stringify(state));
+      await descriptor.sync();
+    } finally {
+      await descriptor.close();
+    }
+    try {
+      await rename(temp, target);
+      const directory = await open(this.stateDirectory, "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    } catch (error) {
+      await rm(temp, { force: true });
+      throw error;
+    }
   }
   async authorize(
     id: string,
@@ -329,6 +337,7 @@ export class ManagedPluginActivationPolicy {
       id,
       canonical: receipt.sourcePath,
       authorization: ticket.authorization,
+      bundle: undefined,
     });
     const current = await this.observeStatus(id);
     if (

@@ -1,8 +1,11 @@
+import { assertHeldPluginOperation } from "../maintenance-reservation.js";
+import type { PluginHeldOperation } from "./held-operation.js";
 import type { NativePluginAdmission } from "./maintenance.js";
 import { pluginExecutionKey, type PluginExecutionRoot } from "./execution-roots.js";
 
 /** Separate from reply correlation: only execution-owner settlement releases native work. */
 export class PluginExecutionOwner {
+  private expectedHeldTermination = false;
   private readonly releases = new Map<string, () => void>();
   constructor(
     readonly instanceId: string,
@@ -35,8 +38,15 @@ export class PluginExecutionOwner {
     this.unknown();
     this.native?.holdForUnknownWork();
   }
+  expectHeldTermination(held: PluginHeldOperation, instanceId: string): void {
+    assertHeldPluginOperation(held.scope, held.claim);
+    if (instanceId !== this.instanceId || this.releases.size)
+      throw new Error("Cannot retire a different or active plugin execution owner");
+    this.expectedHeldTermination = true;
+  }
   terminated(): void {
-    if (this.releases.size || this.admissionClosed()) this.markUnknown();
+    if (this.releases.size || (this.admissionClosed() && !this.expectedHeldTermination))
+      this.markUnknown();
   }
   busy(): boolean {
     return this.releases.size > 0;

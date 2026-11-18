@@ -112,9 +112,17 @@ class PluginCompiler {
       assertPluginHeldOperation(context.held, context.held.claim.pluginId, context.held.claim.path);
       await context.owner.refresh();
       const owned = await context.owner.createCompilerWorker();
-      context.owner.assertOwnedExecutionHandle(owned.worker, "compiler", owned.incarnation);
-      owned.assertFresh();
       this.ownedWorker = owned;
+      this.worker = owned.worker;
+      try {
+        context.owner.assertOwnedExecutionHandle(owned.worker, "compiler", owned.incarnation);
+        owned.assertFresh();
+      } catch (error) {
+        context.native.holdForUnknownWork();
+        this.stopWorker(owned.worker);
+        await this.stopping;
+        throw error;
+      }
       this.ownedIdentity = Object.freeze({
         threadId: owned.worker.threadId,
         incarnation: owned.incarnation,

@@ -1,3 +1,4 @@
+import type { QualifiedDaemonOwner } from "./execution/daemon-types.js";
 import { heldPluginOperationDriver } from "./maintenance-operation.js";
 import {
   pluginMaintenancePort,
@@ -5,7 +6,6 @@ import {
   qualifiedDaemonExecutionAccess,
   unsupportedMaintenanceParticipant,
   type NativePluginAdmission,
-  type QualifiedDaemonOwner,
 } from "./maintenance-participant.js";
 import { MaintenanceReservation, guardMaintenanceMethod } from "./maintenance-reservation.js";
 import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
@@ -737,12 +737,15 @@ async function createPaseoDaemonInExecutionContext(
       }
     },
   };
+  const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const pluginDependencies: NonNullable<ConstructorParameters<typeof PluginService>[3]> & {
     nativeMaintenance: NativePluginAdmission;
     qualifiedDaemonOwner?: QualifiedDaemonOwner;
+    serverId: string;
   } = {
     nativeMaintenance,
     qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
+    serverId,
     activationPolicy: new ManagedPluginActivationPolicy(
       process.env.PASEO_MANAGED_PLUGIN_POLICY,
       path.join(config.paseoHome, "plugin-promotions"),
@@ -772,7 +775,6 @@ async function createPaseoDaemonInExecutionContext(
     ),
   );
 
-  const serverId = getOrCreateServerId(config.paseoHome, { logger });
   maintenance.bindTransport(serverId, qualifiedDaemon, heldPluginOperationDriver(pluginRuntime));
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
   const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);

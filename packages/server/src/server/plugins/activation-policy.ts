@@ -1,3 +1,5 @@
+import { PluginLoadedReceiptSchema, type PluginLoadedReceipt } from "@getpaseo/protocol/messages";
+import { PluginSourceSchema, type PluginSource } from "@getpaseo/protocol/plugin-config";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir, readFile, realpath, mkdir, writeFile, rename } from "node:fs/promises";
 import path from "node:path";
@@ -29,6 +31,8 @@ const State = z.object({
   enrolled: z.boolean().optional(),
   oldPath: z.string().optional(),
   candidatePath: z.string().optional(),
+  baseline: z.object({ source: PluginSourceSchema, receipt: PluginLoadedReceiptSchema }).optional(),
+  currentReceipt: PluginLoadedReceiptSchema.optional(),
 });
 export type ActivationOperation = "activate" | "recover";
 export interface ActivationTicket {
@@ -92,7 +96,7 @@ export class ManagedPluginActivationPolicy {
     bundle?: string,
     ticket?: ActivationTicket,
   ): Promise<ActivationTicket | undefined> {
-    if (!this.policyFile) return undefined;
+    if (this.policyFile === undefined) return undefined;
     // Configured-but-unreadable/malformed policy holds EVERY activation, including unknown IDs.
     const policy = ManagedPluginPolicySchema.parse(
       JSON.parse(await readFile(this.policyFile, "utf8")),
@@ -126,6 +130,17 @@ export class ManagedPluginActivationPolicy {
     const authorization = matches.length === 1 ? matches[0] : undefined;
     if (!authorization || canonical !== path.resolve(directory))
       throw new Error(`No exact managed activation authorization: ${id}`);
+    if (operation === "recover") {
+      const baseline = state.baseline;
+      if (
+        !baseline ||
+        baseline.receipt.sourcePath !== canonical ||
+        baseline.receipt.serverBundleSha256 !== authorization.serverBundleSha256 ||
+        baseline.receipt.snapshotRoot !== authorization.snapshotRoot ||
+        baseline.receipt.snapshotSha256 !== authorization.snapshotSha256
+      )
+        throw new Error("Recovery authorization differs from recorded loaded baseline");
+    }
     if (ticket && JSON.stringify(ticket.authorization) !== JSON.stringify(authorization))
       throw new Error(`Managed authorization changed: ${id}`);
     const relative = path.relative(authorization.snapshotRoot, canonical);
@@ -148,8 +163,44 @@ export class ManagedPluginActivationPolicy {
       const state = await this.status(id);
       if (state.generation !== ticket.generation - 1)
         throw new Error("Stale activation generation");
-      await this.save(id, { ...state, generation: ticket.generation, phase: "activating" });
+      await this.save(id, {
+        ...state,
+        generation: ticket.generation,
+        phase: "activating",
+        ...(state.phase === "ready" && state.currentReceipt
+          ? {
+              oldPath: state.currentReceipt.sourcePath,
+              candidatePath: ticket.authorization.sourcePath,
+              baseline: {
+                source: {
+                  source: "directory",
+                  path: state.currentReceipt.sourcePath,
+                  enabled: true,
+                },
+                receipt: state.currentReceipt,
+              },
+            }
+          : {}),
+      });
     }
+  }
+  async recordLoaded(
+    id: string,
+    ticket: ActivationTicket | undefined,
+    receipt: PluginLoadedReceipt,
+  ): Promise<void> {
+    if (ticket) await this.save(id, { ...(await this.status(id)), currentReceipt: receipt });
+  }
+  async hold(id: string): Promise<void> {
+    this.replacements.delete(id);
+    await this.save(id, { ...(await this.status(id)), phase: "held" });
+  }
+  async recovering(id: string, expectedGeneration: number): Promise<void> {
+    const state = await this.status(id);
+    if (state.generation !== expectedGeneration || !state.baseline)
+      throw new Error("Recovery journal CAS mismatch or missing baseline");
+    await this.save(id, { ...state, phase: "replacing" });
+    this.replacements.add(id);
   }
   releaseReplacement(id: string): void {
     this.replacements.delete(id);
@@ -166,10 +217,15 @@ export class ManagedPluginActivationPolicy {
       });
     if (!success) this.replacements.delete(id);
   }
-  async replacing(id: string, oldPath: string, candidatePath: string): Promise<void> {
+  async replacing(
+    id: string,
+    oldPath: string,
+    candidatePath: string,
+    baseline?: { source: PluginSource; receipt: PluginLoadedReceipt },
+  ): Promise<void> {
     const state = await this.status(id);
     if (state.phase !== "ready") throw new Error("Plugin recovery required");
-    await this.save(id, { ...state, phase: "replacing", oldPath, candidatePath });
+    await this.save(id, { ...state, phase: "replacing", oldPath, candidatePath, baseline });
     this.replacements.add(id);
   }
 }

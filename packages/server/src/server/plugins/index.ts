@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { ManagedPluginActivationPolicy, type ActivationOperation } from "./activation-policy.js";
 import type { PluginAgentToolsRuntime } from "./agent-tools.js";
 import type { PluginLifecycle } from "./lifecycle/index.js";
@@ -371,7 +372,10 @@ export class PluginService {
       await policy.authorize(pluginId, candidate, "activate", undefined, authorization);
       if (this.requireSource(pluginId).path !== source.path || !this.canPublish(pluginId))
         throw new Error("Source changed during replacement preparation");
-      await policy.replacing(pluginId, source.path, candidate);
+      const receipt = this.runtime.getLoadedReceipt?.(pluginId);
+      if (!receipt || receipt.sourcePath !== source.path)
+        throw new Error("Loaded baseline identity is ambiguous");
+      await policy.replacing(pluginId, source.path, candidate, { source, receipt });
       try {
         const wasRunning = this.runtime.catalog().some((item) => item.id === pluginId);
         await this.stopPlugin(pluginId);
@@ -390,6 +394,7 @@ export class PluginService {
           }
           if (wasRunning && this.canPublish(pluginId)) {
             try {
+              await this.assertRecoveryBaseline(pluginId, source.path);
               await this.startExplicit(pluginId, source.path, "recover");
               await policy.committedReplacement(pluginId);
             } catch (recoveryError) {
@@ -400,6 +405,69 @@ export class PluginService {
         }
         this.notify(pluginId);
         return this.requireItem(pluginId);
+      } finally {
+        policy.releaseReplacement(pluginId);
+      }
+    });
+  }
+
+  async recoverPlugin(input: {
+    pluginId: string;
+    expectedPath: string;
+    expectedGeneration: number;
+  }): Promise<PluginListItem> {
+    return this.enqueue(async () => {
+      const { pluginId } = input;
+      const policy = this.dependencies.activationPolicy;
+      if (!policy || !this.runtime.validateActivation)
+        throw new Error("Managed recovery unavailable");
+      const current = this.requireEnabledSource(pluginId);
+      const state = await policy.status(pluginId);
+      const baseline = state.baseline;
+      if (state.generation !== input.expectedGeneration || current.path !== input.expectedPath)
+        throw new Error("Recovery generation/source CAS mismatch");
+      if (!baseline) throw new Error("Recovery requires a recorded baseline identity");
+      const loaded = this.runtime.getLoadedReceipt?.(pluginId);
+      const knownSource =
+        current.path === baseline.source.path || current.path === state.candidatePath;
+      if (
+        !knownSource ||
+        (loaded &&
+          (!isDeepStrictEqual(loaded, state.currentReceipt) || loaded.sourcePath !== current.path))
+      ) {
+        await policy.hold(pluginId);
+        throw new Error("Loaded/current source identity is ambiguous; recovery held");
+      }
+      try {
+        const ticket = await policy.authorize(pluginId, baseline.source.path, "recover");
+        if (
+          !ticket ||
+          ticket.authorization.serverBundleSha256 !== baseline.receipt.serverBundleSha256 ||
+          ticket.authorization.snapshotSha256 !== baseline.receipt.snapshotSha256 ||
+          ticket.authorization.snapshotRoot !== baseline.receipt.snapshotRoot
+        )
+          throw new Error("Recovery authorization does not match recorded baseline");
+        await this.runtime.validateActivation(pluginId, baseline.source.path, "recover");
+        if (this.requireSource(pluginId).path !== current.path || !this.canPublish(pluginId))
+          throw new Error("Recovery cancelled");
+        await policy.recovering(pluginId, input.expectedGeneration);
+        await this.stopPlugin(pluginId);
+        await this.startExplicit(pluginId, baseline.source.path, "recover");
+        if (!this.canPublish(pluginId) || this.requireSource(pluginId).path !== current.path)
+          throw new Error("Recovery cancelled after launch");
+        await this.patchSource(pluginId, baseline.source);
+        await policy.committedReplacement(pluginId);
+        this.notify(pluginId);
+        return this.requireItem(pluginId);
+      } catch (error) {
+        // Never disturb an existing child on a preflight refusal; a launched recovery is stopped.
+        if (
+          this.runtime.getLoadedReceipt?.(pluginId)?.activationGeneration !==
+          loaded?.activationGeneration
+        )
+          await this.stopPlugin(pluginId);
+        await policy.hold(pluginId);
+        throw error;
       } finally {
         policy.releaseReplacement(pluginId);
       }
@@ -665,6 +733,24 @@ export class PluginService {
     }
   }
 
+  private async assertRecoveryBaseline(pluginId: string, sourcePath: string): Promise<void> {
+    const policy = this.dependencies.activationPolicy;
+    if (!policy) return;
+    const state = await policy.status(pluginId);
+    // Unmanaged compatibility has no recorded enrollment or policy ticket.
+    const ticket = await policy.authorize(pluginId, sourcePath, "recover");
+    if (!ticket) return;
+    const baseline = state.baseline;
+    if (
+      !baseline ||
+      baseline.source.path !== sourcePath ||
+      ticket.authorization.serverBundleSha256 !== baseline.receipt.serverBundleSha256 ||
+      ticket.authorization.snapshotSha256 !== baseline.receipt.snapshotSha256 ||
+      ticket.authorization.snapshotRoot !== baseline.receipt.snapshotRoot
+    )
+      throw new Error("Recovery authorization does not match recorded baseline");
+  }
+
   private async startExplicit(
     pluginId: string,
     sourcePath: string,
@@ -876,60 +962,85 @@ export class PluginService {
       throw error;
     }
 
-    await this.dependencies.activationPolicy?.authorize(pluginId, candidate.directory);
+    const policy = this.dependencies.activationPolicy;
+    const ticket = await policy?.authorize(pluginId, candidate.directory);
+    if (ticket) {
+      if (!this.runtime.validateActivation) throw new Error("Managed verification unavailable");
+      await this.runtime.validateActivation(pluginId, candidate.directory);
+      await policy?.authorize(pluginId, candidate.directory, "activate", undefined, ticket);
+    }
     const current = this.requireSource(pluginId);
     const isRunning = this.runtime.catalog().some((plugin) => plugin.id === pluginId);
     const shouldActivate =
       current.enabled !== false && this.configStore.get().pluginsEnabled === true;
-    if (shouldActivate) {
-      await this.dependencies.activationPolicy?.authorize(pluginId, candidate.directory);
-      if (isRunning) await this.stopPlugin(pluginId);
-      try {
-        await this.startExplicit(pluginId, candidate.directory);
-      } catch (error) {
-        let recoveryError: unknown;
-        try {
-          this.errors.delete(pluginId);
-          if (isRunning && this.canPublish(pluginId))
-            await this.startExplicit(pluginId, source.path, "recover");
-        } catch (restoreError) {
-          recoveryError = restoreError;
-        } finally {
-          await managedSources.discard(candidate);
-          this.notify(pluginId);
-        }
-        if (recoveryError)
-          throw new Error(
-            `Update failed: ${error instanceof Error ? error.message : String(error)}; restoring previous plugin also failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
-            { cause: error },
-          );
-        throw error;
-      }
+    if (ticket) {
+      const receipt = this.runtime.getLoadedReceipt?.(pluginId);
+      if (!policy || !receipt || receipt.sourcePath !== current.path || !shouldActivate)
+        throw new Error("Managed update requires an independently loaded baseline");
+      await policy.replacing(pluginId, current.path, candidate.directory, {
+        source: current,
+        receipt,
+      });
     }
-    const activatedSource = this.configStore.get().plugins?.[pluginId];
-    if (!activatedSource) {
-      await this.stopPlugin(pluginId);
-      await managedSources.discard(candidate);
-      throw new Error(`Plugin is no longer configured: ${pluginId}`);
-    }
-    await this.patchSource(pluginId, (currentSource) => ({
-      ...currentSource,
-      path: candidate.directory,
-    }));
-    this.errors.delete(pluginId);
-    this.notify(pluginId);
-    let warning: string | undefined;
     try {
-      await managedSources.removeVersion(pluginId, source.path);
+      if (shouldActivate) {
+        await policy?.authorize(pluginId, candidate.directory, "activate", undefined, ticket);
+        if (isRunning) await this.stopPlugin(pluginId);
+        try {
+          await this.startExplicit(pluginId, candidate.directory);
+        } catch (error) {
+          try {
+            if (isRunning && this.canPublish(pluginId)) {
+              await this.assertRecoveryBaseline(pluginId, source.path);
+              await this.startExplicit(pluginId, source.path, "recover");
+              if (ticket) await policy?.committedReplacement(pluginId);
+            }
+          } catch (restoreError) {
+            if (ticket) await policy?.hold(pluginId);
+            throw new Error("Update failed; recovery required", { cause: restoreError });
+          } finally {
+            if (!ticket) await managedSources.discard(candidate);
+            this.notify(pluginId);
+          }
+          throw error;
+        }
+      }
+      const activatedSource = this.configStore.get().plugins?.[pluginId];
+      if (!activatedSource) {
+        await this.stopPlugin(pluginId);
+        if (!ticket) await managedSources.discard(candidate);
+        throw new Error(`Plugin is no longer configured: ${pluginId}`);
+      }
+      await this.patchSource(pluginId, (currentSource) => ({
+        ...currentSource,
+        path: candidate.directory,
+      }));
+      if (ticket) await policy?.committedReplacement(pluginId);
+      this.errors.delete(pluginId);
+      this.notify(pluginId);
+      let warning: string | undefined;
+      if (!ticket) {
+        try {
+          await managedSources.removeVersion(pluginId, source.path);
+        } catch (error) {
+          warning = `Plugin updated, but previous installation cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
+      return {
+        id: pluginId,
+        outcome: "updated",
+        plugin: await this.requireItem(pluginId),
+        ...(warning ? { warning } : {}),
+      };
     } catch (error) {
-      warning = `Plugin updated, but previous installation cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (ticket && this.configStore.get().plugins?.[pluginId]?.path !== source.path) {
+        await this.stopPlugin(pluginId);
+        await policy?.hold(pluginId);
+      }
+      throw error;
+    } finally {
+      if (ticket) policy?.releaseReplacement(pluginId);
     }
-    return {
-      id: pluginId,
-      outcome: "updated",
-      plugin: await this.requireItem(pluginId),
-      ...(warning ? { warning } : {}),
-    };
   }
 
   private validateCandidate(candidate: ManagedPluginCandidate): Promise<void> {

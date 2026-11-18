@@ -412,3 +412,22 @@ describe("plugin subscription protocol", () => {
     expect(StatusMessageSchema.parse(status)).toMatchObject(status);
   });
 });
+
+it("parses the source/generation CAS recovery request and receipt-bearing response", () => {
+  const request = {
+    type: "plugin.recovery.request",
+    requestId: "recover",
+    pluginId: "managed",
+    expectedPath: "/candidate",
+    expectedGeneration: 4,
+  };
+  expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+  const response = {
+    type: "plugin.recovery.response",
+    payload: {
+      requestId: "recover",
+      plugin: { id: "managed", path: "/baseline", enabled: true, status: "running" },
+    },
+  };
+  expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+});

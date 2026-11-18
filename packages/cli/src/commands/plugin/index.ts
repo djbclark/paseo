@@ -237,8 +237,35 @@ export async function runPluginReplaceCommand(
   return { type: "single", data, schema: pluginSchema };
 }
 
+export async function runPluginRecoverCommand(
+  pluginId: string,
+  options: PluginOptions,
+): Promise<SingleResult<PluginListItem>> {
+  const expectedGeneration = Number(options.expectedGeneration);
+  if (
+    !options.expectedPath ||
+    !options.expectedGeneration ||
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0
+  )
+    throw new Error("Supply --expected-path and --expected-generation");
+  const expectedPath = options.expectedPath;
+  const data = await withManagedPluginClient(options.daemonTarget, (client) =>
+    client.recoverPlugin({ pluginId, expectedPath, expectedGeneration }),
+  );
+  return { type: "single", data, schema: pluginSchema };
+}
+
 export function createPluginCommand(): Command {
   const plugin = new Command("plugin").description("Manage trusted, unsandboxed plugins");
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("recover")
+      .description("Reconcile a journal and recover the authorized retained baseline")
+      .argument("<id>")
+      .requiredOption("--expected-path <path>", "Exact current registration")
+      .requiredOption("--expected-generation <generation>", "Current journal generation"),
+  ).action(withOutput(runPluginRecoverCommand));
   addJsonAndDaemonHostOptions(
     plugin
       .command("replace")

@@ -87,10 +87,25 @@ session databases or erase newly written state to undo a binary switch.
 Recovery requires a separate current `recover` authorization for the retained identity and next
 expected generation. Revoking a candidate does not revoke an independently authorized baseline.
 Missing recovery authorization leaves the plugin stopped and exposes held/recovery-required state.
-An interrupted `activating` or `replacing` journal prevents automatic startup replay. Retain both
-snapshots and journal for administrator reconciliation; this version offers no online journal-reset
-or migration command. Reconcile registration and runtime identity before restoring a ready state
-with the daemon stopped under separately approved maintenance.
+An interrupted `activating` or `replacing` journal prevents automatic startup replay. The journal
+retains the previous registration and its independently captured loaded receipt. Managed Git updates
+also retain their previous snapshot and use this recovery journal. Reconcile through the supported
+API; do not edit the journal or restore a session database:
+
+```bash
+paseo plugin recover example --expected-path /snapshots/current/plugins/example --expected-generation 2
+```
+
+The typed `plugin.recovery.request` compares current registration and generation, inspects any loaded
+child against its stored receipt, validates the retained baseline snapshot and compiled digest, then
+requires current `recover` authorization. A successful recovery starts that exact baseline as a new
+activation generation and commits its retained registration. Missing baseline evidence, changed disk
+bytes, unknown loaded identity, revocation, or unsupported migration holds recovery without replay.
+Preflight refusal leaves an already-running child untouched. After stopping a child, recovery failure
+leaves it stopped with a held journal; retry the operation with new explicit authorization and the
+latest generation once the uncertainty has been resolved. Settings, logs and retained snapshots stay
+in place throughout. Both replacement and recovery require the host's `managedPluginPromotions`
+capability. `plugin status ID --json` exposes the generation and phase needed for the CAS.
 
 ## Install a directory source
 

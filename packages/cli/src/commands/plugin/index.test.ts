@@ -50,7 +50,15 @@ const installDirectoryPlugin = vi.fn(async () => ({
 }));
 const previewPluginUpdates = vi.fn(async () => []);
 const close = vi.fn(async () => undefined);
+const recoverPlugin = vi.fn(async () => ({
+  id: "managed",
+  path: "/snapshots/old",
+  enabled: true,
+  status: "running" as const,
+}));
+
 const features: {
+  managedPluginPromotions?: boolean;
   pluginManagement?: boolean;
   pluginLogs?: boolean;
   pluginGitManagement?: boolean;
@@ -62,6 +70,7 @@ vi.mock("../../utils/client.js", () => ({
   connectToDaemon: vi.fn(async () => ({
     getLastServerInfoMessage: () => ({ features }),
     listPlugins,
+    recoverPlugin,
     getPluginLogs,
     installDirectoryPlugin,
     installPluginSource,
@@ -77,10 +86,12 @@ import {
   runPluginUpdateCommand,
   runPluginListCommand,
   runPluginLogsCommand,
+  runPluginRecoverCommand,
 } from "./index.js";
 
 describe("plugin management commands", () => {
   beforeEach(() => {
+    features.managedPluginPromotions = false;
     features.pluginManagement = false;
     features.pluginLogs = false;
     features.pluginGitManagement = false;
@@ -384,4 +395,21 @@ describe("reviewed plugin update workflow", () => {
       expect(f.applied).toEqual([]);
     },
   );
+});
+
+it("sends recovery source/generation CAS through the supported typed client after feature gating", async () => {
+  features.managedPluginPromotions = false;
+  const options = { daemonTarget, expectedPath: "/snapshots/candidate", expectedGeneration: "4" };
+  await expect(runPluginRecoverCommand("managed", options)).rejects.toMatchObject({
+    code: "DAEMON_UPDATE_REQUIRED",
+  });
+  expect(recoverPlugin).not.toHaveBeenCalled();
+  features.managedPluginPromotions = true;
+  const result = await runPluginRecoverCommand("managed", options);
+  expect(recoverPlugin).toHaveBeenCalledWith({
+    pluginId: "managed",
+    expectedPath: "/snapshots/candidate",
+    expectedGeneration: 4,
+  });
+  expect(result.data.path).toBe("/snapshots/old");
 });

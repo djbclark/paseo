@@ -524,6 +524,11 @@ export interface SessionOptions {
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
     listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
     getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
+    recoverPlugin?(input: {
+      pluginId: string;
+      expectedPath: string;
+      expectedGeneration: number;
+    }): Promise<import("@getpaseo/protocol/messages").PluginListItem>;
     replaceDirectory?(input: {
       pluginId: string;
       path: string;
@@ -2962,6 +2967,17 @@ export class Session {
         this.emit({
           type: "plugin.source.update.response",
           payload: { requestId: msg.requestId, plugins },
+        });
+        return undefined;
+      });
+    }
+    if (msg.type === "plugin.recovery.request") {
+      if (!this.pluginRuntime?.recoverPlugin)
+        throw new Error("Managed plugin recovery unavailable");
+      return this.pluginRuntime.recoverPlugin(msg).then((plugin) => {
+        this.emit({
+          type: "plugin.recovery.response",
+          payload: { requestId: msg.requestId, plugin },
         });
         return undefined;
       });

@@ -1594,6 +1594,14 @@ export const PluginDirectoryInstallRequestSchema = z.object({
   id: PluginIdSchema.optional(),
 });
 
+export const PluginRecoveryRequestSchema = z.object({
+  type: z.literal("plugin.recovery.request"),
+  requestId: z.string(),
+  pluginId: PluginIdSchema,
+  expectedPath: z.string().min(1),
+  expectedGeneration: z.number().int().nonnegative(),
+});
+
 export const PluginDirectoryReplaceRequestSchema = z.object({
   type: z.literal("plugin.directory.replace.request"),
   requestId: z.string(),
@@ -3567,6 +3575,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PluginLogsGetRequestSchema,
   PluginDirectoryInstallRequestSchema,
   PluginDirectoryReplaceRequestSchema,
+  PluginRecoveryRequestSchema,
   PluginDirectoryInspectRequestSchema,
   PluginSourceInstallRequestSchema,
   PluginSourceStatusRequestSchema,
@@ -7248,6 +7257,11 @@ export const PluginDirectoryInstallResponseSchema = z.object({
   payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
 });
 
+export const PluginRecoveryResponseSchema = z.object({
+  type: z.literal("plugin.recovery.response"),
+  payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
+});
+
 export const PluginDirectoryReplaceResponseSchema = z.object({
   type: z.literal("plugin.directory.replace.response"),
   payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
@@ -7426,6 +7440,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PluginLogsGetResponseSchema,
   PluginDirectoryInstallResponseSchema,
   PluginDirectoryReplaceResponseSchema,
+  PluginRecoveryResponseSchema,
   PluginDirectoryInspectResponseSchema,
   PluginSourceInstallResponseSchema,
   PluginSourceStatusResponseSchema,

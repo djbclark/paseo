@@ -535,6 +535,7 @@ test("routes plugin requests and releases its owned catalog subscription on clea
         message: "ready",
       },
     ],
+    recoverPlugin: vi.fn(async () => plugin),
     installDirectory: async () => plugin,
     inspectDirectory: async () => ({ id: "example" }),
     reloadPlugin: async () => plugin,
@@ -584,6 +585,20 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     requestId: "remove",
     pluginId: "example",
   });
+  await session.handleMessage({
+    type: "plugin.recovery.request",
+    requestId: "recover",
+    pluginId: "example",
+    expectedPath: "/plugins/example",
+    expectedGeneration: 3,
+  });
+  expect(pluginRuntime.recoverPlugin).toHaveBeenCalledWith({
+    type: "plugin.recovery.request",
+    requestId: "recover",
+    pluginId: "example",
+    expectedPath: "/plugins/example",
+    expectedGeneration: 3,
+  });
   for (const listener of listeners) listener("example");
 
   expect(messages.map((message) => message.type)).toEqual([
@@ -593,6 +608,7 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     "plugin.reload.response",
     "plugin.disable.response",
     "plugin.remove.response",
+    "plugin.recovery.response",
     "status",
   ]);
   expect(messages.at(-1)).toEqual({

@@ -374,13 +374,23 @@ export class PluginRuntime {
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
   }
 
-  async validateActivation(pluginId: string, directory: string): Promise<void> {
+  async validateActivation(
+    pluginId: string,
+    directory: string,
+    operation: ActivationOperation = "activate",
+  ): Promise<void> {
     const policy = this.dependencies.activationPolicy;
-    const ticket = await policy?.authorize(pluginId, directory);
+    const ticket = await policy?.authorize(pluginId, directory, operation);
     const bundles = await compileDirectoryPlugin(directory, this.daemonVersion);
     if (ticket && !bundles.serverBundle)
       throw new Error("Managed activation requires a server bundle");
-    await policy?.authorize(pluginId, directory, "activate", bundles.serverBundle, ticket);
+    await policy?.authorize(
+      pluginId,
+      directory,
+      operation,
+      bundles.serverBundle ?? undefined,
+      ticket,
+    );
   }
 
   getLoadedReceipt(pluginId: string): PluginLoadedReceipt | undefined {
@@ -884,6 +894,20 @@ export class PluginRuntime {
     if (JSON.stringify(currentTicket) !== JSON.stringify(ticket))
       throw new Error("Managed enrollment changed during compilation");
     await policy?.arm(pluginId, ticket);
+    try {
+      const launchTicket = await policy?.authorize(
+        pluginId,
+        configuredPath,
+        operation,
+        serverBundle,
+        ticket,
+      );
+      if (JSON.stringify(launchTicket) !== JSON.stringify(ticket))
+        throw new Error("Managed authorization changed before child launch");
+    } catch (error) {
+      await policy?.finish(pluginId, ticket, false);
+      throw error;
+    }
     const startedAt = new Date().toISOString();
     let launched: LoadedPlugin | undefined;
     try {
@@ -924,6 +948,7 @@ export class PluginRuntime {
           : {}),
       };
       this.activationGenerations.set(pluginId, loaded.loadedReceipt.activationGeneration);
+      await policy?.recordLoaded(pluginId, ticket, loaded.loadedReceipt);
       await policy?.finish(pluginId, ticket, true);
       return loaded;
     } catch (error) {

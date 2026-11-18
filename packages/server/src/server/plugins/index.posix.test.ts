@@ -1,3 +1,4 @@
+import { PluginRuntime } from "./runtime.js";
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { ManagedPluginActivationPolicy, hashPluginSnapshot } from "./activation-policy.js";
@@ -1920,7 +1921,7 @@ describe("managed plugin promotion boundary", () => {
   }
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export function register() {}");
+    const directory = await createPlugin("managed", "export default function register() {}");
     for (const invalid of [undefined, "{}", "not-json"]) {
       if (invalid !== undefined) await writeFile(f.policyFile, invalid);
       const service = createService(
@@ -1936,7 +1937,7 @@ describe("managed plugin promotion boundary", () => {
   });
   it("captures actual loaded bytes and removes receipt on stop despite disk changes", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export function register() {}");
+    const directory = await createPlugin("managed", "export default function register() {}");
     await allow(f.policyFile, [await authorization(directory, 0)]);
     const service = createService(
       f.home,
@@ -1952,7 +1953,7 @@ describe("managed plugin promotion boundary", () => {
       );
       await writeFile(
         path.join(directory, "index.server.ts"),
-        "export function register() { throw new Error('changed'); }",
+        "export default function register() { throw new Error('changed'); }",
       );
       expect((await service.listPlugins())[0].loaded).toEqual(loaded);
       await expect(service.reloadPlugin("managed")).rejects.toThrow();
@@ -1965,10 +1966,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("replaces a stateless snapshot retaining identity, settings, logs and old source", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export function register() {}");
+    const old = await createPlugin("managed", "export default function register() {}");
     const candidate = await createPlugin(
       "managed",
-      "export function register() { console.log('candidate'); }",
+      "export default function register() { console.log('candidate'); }",
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const settingsDirectory = path.join(f.home, "settings");
@@ -2003,7 +2004,7 @@ describe("managed plugin promotion boundary", () => {
       expect(result.loaded?.activationGeneration).toBe(2);
       expect(await readFile(setting, "utf8")).toBe("preserve");
       expect(await readFile(path.join(old, "index.server.ts"), "utf8")).toBe(
-        "export function register() {}",
+        "export default function register() {}",
       );
       expect(service.getLogs("managed").slice(0, logs.length)).toEqual(logs);
       expect(result.promotionState).toMatchObject({
@@ -2017,7 +2018,7 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds an interrupted replacement on next daemon startup", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export function register() {}");
+    const old = await createPlugin("managed", "export default function register() {}");
     await allow(f.policyFile, [await authorization(old, 0)]);
     await f.policy.replacing("managed", old, "/retained-candidate");
     const policy = new ManagedPluginActivationPolicy(f.policyFile, path.join(f.home, "promotions"));
@@ -2033,10 +2034,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("recovers failed startup only with independent current authorization and a new generation", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export function register() {}");
+    const old = await createPlugin("managed", "export default function register() {}");
     const bad = await createPlugin(
       "managed",
-      "export function register() { throw new Error('startup failure'); }",
+      "export default function register() { throw new Error('startup failure'); }",
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const service = createService(
@@ -2069,10 +2070,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds failed replacement when recovery identity has been revoked", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export function register() {}");
+    const old = await createPlugin("managed", "export default function register() {}");
     const bad = await createPlugin(
       "managed",
-      "export function register() { throw new Error('startup failure'); }",
+      "export default function register() { throw new Error('startup failure'); }",
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const service = createService(
@@ -2099,14 +2100,14 @@ describe("managed plugin promotion boundary", () => {
   });
   it("rechecks replacement requests after a real child startup holds the operation queue", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export function register() {}");
-    const candidate = await createPlugin("managed", "export function register() {}");
+    const old = await createPlugin("managed", "export default function register() {}");
+    const candidate = await createPlugin("managed", "export default function register() {}");
     const begun = path.join(f.home, "begun");
     const release = path.join(f.home, "release");
     const blocker = await createPlugin(
       "blocker",
       `import { writeFileSync, existsSync } from 'node:fs';
-      export async function register() { writeFileSync(${JSON.stringify(begun)}, 'started');
+      export default async function register() { writeFileSync(${JSON.stringify(begun)}, 'started');
         while (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); }`,
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
@@ -2155,4 +2156,235 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   });
+  it("gates actual manual and queued Cafe-equivalent Git applyUpdates after prepared authorization is revoked", async () => {
+    const f = await fixture();
+    const repository = await createPlugin("managed", "export default () => () => {};");
+    await runGitCommand(["init", "-b", "main"], { cwd: repository });
+    await runGitCommand(["config", "user.name", "Paseo Tests"], { cwd: repository });
+    await runGitCommand(["config", "user.email", "paseo@example.test"], { cwd: repository });
+    async function commit(message: string) {
+      await runGitCommand(["add", "-A"], { cwd: repository });
+      await runGitCommand(["commit", "-m", message], { cwd: repository });
+    }
+    await commit("initial");
+    await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+    const prepared = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let installing = true;
+    let paused = false;
+    const preparedCommits: string[] = [];
+    class ObservedSources extends ManagedPluginSources {
+      override async place(id: string, candidate: Parameters<ManagedPluginSources["place"]>[1]) {
+        const placed = await super.place(id, candidate);
+        if (installing) {
+          await allow(f.policyFile, [await authorization(placed.directory, 0)]);
+          installing = false;
+        } else if (!paused) {
+          if (placed.target?.kind !== "git") throw new Error("Expected reviewed Git target");
+          preparedCommits.push(
+            (await runGitCommand(["rev-parse", "HEAD"], { cwd: placed.directory })).stdout.trim(),
+          );
+          expect(preparedCommits[0]).toBe(placed.target.commit);
+          paused = true;
+          await allow(f.policyFile, [await authorization(placed.directory, 1)]);
+          prepared.resolve();
+          await release.promise;
+        }
+        return placed;
+      }
+    }
+    const service = createService(
+      f.home,
+      {},
+      { managedSources: new ObservedSources(f.home), activationPolicy: f.policy },
+    );
+    try {
+      await service.start();
+      const installed = await service.installSource({ source: pathToFileURL(repository).href });
+      const loaded = installed.loaded;
+      await writeFile(path.join(repository, "revision.txt"), "reviewed");
+      await commit("reviewed");
+      const [preview] = await service.previewUpdates({
+        pluginId: "managed",
+        target: { kind: "git", ref: "main" },
+      });
+      if (!preview.proposal) throw new Error("Expected native Git update proposal");
+      const proposal = preview.proposal;
+      // Move the branch after review; the reviewed immutable commit remains the only prepared target.
+      await writeFile(path.join(repository, "revision.txt"), "moving-ref");
+      await commit("moving ref");
+      const manual = service.applyUpdates([proposal]);
+      await prepared.promise;
+      const automatic = service.applyUpdates([proposal]);
+      await allow(f.policyFile, []);
+      release.resolve();
+      expect(await manual).toMatchObject([
+        { id: "managed", outcome: "error", error: expect.stringContaining("authorization") },
+      ]);
+      expect(await automatic).toMatchObject([
+        { id: "managed", outcome: "error", error: expect.stringContaining("authorization") },
+      ]);
+      const current = (await service.listPlugins())[0];
+      expect(current.loaded).toEqual(loaded);
+      expect(current.path).toBe(installed.path);
+      const stale = { ...proposal, expected: { ...proposal.expected, revision: "0".repeat(40) } };
+      expect(await service.applyUpdates([stale])).toMatchObject([
+        { outcome: "error", error: expect.stringContaining("changed since review") },
+      ]);
+      expect((await service.listPlugins())[0].loaded).toEqual(loaded);
+    } finally {
+      release.resolve();
+      await service.stopAllPlugins();
+    }
+  }, 60_000);
+
+  it.each(["persist", "stop", "start", "config-commit"])(
+    "recovers after native replacement interruption at %s",
+    async (phase) => {
+      const f = await fixture();
+      const old = await createPlugin("managed", "export default () => () => {};");
+      const candidate = await createPlugin("managed", "export default () => () => {};");
+      let interrupted = false;
+      class InterruptedPolicy extends ManagedPluginActivationPolicy {
+        override async replacing(...args: Parameters<ManagedPluginActivationPolicy["replacing"]>) {
+          await super.replacing(...args);
+          if (phase === "persist" && !interrupted) {
+            interrupted = true;
+            throw new Error("injected interruption after journal persist");
+          }
+        }
+      }
+      class InterruptedRuntime extends PluginRuntime {
+        override async stopPluginById(...args: Parameters<PluginRuntime["stopPluginById"]>) {
+          const result = await super.stopPluginById(...args);
+          if (phase === "stop" && !interrupted) {
+            interrupted = true;
+            throw new Error("injected interruption after child stop");
+          }
+          return result;
+        }
+        override async startPlugin(...args: Parameters<PluginRuntime["startPlugin"]>) {
+          await super.startPlugin(...args);
+          if (phase === "start" && args[1] === candidate && !interrupted) {
+            interrupted = true;
+            throw new Error("injected interruption after actual child start");
+          }
+        }
+      }
+      class InterruptedStore extends DaemonConfigStore {
+        override async patch(
+          ...args: Parameters<DaemonConfigStore["patch"]>
+        ): ReturnType<DaemonConfigStore["patch"]> {
+          const result = await super.patch(...args);
+          if (
+            phase === "config-commit" &&
+            this.get().plugins?.managed?.path === candidate &&
+            !interrupted
+          ) {
+            interrupted = true;
+            throw new Error("injected interruption after actual config commit");
+          }
+          return result;
+        }
+      }
+      const policy = new InterruptedPolicy(f.policyFile, path.join(f.home, "promotions"));
+      const store = new InterruptedStore(
+        f.home,
+        createStore(f.home, { managed: { source: "directory", path: old } }).get(),
+      );
+      const runtime = new InterruptedRuntime(pino({ level: "silent" }), "0.4.0", {
+        activationPolicy: policy,
+      });
+      let service = bindTestSessionHost(
+        new PluginService(pino({ level: "silent" }), store, "0.4.0", {
+          activationPolicy: policy,
+          runtime,
+        }),
+      );
+      try {
+        await allow(f.policyFile, [await authorization(old, 0)]);
+        await service.start();
+        await allow(f.policyFile, [await authorization(candidate, 1)]);
+        await expect(
+          service.replaceDirectory({
+            pluginId: "managed",
+            path: candidate,
+            expectedPath: old,
+            expectedGeneration: 1,
+          }),
+        ).rejects.toThrow();
+        expect(interrupted).toBe(true);
+        await service.stopAllPlugins();
+        const restarted = new ManagedPluginActivationPolicy(
+          f.policyFile,
+          path.join(f.home, "promotions"),
+        );
+        service = bindTestSessionHost(
+          new PluginService(pino({ level: "silent" }), store, "0.4.0", {
+            activationPolicy: restarted,
+          }),
+        );
+        await service.start();
+        expect(catalogIds(service)).toEqual([]);
+        const state = await restarted.status("managed");
+        const expectedPath = phase === "config-commit" ? candidate : old;
+        await allow(f.policyFile, [await authorization(old, state.generation, "recover")]);
+        await expect(
+          service.recoverPlugin({
+            pluginId: "managed",
+            expectedPath,
+            expectedGeneration: state.generation + 1,
+          }),
+        ).rejects.toThrow("CAS");
+        const recovered = await service.recoverPlugin({
+          pluginId: "managed",
+          expectedPath,
+          expectedGeneration: state.generation,
+        });
+        expect(recovered.path).toBe(old);
+        expect(recovered.loaded?.activationGeneration).toBe(state.generation + 1);
+        expect(recovered.promotionState?.phase).toBe("ready");
+      } finally {
+        await service.stopAllPlugins();
+      }
+    },
+  );
+
+  it.each(["revoked", "disk-changed"])(
+    "holds supported recovery for %s baseline without restarting old bytes",
+    async (mode) => {
+      const f = await fixture();
+      const old = await createPlugin("managed", "export default () => () => {};");
+      await allow(f.policyFile, [await authorization(old, 0)]);
+      const service = createService(
+        f.home,
+        { managed: { source: "directory", path: old } },
+        { activationPolicy: f.policy },
+      );
+      try {
+        await service.start();
+        const receipt = (await service.listPlugins())[0].loaded;
+        if (!receipt) throw new Error("Expected baseline receipt");
+        await f.policy.replacing("managed", old, "/candidate", {
+          source: { source: "directory", path: old },
+          receipt,
+        });
+        f.policy.releaseReplacement("managed");
+        const recovery = await authorization(old, 1, "recover");
+        await allow(f.policyFile, mode === "revoked" ? [] : [recovery]);
+        if (mode === "disk-changed")
+          await writeFile(
+            path.join(old, "index.server.ts"),
+            "export default () => { throw new Error('unqualified'); };",
+          );
+        await expect(
+          service.recoverPlugin({ pluginId: "managed", expectedPath: old, expectedGeneration: 1 }),
+        ).rejects.toThrow();
+        expect((await service.listPlugins())[0].loaded).toEqual(receipt);
+        expect(await f.policy.status("managed")).toMatchObject({ phase: "held", generation: 1 });
+      } finally {
+        await service.stopAllPlugins();
+      }
+    },
+  );
 });

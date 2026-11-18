@@ -1,3 +1,6 @@
+import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
+import type { QualifiedDaemonOwner } from "../execution/daemon-types.js";
+import { readFixedManagedPluginPolicy } from "../execution/managed-policy-environment.js";
 import { constants } from "node:fs";
 import {
   PluginIdSchema,
@@ -84,6 +87,36 @@ export async function hashPluginSnapshot(root: string): Promise<string> {
 }
 
 export class ManagedPluginActivationPolicy {
+  private qualifiedOwner: QualifiedDaemonOwner | undefined;
+  bindQualifiedAuthority(owner: QualifiedDaemonOwner): void {
+    if (!isQualifiedDaemonOwner(owner) || (this.qualifiedOwner && this.qualifiedOwner !== owner))
+      throw new Error("Managed policy qualified owner mismatch");
+    this.qualifiedOwner = owner;
+  }
+  private policyObservationEpoch = 0;
+  private lastPolicyBytes: string | undefined;
+  getObservationEpoch(): number {
+    return this.policyObservationEpoch;
+  }
+  private async readPolicy(): Promise<string> {
+    if (!this.policyFile) throw new Error("Managed policy unavailable");
+    let raw: string;
+    if (!this.qualifiedOwner) raw = await readFile(this.policyFile, "utf8");
+    else {
+      await this.qualifiedOwner.refresh();
+      const policy = await readFixedManagedPluginPolicy();
+      if (policy.path !== this.policyFile)
+        throw new Error("Qualified managed policy path mismatch");
+      await this.qualifiedOwner.refresh();
+      this.qualifiedOwner.assertFresh();
+      raw = JSON.stringify(policy.document);
+    }
+    if (raw !== this.lastPolicyBytes) {
+      this.lastPolicyBytes = raw;
+      this.policyObservationEpoch++;
+    }
+    return raw;
+  }
   private readonly enrolled = new Set<string>();
   private readonly replacements = new Set<string>();
   constructor(
@@ -192,7 +225,7 @@ export class ManagedPluginActivationPolicy {
       return undefined;
     }
     // Configured-but-unreadable/malformed policy holds EVERY activation, including unknown IDs.
-    const rawPolicy = await readFile(this.policyFile, "utf8");
+    const rawPolicy = await this.readPolicy();
     const policyRevision = createHash("sha256").update(rawPolicy).digest("hex");
     const policy = ManagedPluginPolicySchema.parse(JSON.parse(rawPolicy));
     const state = await this.status(id);
@@ -221,7 +254,7 @@ export class ManagedPluginActivationPolicy {
     if (ticket && JSON.stringify(ticket.authorization) !== JSON.stringify(authorization))
       throw new Error(`Managed authorization changed: ${id}`);
     await verifyAuthorizedArtifact({ id, canonical, authorization, bundle });
-    if ((await readFile(this.policyFile, "utf8")) !== rawPolicy)
+    if ((await this.readPolicy()) !== rawPolicy)
       throw new Error("Managed policy changed during verification");
     return { generation: generation + 1, authorization, policyRevision };
   }
@@ -230,9 +263,7 @@ export class ManagedPluginActivationPolicy {
       await this.assertUnconfiguredNativeAcquisition(id);
       return;
     }
-    const policy = ManagedPluginPolicySchema.parse(
-      JSON.parse(await readFile(this.policyFile, "utf8")),
-    );
+    const policy = ManagedPluginPolicySchema.parse(JSON.parse(await this.readPolicy()));
     if (id === undefined)
       throw new Error(
         "Configured managed policy requires an explicit runtime ID before native acquisition",
@@ -279,7 +310,7 @@ export class ManagedPluginActivationPolicy {
 
   async observeEnrollment(): Promise<{ ids: string[]; identity: string }> {
     if (!this.policyFile) throw new Error("Managed policy unavailable");
-    const raw = await readFile(this.policyFile, "utf8");
+    const raw = await this.readPolicy();
     const policy = ManagedPluginPolicySchema.parse(JSON.parse(raw));
     let names: string[] = [];
     let directoryIdentity = "missing";
@@ -319,7 +350,7 @@ export class ManagedPluginActivationPolicy {
   ): Promise<string> {
     if (!this.policyFile || !ticket.authorization.passiveProfile)
       throw new Error("Loaded passive authority unavailable");
-    const raw = await readFile(this.policyFile, "utf8");
+    const raw = await this.readPolicy();
     const policy = ManagedPluginPolicySchema.parse(JSON.parse(raw));
     const matching = policy.plugins[id]?.authorizations.filter(
       (authorization) => JSON.stringify(authorization) === JSON.stringify(ticket.authorization),
@@ -342,7 +373,7 @@ export class ManagedPluginActivationPolicy {
     const current = await this.observeStatus(id);
     if (
       JSON.stringify(current.state.currentReceipt) !== JSON.stringify(receipt) ||
-      (await readFile(this.policyFile, "utf8")) !== raw
+      (await this.readPolicy()) !== raw
     )
       throw new Error("Loaded passive authority changed");
     return createHash("sha256").update(raw).digest("hex");
@@ -351,7 +382,7 @@ export class ManagedPluginActivationPolicy {
   async dispatchAuthorized(input: PluginDispatch): Promise<void> {
     const { id, ticket, canPublish, dispatch } = input;
     if (this.policyFile !== undefined) {
-      const rawPolicy = await readFile(this.policyFile, "utf8");
+      const rawPolicy = await this.readPolicy();
       const policy = ManagedPluginPolicySchema.parse(JSON.parse(rawPolicy));
       if (!ticket && (policy.plugins[id] || this.enrolled.has(id)))
         throw new Error("Managed enrollment changed before initialize");

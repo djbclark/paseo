@@ -1,3 +1,7 @@
+import {
+  assertQualifiedPluginInitialization,
+  type QualifiedPluginInitialization,
+} from "./qualified-initialization.js";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -55,12 +59,22 @@ const workerEntrypoint = source
 
 // Reuse the isolate during a build batch (notably daemon bootstrap), then release
 // TypeScript's heap when idle. Only this owner admits work or stops the worker.
-interface QualifiedCompilerContext {
+interface QualifiedCompilerBase {
   readonly owner: QualifiedDaemonOwner;
   readonly native: NativePluginAdmission;
-  readonly held: PluginHeldOperation;
   readonly snapshotRoot: string;
 }
+type QualifiedHeldCompilerContext = QualifiedCompilerBase & {
+  readonly held: PluginHeldOperation;
+  readonly initialization?: never;
+};
+type QualifiedInitialCompilerContext = QualifiedCompilerBase & {
+  readonly initialization: QualifiedPluginInitialization;
+  readonly pluginId: string;
+  readonly sourcePath: string;
+  readonly held?: never;
+};
+type QualifiedCompilerContext = QualifiedHeldCompilerContext | QualifiedInitialCompilerContext;
 
 class PluginCompiler {
   private ownedWorker: QualifiedOwnedCompiler | null = null;
@@ -109,7 +123,20 @@ class PluginCompiler {
     const context = this.qualified;
     if (context) {
       if (!isQualifiedDaemonOwner(context.owner)) throw new Error("Unqualified compiler owner");
-      assertPluginHeldOperation(context.held, context.held.claim.pluginId, context.held.claim.path);
+      if (context.held)
+        assertPluginHeldOperation(
+          context.held,
+          context.held.claim.pluginId,
+          context.held.claim.path,
+        );
+      else
+        assertQualifiedPluginInitialization(
+          context.initialization,
+          context.owner,
+          context.native,
+          context.pluginId,
+          context.sourcePath,
+        );
       await context.owner.refresh();
       const owned = await context.owner.createCompilerWorker();
       this.ownedWorker = owned;
@@ -150,6 +177,7 @@ class PluginCompiler {
     const owned = this.ownedWorker;
     this.ownedWorker = null;
     if (owned) {
+      qualifiedObservationEpoch++;
       // A control timeout/abnormal exit does not settle actual helper work.
       // Keep the enclosing native scope lease until the private producer ACK
       // and actual Worker exit resolve this independent settlement promise.
@@ -158,7 +186,11 @@ class PluginCompiler {
         .catch(() => {
           this.qualified?.native.holdForUnknownWork();
         })
-        .then(() => owned.settled);
+        .then(() => owned.settled)
+        .then(() => {
+          qualifiedObservationEpoch++;
+          return undefined;
+        });
     } else this.stopping = worker.terminate();
   }
 
@@ -262,7 +294,7 @@ export function getQualifiedCompilerObservations(
 export async function compileQualifiedDirectoryPlugin(
   directory: string,
   version: string,
-  context: QualifiedCompilerContext,
+  context: QualifiedHeldCompilerContext,
 ): Promise<TaskResult["directory"]> {
   const { owner, native, held, snapshotRoot } = context;
   if (!isQualifiedDaemonOwner(owner) || !native.runHeldOperation)
@@ -318,4 +350,32 @@ export async function compileQualifiedDirectoryPlugin(
     qualifiedObservationEpoch++;
     return result;
   });
+}
+
+export async function compileQualifiedInitialDirectoryPlugin(
+  directory: string,
+  version: string,
+  context: QualifiedInitialCompilerContext,
+  expected: { snapshotSha256: string; serverBundleSha256: string },
+  builtinId?: string,
+): Promise<TaskResult["directory"]> {
+  const { owner, native, initialization, pluginId, snapshotRoot } = context;
+  assertQualifiedPluginInitialization(initialization, owner, native, pluginId, directory);
+  if ((await realpath(directory)) !== directory || (await realpath(snapshotRoot)) !== snapshotRoot)
+    throw new Error("Qualified initialization requires canonical immutable source");
+  const relative = path.relative(snapshotRoot, directory);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    throw new Error("Initialization source outside snapshot");
+  const before = await hashPluginSnapshot(snapshotRoot);
+  if (before !== expected.snapshotSha256) throw new Error("Initialization snapshot mismatch");
+  const initialCompiler = new PluginCompiler(context);
+  const result = await initialCompiler.run({ kind: "directory", directory, version, builtinId });
+  if (
+    (await hashPluginSnapshot(snapshotRoot)) !== before ||
+    !result.serverBundle ||
+    createHash("sha256").update(result.serverBundle).digest("hex") !== expected.serverBundleSha256
+  )
+    throw new Error("Initialization output/snapshot differs from protected artifact");
+  assertQualifiedPluginInitialization(initialization, owner, native, pluginId, directory);
+  return result;
 }

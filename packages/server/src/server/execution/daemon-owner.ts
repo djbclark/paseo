@@ -374,22 +374,62 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         workerData: { qualificationPort: port2 },
         transferList: [port2],
       });
-      worker.once("error", () => {
+      const stopNonce = randomUUID();
+      let stopRequested = false;
+      let helperAck = false;
+      let workerExited = false;
+      let settlementUnknown = false;
+      let expectedIncarnation: string | undefined;
+      let closeControl: Promise<void> | null = null;
+      let resolveSettled!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      });
+      function maybeSettle(): void {
+        if (helperAck && workerExited && !settlementUnknown) {
+          resolveSettled();
+          port1.close();
+        }
+      }
+      function markUnknown(): void {
         failed = true;
+        settlementUnknown = true;
+      }
+      worker.once("error", markUnknown);
+      worker.once("exit", (code) => {
+        workerExited = true;
+        if (code !== 0 || !stopRequested) markUnknown();
+        maybeSettle();
+      });
+      port1.once("close", () => {
+        if (!helperAck) markUnknown();
       });
       port1.on("message", (raw: unknown) => {
-        if (
-          raw &&
-          typeof raw === "object" &&
-          Reflect.get(raw, "type") === "qualified.execution.unknown"
-        )
-          failed = true;
+        if (!raw || typeof raw !== "object") return;
+        const type = Reflect.get(raw, "type");
+        if (type === "qualified.execution.unknown") {
+          markUnknown();
+          return;
+        }
+        if (type !== "qualified.execution.stopped") return;
+        try {
+          if (!stopRequested || !expectedIncarnation) return unsupported();
+          const reply = raw as unknown as OwnedObservation;
+          accept(reply, stopNonce, "compiler", { pid: process.pid }, expectedIncarnation);
+          if (reply.threadId !== observedThreadId) return unsupported();
+          helperAck = true;
+          maybeSettle();
+        } catch {
+          markUnknown();
+        }
       });
+      const observedThreadId = worker.threadId;
       const nonce = randomUUID();
       try {
         const observed = await exchange(port1, nonce);
         accept(observed, nonce, "compiler", { pid: process.pid });
         if (observed.threadId !== worker.threadId) return unsupported();
+        expectedIncarnation = observed.incarnation;
         const record: HandleRecord = {
           kind: "compiler",
           incarnation: observed.incarnation,
@@ -407,27 +447,36 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         });
         worker.once("exit", () => {
           record.alive = false;
-          port1.close();
           observers.delete(worker);
         });
         return Object.freeze({
           worker,
+          settled,
           closure: initial.closure,
           incarnation: record.incarnation,
           assertFresh: () => assertOwnedExecutionHandle(worker, "compiler", record.incarnation),
           close(): Promise<void> {
-            return new Promise((resolve, reject) => {
+            if (closeControl) return closeControl;
+            stopRequested = true;
+            closeControl = new Promise<void>((resolve, reject) => {
               const timer = setTimeout(() => {
                 failed = true;
                 reject(new Error("Compiler helper settlement unknown"));
               }, 10000);
-              worker.once("exit", () => {
+              void settled.then(() => {
                 clearTimeout(timer);
-                if (failed) reject(new Error("Compiler retirement uncertain"));
-                else resolve();
+                resolve();
+                return undefined;
               });
-              port1.postMessage({ type: "qualified.execution.stop" });
+              try {
+                port1.postMessage({ type: "qualified.execution.stop", challenge: stopNonce });
+              } catch (error) {
+                clearTimeout(timer);
+                markUnknown();
+                reject(error);
+              }
             });
+            return closeControl;
           },
         });
       } catch (error) {

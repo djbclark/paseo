@@ -45,6 +45,8 @@ export interface QualifiedOwnedChild {
 export interface QualifiedOwnedCompiler {
   readonly closure: Readonly<QualifiedClosure>;
   readonly worker: Worker;
+  /** Actual helper-close ACK plus verified Worker exit; control timeouts never settle it. */
+  readonly settled: Promise<void>;
   close(): Promise<void>;
   readonly incarnation: string;
   assertFresh(): void;

@@ -15,6 +15,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   const observations = new Set<Promise<void>>();
   const identities = new Map<ChildProcess, Awaited<ReturnType<typeof observeLinuxProcess>>>();
   let failed = false;
+  let stopping = false;
   function hold(): void {
     failed = true;
     unknown();
@@ -22,6 +23,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   function spawn(command: string, args: readonly string[], options?: SpawnOptions): ChildProcess {
     if (
       failed ||
+      stopping ||
       command !== executable ||
       !Array.isArray(args) ||
       args[0] !== `--service=${metadata.version}` ||
@@ -77,6 +79,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
       if (failed) return unsupported();
     },
     async stop(): Promise<void> {
+      stopping = true;
       const require = createRequire(path.join(root, "compiler-code.mjs"));
       const esbuild = require("esbuild") as { stop(): void };
       esbuild.stop();

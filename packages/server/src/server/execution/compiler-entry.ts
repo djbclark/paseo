@@ -17,13 +17,25 @@ const helperOwner = await installCompilerHelperOwner(root, () => {
 const incarnation = randomUUID();
 const queued: string[] = [];
 let initialized = false;
+let stopping = false;
 port.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object") return;
   if (Reflect.get(raw, "type") === "qualified.execution.stop") {
+    const challenge = Reflect.get(raw, "challenge");
+    if (stopping || typeof challenge !== "string" || challenge.length > 128) return;
+    stopping = true;
     void helperOwner
       .stop()
       .then(() => {
-        (port as MessagePort).postMessage({ type: "qualified.execution.stopped" });
+        (port as MessagePort).postMessage({
+          type: "qualified.execution.stopped",
+          challenge,
+          incarnation,
+          pid: process.pid,
+          threadId,
+          manifestSha256: initial.manifestSha256,
+          distributionBuildId: initial.manifest.distributionBuildId,
+        });
         return process.exit(0);
       })
       .catch(() => {

@@ -1,3 +1,7 @@
+import { constants as fsConstants } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import type { FileHandle } from "node:fs/promises";
 import { PluginRuntime } from "./runtime.js";
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
@@ -6,6 +10,9 @@ import { compileDirectoryPlugin } from "./compiler.js";
 import { randomUUID } from "node:crypto";
 import {
   cp,
+  open as openJournalTest,
+  symlink,
+  appendFile,
   rename,
   mkdir,
   mkdtemp,
@@ -2072,6 +2079,74 @@ describe("managed plugin promotion boundary", () => {
     }
   });
 
+  it.each(["fifo", "symlink", "growing"])(
+    "rejects %s journal without pinning later lifecycle turns",
+    async (kind) => {
+      const f = await fixture();
+      const directory = await createPlugin(
+        "managed",
+        "export default function contribute() { return () => {}; }",
+      );
+      await allow(f.policyFile, [await authorization(directory, 0)]);
+      const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0", {
+        activationPolicy: f.policy,
+      });
+      const service = createService(
+        f.home,
+        { managed: { source: "directory", path: directory } },
+        { activationPolicy: f.policy, runtime },
+      );
+      const journal = path.join(f.home, "promotions", "managed.json");
+      let restoreStat = () => {};
+      try {
+        await service.start();
+        const original = await readFile(journal);
+        if (kind === "fifo") {
+          await rm(journal);
+          await promisify(execFile)("mkfifo", [journal]);
+        } else if (kind === "symlink") {
+          const target = path.join(f.home, "journal-target.json");
+          await writeFile(target, original);
+          await rm(journal);
+          await symlink(target, journal);
+        } else {
+          const handle = await openJournalTest(journal, "r");
+          const prototype: FileHandle = Object.getPrototypeOf(handle);
+          const actualStat = prototype.stat;
+          await handle.close();
+          const spy = vi
+            .spyOn(prototype, "stat")
+            .mockImplementationOnce(async function (this: FileHandle, options) {
+              const initial = await actualStat.call(this, options);
+              await appendFile(journal, Buffer.alloc(65536));
+              return initial;
+            });
+          restoreStat = () => spy.mockRestore();
+        }
+        expect(await service.getManagedPluginStatus("managed")).toMatchObject({
+          consistency: "uncertain",
+          reason: "journal-unreadable",
+        });
+        restoreStat();
+        await rm(journal);
+        await writeFile(journal, original);
+        await service.disablePlugin("managed");
+        expect((await service.listPlugins())[0].enabled).toBe(false);
+        expect(runtime.getLoadedReceipt("managed")).toBeUndefined();
+      } finally {
+        restoreStat();
+        if (kind === "fifo" && (await stat(journal).catch(() => null))?.isFIFO()) {
+          // Unblock the old buggy reader if this regression is run against it, then dispose owned child.
+          const writer = await openJournalTest(
+            journal,
+            fsConstants.O_WRONLY | fsConstants.O_NONBLOCK,
+          ).catch(() => null);
+          await writer?.close();
+        }
+        await runtime.stopAll();
+      }
+    },
+  );
   it("returns journal uncertainty instead of an invented initial generation", async () => {
     const f = await fixture();
     const directory = await createPlugin(
@@ -2102,6 +2177,7 @@ describe("managed plugin promotion boundary", () => {
     const blocker = await createQueueBlocker(begun, release);
     await allow(f.policyFile, []);
     const service = createService(f.home, {}, { activationPolicy: f.policy });
+    await service.start();
     const operation = service.installSource({ source: blocker, id: "blocker" });
     try {
       await waitForQueueBlocker(operation, begun);

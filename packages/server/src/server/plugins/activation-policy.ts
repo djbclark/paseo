@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { PluginLoadedReceiptSchema, type PluginLoadedReceipt } from "@getpaseo/protocol/messages";
 import { PluginSourceSchema, type PluginSource } from "@getpaseo/protocol/plugin-config";
 import { createHash, randomUUID } from "node:crypto";
@@ -6,7 +7,6 @@ import {
   readdir,
   readFile,
   open,
-  stat as statPath,
   realpath,
   mkdir,
   writeFile,
@@ -113,14 +113,26 @@ export class ManagedPluginActivationPolicy {
   async observeStatus(
     id: string,
   ): Promise<{ state: ManagedPluginActivationState; identity: string }> {
-    const file = await open(this.stateFile(id), "r");
+    const nofollow = constants.O_NOFOLLOW;
+    const nonblock = constants.O_NONBLOCK;
+    if (typeof nofollow !== "number" || typeof nonblock !== "number")
+      throw new Error("Protected journal reads are unsupported");
+    const target = path.resolve(this.stateFile(id));
+    if (path.dirname(target) !== path.resolve(this.stateDirectory))
+      throw new Error("Invalid plugin journal path");
+    const file = await open(target, constants.O_RDONLY | nofollow | nonblock);
     try {
       const before = await file.stat();
       if (!before.isFile() || before.size > 65536)
         throw new Error("Invalid plugin journal size/type");
-      const bytes = await file.readFile("utf8");
+      // One bounded regular-file read also detects growth after the initial descriptor stat.
+      const buffer = Buffer.alloc(before.size + 1);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+      if (bytesRead !== before.size) throw new Error("Plugin journal changed during bounded read");
+      const bytes = buffer.subarray(0, bytesRead).toString("utf8");
       const after = await file.stat();
-      const named = await statPath(this.stateFile(id));
+      const named = await lstat(target);
+      if (!named.isFile()) throw new Error("Plugin journal is not a regular file");
       if (
         named.dev !== after.dev ||
         named.ino !== after.ino ||

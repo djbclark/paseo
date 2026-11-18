@@ -27,6 +27,16 @@ transactionId })` closes normal and lifecycle admission synchronously and return
 without executing-closure qualification. Startup under this unsupported hold
 leaves plugin code uninitialized.
 
+The producer imports `attachPluginWorkerChannel(channel, loadContribution)` only
+after its private execution validation. Contribution loading runs inside the
+already-created initialization activity owner. Its build defines
+`__PASEO_QUALIFIED_PLUGIN_ENTRY__` to suppress legacy direct-entry auto-wiring;
+this literal supplies no execution authority. The internal SDK's one-shot
+`installQualifiedHelperAdmission` hook runs before async activity lookup, so a
+sealed zero-helper profile rejects module-level helper launches too. Candidate
+imports must not expose that internal namespace. These entry points alone supply
+no qualified binding or permission.
+
 Child accounting follows actual handler settlement and SDK helper `close`,
 independently of RPC replies, caller abort, timeout, or subscription acknowledgement.
 Helpers inherit the admitted root and keep it alive after its handler returns.
@@ -144,7 +154,11 @@ unconfigured policy, absent registration/runtime, or identity change returns
 `consistency: "uncertain"` with a reason and no invented initial generation.
 Timeout never cancels or releases admitted work. Journal descriptor identity,
 configuration object identity and runtime mutation epoch detect replacement and
-child-close races across asynchronous reads. Status returns no owner token or
+child-close races across asynchronous reads. The journal leaf opens with
+no-follow/nonblocking flags, must be a regular descriptor, and reads at most a
+64 KiB payload plus one growth-detection byte. FIFO, symlink, special-file and
+growth substitutions return uncertainty without retaining the lifecycle turn.
+Status returns no owner token or
 permission to activate, recover, or release maintenance.
 
 ### Replace a managed directory

@@ -67,11 +67,13 @@ async function validateSourceDirectory(directory: string): Promise<string> {
   return canonical;
 }
 
-export function createPluginWorker(options: {
-  channel: PluginWorkerChannel;
-  contribute: PluginServerContribution;
-}): { shutdown(): Promise<void> } {
-  const { channel, contribute } = options;
+export function createPluginWorker(
+  options: { channel: PluginWorkerChannel } & (
+    | { contribute: PluginServerContribution }
+    | { loadContribution: (source: string) => PluginServerContribution }
+  ),
+): { shutdown(): Promise<void> } {
+  const { channel } = options;
   const activity = new PluginActivityOwner(() =>
     send({ type: "execution.unknown", instanceId: hostInstanceId }),
   );
@@ -423,6 +425,10 @@ export function createPluginWorker(options: {
         configurable: false,
         enumerable: true,
       });
+      // Load/evaluate top-level code only after owner, inherited hold and initialization scope exist.
+      const contribute = initializationActivity.run(() =>
+        "contribute" in options ? options.contribute : options.loadContribution(message.bundle),
+      );
       const contributedCleanup = initializationActivity.run(() => contribute(context));
       if (typeof contributedCleanup !== "function") {
         throw new Error("Plugin contribution must return a cleanup function");
@@ -695,35 +701,41 @@ export function createPluginWorker(options: {
   return { shutdown };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  let worker: ReturnType<typeof createPluginWorker> | null = null;
-  const handlers = new Set<(message: PluginProcessRequest) => void>();
+/** Producer entry supplies its fixed evaluator after private host validation and helper admission. */
+export function attachPluginWorkerChannel(
+  channel: PluginWorkerChannel,
+  loadContribution: (source: string) => PluginServerContribution,
+): ReturnType<typeof createPluginWorker> {
+  return createPluginWorker({
+    channel,
+    loadContribution: (source) => {
+      initializeEnvironmentProxy();
+      return loadContribution(source);
+    },
+  });
+}
+
+// Producer defines this only at build time so a sealed import cannot auto-wire before validation.
+declare const __PASEO_QUALIFIED_PLUGIN_ENTRY__: true | undefined;
+if (
+  typeof __PASEO_QUALIFIED_PLUGIN_ENTRY__ === "undefined" &&
+  process.argv[1] === fileURLToPath(import.meta.url)
+) {
   const channel: PluginWorkerChannel = {
     send(message, callback) {
       if (callback) process.send?.(message, () => callback());
       else process.send?.(message);
     },
     onMessage(handler) {
-      handlers.add(handler);
+      const receive = (message: unknown) => handler(message as PluginProcessRequest);
+      process.on("message", receive);
       return () => {
-        handlers.delete(handler);
+        process.off("message", receive);
       };
     },
     disconnect() {
       process.disconnect();
     },
   };
-  process.on("message", (raw) => {
-    const parsed = PluginProcessRequestSchema.safeParse(raw);
-    if (!worker && parsed.success && parsed.data.type === "initialize") {
-      try {
-        initializeEnvironmentProxy();
-        worker = createPluginWorker({ channel, contribute: evaluateBundle(parsed.data.bundle) });
-      } catch (error) {
-        channel.send({ type: "fatal", error: describeError(error) });
-        return;
-      }
-    }
-    if (worker) for (const handler of handlers) handler(raw as PluginProcessRequest);
-  });
+  attachPluginWorkerChannel(channel, evaluateBundle);
 }

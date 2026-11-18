@@ -501,8 +501,8 @@ export class PluginRuntime {
       pluginId: input.id,
       pluginDirectory: directory,
       requirements: manifest.requirements,
-      child: new InternalPluginChild(evaluateBundle(bundles.serverBundle)),
-      bundle: "",
+      child: new InternalPluginChild(evaluateBundle),
+      bundle: bundles.serverBundle,
       clientBundle: bundles.clientBundle ?? "",
     });
     this.observationEpoch++;

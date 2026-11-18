@@ -535,6 +535,11 @@ test("routes plugin requests and releases its owned catalog subscription on clea
         message: "ready",
       },
     ],
+    getManagedPluginCohortStatus: vi.fn(async () => ({
+      version: 1 as const,
+      consistency: "uncertain" as const,
+      reason: "incomplete" as const,
+    })),
     getManagedPluginStatus: vi.fn(async () => ({
       version: 1 as const,
       pluginId: "example",
@@ -611,6 +616,11 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     pluginId: "example",
   });
   expect(pluginRuntime.getManagedPluginStatus).toHaveBeenCalledWith("example");
+  await session.handleMessage({
+    type: "plugins.managed.cohort.status.request",
+    requestId: "cohort-status",
+  });
+  expect(pluginRuntime.getManagedPluginCohortStatus).toHaveBeenCalledWith();
   for (const listener of listeners) listener("example");
 
   expect(messages.map((message) => message.type)).toEqual([
@@ -622,6 +632,7 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     "plugin.remove.response",
     "plugin.recovery.response",
     "plugins.managed.status.response",
+    "plugins.managed.cohort.status.response",
     "status",
   ]);
   expect(messages.at(-1)).toEqual({

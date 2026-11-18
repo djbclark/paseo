@@ -1676,6 +1676,11 @@ export const PluginDirectoryInstallRequestSchema = z.object({
   id: PluginIdSchema.optional(),
 });
 
+export const ManagedPluginCohortStatusRequestSchema = z.object({
+  type: z.literal("plugins.managed.cohort.status.request"),
+  requestId: z.string(),
+});
+
 export const ManagedPluginStatusRequestSchema = z.object({
   type: z.literal("plugins.managed.status.request"),
   requestId: z.string(),
@@ -3668,6 +3673,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PluginDirectoryInstallRequestSchema,
   PluginDirectoryReplaceRequestSchema,
   ManagedPluginStatusRequestSchema,
+  ManagedPluginCohortStatusRequestSchema,
   PluginRecoveryRequestSchema,
   PluginDirectoryInspectRequestSchema,
   PluginSourceInstallRequestSchema,
@@ -4087,6 +4093,7 @@ export const ServerInfoStatusPayloadSchema = z
         pluginSourceInstallation: z.boolean().optional(),
         managedPluginPromotions: z.boolean().optional(),
         managedPluginStatus: z.boolean().optional(),
+        managedPluginCohortStatus: z.boolean().optional(),
         // COMPAT(pluginSourceUpdates): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports reviewed updates.
         pluginSourceUpdates: z.boolean().optional(),
         // COMPAT(pluginThemes): added in v0.5.0, remove gate after 2027-08-20.
@@ -7344,6 +7351,66 @@ export const ManagedPluginStatusSchema = z.discriminatedUnion("consistency", [
 ]);
 export type ManagedPluginStatus = z.infer<typeof ManagedPluginStatusSchema>;
 
+export const QualifiedPluginClosureSchema = z
+  .object({
+    runtimeClosureSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    helperClosureSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    qualificationSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export const ManagedPluginCohortExecutionSchema = z
+  .object({
+    contract: z.literal("native-passive-contract-1"),
+    incarnation: z.string().min(1),
+    distributionBuildId: z.string().min(1),
+    closure: QualifiedPluginClosureSchema,
+  })
+  .strict();
+export const ManagedPluginCohortStatusSchema = z.discriminatedUnion("consistency", [
+  z
+    .object({
+      version: z.literal(1),
+      consistency: z.literal("coherent"),
+      observationEpoch: z.number().int().nonnegative(),
+      enclosing: z
+        .object({
+          serverId: z.string().min(1),
+          incarnation: z.string().min(1),
+          distributionBuildId: z.string().min(1),
+          closure: QualifiedPluginClosureSchema,
+        })
+        .strict(),
+      entries: z.array(
+        z
+          .object({
+            pluginId: PluginIdSchema,
+            registration: PluginSourceSchema.nullable(),
+            enabled: z.boolean().nullable(),
+            journal: ManagedPluginJournalSchema.nullable(),
+            loaded: PluginLoadedReceiptSchema.nullable(),
+            execution: ManagedPluginCohortExecutionSchema.nullable(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      consistency: z.literal("uncertain"),
+      reason: z.enum([
+        "busy",
+        "changed",
+        "authority-unavailable",
+        "unqualified-host",
+        "incomplete",
+      ]),
+    })
+    .strict(),
+]);
+export type ManagedPluginCohortStatus = z.infer<typeof ManagedPluginCohortStatusSchema>;
+export type ManagedPluginCohortExecution = z.infer<typeof ManagedPluginCohortExecutionSchema>;
+
 export const PluginListItemSchema = z.object({
   loaded: PluginLoadedReceiptSchema.optional(),
   promotionState: z
@@ -7414,6 +7481,11 @@ export const PluginLogsGetResponseSchema = z.object({
 export const PluginDirectoryInstallResponseSchema = z.object({
   type: z.literal("plugin.directory.install.response"),
   payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
+});
+
+export const ManagedPluginCohortStatusResponseSchema = z.object({
+  type: z.literal("plugins.managed.cohort.status.response"),
+  payload: z.object({ requestId: z.string(), status: ManagedPluginCohortStatusSchema }).strict(),
 });
 
 export const ManagedPluginStatusResponseSchema = z.object({
@@ -7605,6 +7677,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PluginDirectoryInstallResponseSchema,
   PluginDirectoryReplaceResponseSchema,
   ManagedPluginStatusResponseSchema,
+  ManagedPluginCohortStatusResponseSchema,
   PluginRecoveryResponseSchema,
   PluginDirectoryInspectResponseSchema,
   PluginSourceInstallResponseSchema,

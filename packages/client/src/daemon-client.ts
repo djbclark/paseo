@@ -140,6 +140,7 @@ import type {
   WorkspaceRecoveryState,
   PluginListItem,
   ManagedPluginStatus,
+  ManagedPluginCohortStatus,
   PluginLogEntry,
   PluginSourceStatusItem,
   PluginSourceUpdateItem,
@@ -6584,6 +6585,16 @@ export class DaemonClient {
       },
       responseType: "agent.skills.import_legacy_selection.response",
     });
+  }
+
+  async getManagedPluginCohortStatus(): Promise<ManagedPluginCohortStatus> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "plugins.managed.cohort.status.request", requestId },
+      responseType: "plugins.managed.cohort.status.response",
+    });
+    return payload.status;
   }
 
   async getManagedPluginStatus(pluginId: string): Promise<ManagedPluginStatus> {

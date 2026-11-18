@@ -1,3 +1,12 @@
+import {
+  isQualifiedDaemonOwner,
+  getQualifiedDaemonObservation,
+} from "../execution/qualified-host.js";
+import type { QualifiedDaemonOwner } from "../execution/daemon-types.js";
+import {
+  getQualifiedCompilerObservations,
+  getQualifiedCompilerObservationEpoch,
+} from "./compiler.js";
 import { boundedStatusRead, observeManagedStatus } from "./managed-status.js";
 import {
   samePluginMaintenanceIdentity,
@@ -20,6 +29,7 @@ import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import {
   PluginIdSchema,
   type ManagedPluginStatus,
+  type ManagedPluginCohortStatus,
   type PluginLogEntry,
   type PluginListItem,
   type PluginSource,
@@ -96,6 +106,7 @@ const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_ID
 
 interface PluginRuntimePort {
   getObservationEpoch?: PluginRuntime["getObservationEpoch"];
+  observeQualifiedExecutions?: PluginRuntime["observeQualifiedExecutions"];
   readonly maintenance?: PluginMaintenancePort;
   subscribeSessionOpenChanges?: PluginRuntime["subscribeSessionOpenChanges"];
   isToolPluginAvailable?: PluginRuntime["isToolPluginAvailable"];
@@ -134,6 +145,8 @@ interface PluginRuntimePort {
 }
 
 interface PluginServiceDependencies {
+  qualifiedDaemonOwner?: QualifiedDaemonOwner;
+  serverId?: string;
   nativeMaintenance?: NativePluginAdmission;
   activationPolicy?: ManagedPluginActivationPolicy;
   usageAgents?: AgentUsageLookup;
@@ -218,6 +231,7 @@ export class PluginService {
         settingsDirectory: dependencies.settingsDirectory,
         activationPolicy: dependencies.activationPolicy,
         nativeMaintenance: dependencies.nativeMaintenance,
+        qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
         onSettingsChanged: (pluginId, settingsId) => {
           for (const listener of this.settingsListeners) listener(pluginId, settingsId);
         },
@@ -225,6 +239,11 @@ export class PluginService {
     this.managedSources = dependencies.managedSources ?? null;
     this.builtinPlugins = dependencies.builtinPlugins ?? new BuiltinPluginLoader(undefined, []);
     this.builtinPluginIds = this.builtinPlugins.ids;
+    if (
+      dependencies.qualifiedDaemonOwner &&
+      isQualifiedDaemonOwner(dependencies.qualifiedDaemonOwner)
+    )
+      qualifiedServices.set(dependencies.qualifiedDaemonOwner, this);
     this.runtime.subscribe((pluginId, error) => {
       this.removeProviderRegistrations(pluginId);
       this.removeUsageSources(pluginId);
@@ -348,6 +367,115 @@ export class PluginService {
       });
     } finally {
       this.starting = false;
+    }
+  }
+
+  private qualifiedEpoch = 0;
+  private qualifiedConfigIdentity: object | undefined;
+  private qualifiedMutations = 0;
+  getQualifiedObservationEpoch(owner: QualifiedDaemonOwner): number | null {
+    if (owner !== this.dependencies.qualifiedDaemonOwner || !isQualifiedDaemonOwner(owner))
+      return null;
+    const config = this.configStore.get();
+    if (this.qualifiedConfigIdentity !== config) {
+      this.qualifiedConfigIdentity = config;
+      this.qualifiedEpoch++;
+    }
+    const runtime = this.runtime.getObservationEpoch?.();
+    const compiler = getQualifiedCompilerObservationEpoch(owner);
+    if (runtime === undefined || compiler === null) return null;
+    return this.qualifiedEpoch + runtime + compiler;
+  }
+
+  getManagedPluginCohortStatus(): Promise<ManagedPluginCohortStatus> {
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const uncertain = (reason: "busy" | "incomplete"): ManagedPluginCohortStatus => ({
+      version: 1,
+      consistency: "uncertain",
+      reason,
+    });
+    const turn = this.lifecycle
+      .then(() => (expired ? uncertain("busy") : this.captureQualifiedCohort()))
+      .catch(() => uncertain("incomplete"));
+    this.lifecycle = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    const deadline = new Promise<ManagedPluginCohortStatus>((resolve) => {
+      timer = setTimeout(() => {
+        expired = true;
+        resolve(uncertain("busy"));
+      }, 1000);
+    });
+    return Promise.race([turn, deadline]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  private async captureQualifiedCohort(): Promise<ManagedPluginCohortStatus> {
+    const uncertain = (
+      reason: Extract<ManagedPluginCohortStatus, { consistency: "uncertain" }>["reason"],
+    ): ManagedPluginCohortStatus => ({ version: 1, consistency: "uncertain", reason });
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const serverId = this.dependencies.serverId;
+    const policy = this.dependencies.activationPolicy;
+    if (!owner || !isQualifiedDaemonOwner(owner) || !serverId || !policy?.configured)
+      return uncertain("authority-unavailable");
+    if (this.starting || this.qualifiedMutations || this.pendingOperations.size)
+      return uncertain("busy");
+    if (!this.runtime.observeQualifiedExecutions) return uncertain("unqualified-host");
+    try {
+      await owner.refresh();
+      const beforeEpoch = this.getQualifiedObservationEpoch(owner);
+      if (beforeEpoch === null) return uncertain("incomplete");
+      const config = this.configStore.get();
+      const enrollment = await policy.observeEnrollment();
+      const ids = [
+        ...new Set([
+          ...Object.keys(config.plugins ?? {}),
+          ...this.builtinPluginIds,
+          ...this.runtime.catalog().map((item) => item.id),
+          ...enrollment.ids,
+        ]),
+      ].sort();
+      const executions = await this.runtime.observeQualifiedExecutions();
+      const { entries, journals } = await captureCohortEntries({
+        ids,
+        policy,
+        enrollmentIds: enrollment.ids,
+        config,
+        builtinIds: this.builtinPluginIds,
+        executions,
+        loaded: (id) => this.runtime.getLoadedReceipt?.(id) ?? null,
+      });
+      await recheckCohortJournals(policy, journals);
+      const afterEnrollment = await policy.observeEnrollment();
+      await owner.refresh();
+      const enclosing = getQualifiedDaemonObservation(owner);
+      if (
+        config !== this.configStore.get() ||
+        enrollment.identity !== afterEnrollment.identity ||
+        beforeEpoch !== this.getQualifiedObservationEpoch(owner) ||
+        this.starting ||
+        this.qualifiedMutations ||
+        this.pendingOperations.size
+      )
+        return uncertain("changed");
+      return structuredClone({
+        version: 1,
+        consistency: "coherent",
+        observationEpoch: beforeEpoch,
+        enclosing: {
+          serverId,
+          incarnation: enclosing.incarnation,
+          distributionBuildId: enclosing.distributionBuildId,
+          closure: { ...enclosing.closure },
+        },
+        entries,
+      });
+    } catch {
+      return uncertain("incomplete");
     }
   }
 
@@ -1088,7 +1216,17 @@ export class PluginService {
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     this.requireLifecycleAdmission();
     const release = this.dependencies.nativeMaintenance?.enterWork();
-    const result = this.lifecycle.then(operation, operation).finally(() => release?.());
+    const admitted = async () => {
+      this.qualifiedEpoch++;
+      this.qualifiedMutations++;
+      try {
+        return await operation();
+      } finally {
+        this.qualifiedMutations--;
+        this.qualifiedEpoch++;
+      }
+    };
+    const result = this.lifecycle.then(admitted, admitted).finally(() => release?.());
     this.lifecycle = result.then(
       () => undefined,
       () => undefined,
@@ -1264,4 +1402,122 @@ function resolveLocalPluginPath(directory: string, pluginPath: string | undefine
     relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
   if (escapesSource) throw new Error("Plugin path must stay inside the source directory");
   return pluginDirectory;
+}
+
+const qualifiedServices = new WeakMap<QualifiedDaemonOwner, PluginService>();
+export function getQualifiedRuntimeMeasurementEpoch(owner: QualifiedDaemonOwner): number | null {
+  if (!isQualifiedDaemonOwner(owner)) return null;
+  try {
+    owner.assertFresh();
+    return qualifiedServices.get(owner)?.getQualifiedObservationEpoch(owner) ?? null;
+  } catch {
+    return null;
+  }
+}
+export async function getQualifiedRuntimeMeasurement(owner: QualifiedDaemonOwner) {
+  try {
+    return await captureQualifiedRuntimeMeasurement(owner);
+  } catch {
+    return null;
+  }
+}
+async function captureQualifiedRuntimeMeasurement(owner: QualifiedDaemonOwner) {
+  if (!isQualifiedDaemonOwner(owner)) return null;
+  const service = qualifiedServices.get(owner);
+  if (!service) return null;
+  const epoch = getQualifiedRuntimeMeasurementEpoch(owner);
+  if (epoch === null) return null;
+  const plugins = await service.getManagedPluginCohortStatus();
+  const runs = getQualifiedCompilerObservations(owner);
+  let coldPair: [number, number] | null = null;
+  if (runs)
+    for (let i = 0; i < runs.length; i++)
+      for (let j = i + 1; j < runs.length; j++) {
+        const a = runs[i]!;
+        const b = runs[j]!;
+        if (
+          a.threadId !== b.threadId &&
+          a.incarnation !== b.incarnation &&
+          a.sourceDirectory === b.sourceDirectory &&
+          a.snapshotRoot === b.snapshotRoot &&
+          a.snapshotSha256 === b.snapshotSha256 &&
+          a.serverBundleSha256 === b.serverBundleSha256 &&
+          a.clientBundleSha256 === b.clientBundleSha256 &&
+          isDeepStrictEqual(a.closure, b.closure)
+        )
+          coldPair = [i, j];
+      }
+  if (epoch !== getQualifiedRuntimeMeasurementEpoch(owner)) return null;
+  return {
+    version: 1 as const,
+    observationEpoch: epoch,
+    compiler: runs ? { runs, coldPair } : null,
+    plugins,
+  };
+}
+
+type CohortEntry = Extract<
+  ManagedPluginCohortStatus,
+  { consistency: "coherent" }
+>["entries"][number];
+type JournalObservation = Awaited<ReturnType<ManagedPluginActivationPolicy["observeStatus"]>>;
+async function readCohortJournal(
+  policy: ManagedPluginActivationPolicy,
+  id: string,
+  required: boolean,
+): Promise<JournalObservation | null> {
+  try {
+    return await policy.observeStatus(id);
+  } catch (error) {
+    if (required || !(error instanceof Error && "code" in error && error.code === "ENOENT"))
+      throw error;
+    return null;
+  }
+}
+async function captureCohortEntries(input: {
+  ids: string[];
+  policy: ManagedPluginActivationPolicy;
+  enrollmentIds: string[];
+  config: ReturnType<DaemonConfigStore["get"]>;
+  builtinIds: ReadonlySet<string>;
+  executions: Map<string, NonNullable<CohortEntry["execution"]>>;
+  loaded: (id: string) => CohortEntry["loaded"];
+}) {
+  const entries: CohortEntry[] = [];
+  const journals = new Map<string, JournalObservation | null>();
+  for (const pluginId of input.ids) {
+    const journal = await readCohortJournal(
+      input.policy,
+      pluginId,
+      input.enrollmentIds.includes(pluginId),
+    );
+    journals.set(pluginId, journal);
+    const loaded = input.loaded(pluginId);
+    const execution = input.executions.get(pluginId) ?? null;
+    if (Boolean(loaded) !== Boolean(execution)) throw new Error("Incomplete executing cohort");
+    const registration = input.config.plugins?.[pluginId] ?? null;
+    let enabled: boolean | null = null;
+    if (registration)
+      enabled = input.config.pluginsEnabled === true && registration.enabled !== false;
+    else if (input.builtinIds.has(pluginId)) enabled = true;
+    entries.push({
+      pluginId,
+      registration,
+      enabled,
+      journal: journal?.state ?? null,
+      loaded,
+      execution,
+    });
+  }
+  return { entries, journals };
+}
+async function recheckCohortJournals(
+  policy: ManagedPluginActivationPolicy,
+  journals: Map<string, JournalObservation | null>,
+) {
+  for (const [id, journal] of journals) {
+    const latest = await readCohortJournal(policy, id, journal !== null);
+    if ((journal?.identity ?? null) !== (latest?.identity ?? null))
+      throw new Error("Cohort journal changed");
+  }
 }

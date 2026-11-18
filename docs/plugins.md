@@ -24,6 +24,25 @@ source as ordinary, and retained history holds restart if its policy disappears.
 Always bind resources to `sourceDirectory`; use `managedSource === true` only to
 select managed snapshot validation rules. It cannot bypass native policy gates.
 
+## Complete cohort observation (fork)
+
+`plugin cohort-status --json` uses `plugins.managed.cohort.status.request` and the
+optional `managedPluginCohortStatus` feature. Its strict version 1 response is a
+bounded, serialized observation. `coherent` includes the enclosing daemon identity,
+complete configured/builtin/loaded/enrolled plugin union, current registrations,
+journals, actual loaded receipts, and privately bound passive execution closure
+triples. Journal generation is the mutation CAS; loaded generation identifies the
+launch. A coherent observation grants no future operation permission.
+
+Missing executing authority, incomplete or unqualified hosts, changed identities,
+and a busy read return explicit `uncertain`. Normal read authorization applies
+while maintenance is held. The protected producer's fixed measurement getter also
+checks the synchronous runtime/compiler epoch after its final awaited refresh.
+It cannot trigger compilation or select a candidate. Compiler observations exist
+only after native held-scope work and actual owned helper/Worker settlement; two
+cold runs require distinct actual Worker identities and matching bytes/snapshots.
+These observations do not enable maintenance support by themselves.
+
 ## Passive maintenance prototype (fork)
 
 `PluginService.maintenance` exposes the native V1 port. This source slice always

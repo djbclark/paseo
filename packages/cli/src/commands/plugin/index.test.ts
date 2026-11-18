@@ -64,8 +64,15 @@ const getManagedPluginStatus = vi.fn(async () => ({
   reason: "journal-missing" as const,
 }));
 
+const getManagedPluginCohortStatus = vi.fn(async () => ({
+  version: 1 as const,
+  consistency: "uncertain" as const,
+  reason: "incomplete" as const,
+}));
+
 const features: {
   managedPluginStatus?: boolean;
+  managedPluginCohortStatus?: boolean;
   managedPluginPromotions?: boolean;
   pluginManagement?: boolean;
   pluginLogs?: boolean;
@@ -80,6 +87,7 @@ vi.mock("../../utils/client.js", () => ({
     listPlugins,
     recoverPlugin,
     getManagedPluginStatus,
+    getManagedPluginCohortStatus,
     getPluginLogs,
     installDirectoryPlugin,
     installPluginSource,
@@ -97,6 +105,7 @@ import {
   runPluginLogsCommand,
   runPluginRecoverCommand,
   runManagedPluginStatusCommand,
+  runManagedPluginCohortStatusCommand,
 } from "./index.js";
 
 describe("plugin management commands", () => {
@@ -110,9 +119,19 @@ describe("plugin management commands", () => {
     expect(result.data).toMatchObject({ consistency: "uncertain", reason: "journal-missing" });
     expect(getManagedPluginStatus).toHaveBeenCalledWith("managed");
   });
+  it("gates complete cohort transport and preserves native uncertainty", async () => {
+    await expect(
+      runManagedPluginCohortStatusCommand({ daemonTarget }, {} as never),
+    ).rejects.toMatchObject({ code: "DAEMON_UPDATE_REQUIRED" });
+    expect(getManagedPluginCohortStatus).not.toHaveBeenCalled();
+    features.managedPluginCohortStatus = true;
+    const result = await runManagedPluginCohortStatusCommand({ daemonTarget }, {} as never);
+    expect(result.data).toEqual({ version: 1, consistency: "uncertain", reason: "incomplete" });
+  });
   beforeEach(() => {
     features.managedPluginPromotions = false;
     features.managedPluginStatus = false;
+    features.managedPluginCohortStatus = false;
     features.pluginManagement = false;
     features.pluginLogs = false;
     features.pluginGitManagement = false;

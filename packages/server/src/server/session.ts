@@ -524,6 +524,9 @@ export interface SessionOptions {
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
     listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
     getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
+    getManagedPluginCohortStatus?(): Promise<
+      import("@getpaseo/protocol/messages").ManagedPluginCohortStatus
+    >;
     getManagedPluginStatus?(
       pluginId: string,
     ): Promise<import("@getpaseo/protocol/messages").ManagedPluginStatus>;
@@ -2926,6 +2929,17 @@ export class Session {
   }
 
   private dispatchManagedPluginMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type === "plugins.managed.cohort.status.request") {
+      if (!this.pluginRuntime?.getManagedPluginCohortStatus)
+        throw new Error("Managed plugin cohort status unavailable");
+      return this.pluginRuntime.getManagedPluginCohortStatus().then((status) => {
+        this.emit({
+          type: "plugins.managed.cohort.status.response",
+          payload: { requestId: msg.requestId, status },
+        });
+        return undefined;
+      });
+    }
     if (msg.type === "plugins.managed.status.request") {
       if (!this.pluginRuntime?.getManagedPluginStatus)
         throw new Error("Managed plugin status unavailable");

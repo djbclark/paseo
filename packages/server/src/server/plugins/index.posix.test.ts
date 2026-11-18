@@ -29,7 +29,11 @@ import { pathToFileURL } from "node:url";
 import pino from "pino";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonConfigStore } from "../daemon-config-store.js";
-import { PluginService } from "./index.js";
+import {
+  PluginService,
+  getQualifiedRuntimeMeasurementEpoch,
+  getQualifiedRuntimeMeasurement,
+} from "./index.js";
 import { BuiltinPluginLoader } from "./builtin/index.js";
 import { ManagedPluginSources } from "./managed-source.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
@@ -2286,7 +2290,7 @@ describe("managed plugin promotion boundary", () => {
       `import { z } from 'zod'; import { writeFileSync } from 'node:fs';
       export default function contribute(context) {
         writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ managedSource: context.managedSource }));
-        context.handle({ name: 'managedIdentity', input: z.unknown(), output: z.boolean() }, () => context.managedSource);
+        context.handle({ name: 'managed.identity', input: z.unknown(), output: z.boolean() }, () => context.managedSource);
         return () => {};
       }`,
     );
@@ -2298,9 +2302,9 @@ describe("managed plugin promotion boundary", () => {
     );
     try {
       await service.start();
-      expect(await service.invokePluginRpc("managed", "managedIdentity", null)).toBe(true);
+      expect(await service.invokePluginRpc("managed", "managed.identity", null)).toBe(true);
       await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
-      expect(await service.invokePluginRpc("managed", "managedIdentity", null)).toBe(true);
+      expect(await service.invokePluginRpc("managed", "managed.identity", null)).toBe(true);
       await expect(service.reloadPlugin("managed")).rejects.toThrow();
     } finally {
       await service.stopAllPlugins();
@@ -3050,4 +3054,18 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   });
+});
+
+it("holds complete cohort observation and measurement without genuine executing daemon authority", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-cohort-unqualified-"));
+  roots.push(home);
+  const service = createService(home, {});
+  expect(await service.getManagedPluginCohortStatus()).toEqual({
+    version: 1,
+    consistency: "uncertain",
+    reason: "authority-unavailable",
+  });
+  const forged = {} as import("../execution/daemon-types.js").QualifiedDaemonOwner;
+  expect(getQualifiedRuntimeMeasurementEpoch(forged)).toBeNull();
+  expect(await getQualifiedRuntimeMeasurement(forged)).toBeNull();
 });

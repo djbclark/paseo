@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
@@ -261,6 +262,9 @@ export async function compileQualifiedDirectoryPlugin(
   assertPluginHeldOperation(held, held.claim.pluginId, directory);
   if ((await realpath(directory)) !== directory || (await realpath(snapshotRoot)) !== snapshotRoot)
     throw new Error("Qualified compilation requires canonical immutable paths");
+  const relative = path.relative(snapshotRoot, directory);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    throw new Error("Compiler source is outside its qualified snapshot");
   return native.runHeldOperation(held.scope, held.claim, async () => {
     const snapshotSha256 = await hashPluginSnapshot(snapshotRoot);
     if (snapshotSha256 !== held.claim.snapshotSha256) throw new Error("Compiler snapshot mismatch");

@@ -262,7 +262,8 @@ it("uncertain cleanup never becomes a successful retirement", async () => {
 });
 
 it("preserves actual Git execFile stdin, NUL output and exit-1 errors through a once-only private launch", async () => {
-  const script = `
+  // Preserve JS escapes for the child parser; argv itself must contain no NUL.
+  const script = String.raw`
     import assert from 'node:assert/strict';
     import {execFileSync,spawn} from 'node:child_process';
     import {mkdtemp,writeFile,rm} from 'node:fs/promises';

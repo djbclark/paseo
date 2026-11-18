@@ -17,3 +17,6 @@ export function assertPluginHeldOperation(
   if (held.claim.pluginId !== pluginId || held.claim.path !== sourcePath)
     throw new Error("Held plugin target mismatch");
 }
+
+// Fixed native read boundary; minting stays private inside the actual trusted driver.
+export { readKnownFailedHeld } from "./index.js";

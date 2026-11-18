@@ -34,6 +34,7 @@ import {
   PluginService,
   getQualifiedRuntimeMeasurementEpoch,
   getQualifiedRuntimeMeasurement,
+  readKnownFailedHeld,
 } from "./index.js";
 import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./builtin/index.js";
 import { ManagedPluginSources } from "./managed-source.js";
@@ -3158,4 +3159,31 @@ it("rejects a source-provided owner for the fixed sealed builtin inventory", () 
   expect(() => createQualifiedBuiltinPluginLoader(forged)).toThrow(
     "Qualified builtin owner unavailable",
   );
+});
+
+it("rejects a JSON known-failed-held tag without actual private driver settlement provenance", () => {
+  const claim = {
+    generation: 1,
+    transactionId: "forged",
+    operation: "replace" as const,
+    pluginId: "probe",
+    path: "/new",
+    expectedPath: "/old",
+    expectedGeneration: 1,
+    snapshotSha256: "a".repeat(64),
+    serverBundleSha256: "b".repeat(64),
+  };
+  const scope = {} as import("../maintenance-operation.js").HeldPluginOperationScope;
+  const forged = {
+    outcome: "known_failed_held",
+    reason: "compiler_error",
+    pluginId: "probe",
+    nativeGeneration: 1,
+    current: { registration: { path: "/old", enabled: true }, loaded: null },
+    baseline: { path: "/old", snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) },
+  };
+  expect(() => readKnownFailedHeld(forged, scope, claim)).toThrow("Unbranded known held outcome");
+  expect(
+    readKnownFailedHeld({ plugin: { id: "probe" }, nativeGeneration: 1 }, scope, claim),
+  ).toBeUndefined();
 });

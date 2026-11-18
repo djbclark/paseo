@@ -8,9 +8,14 @@ import {
   type HeldPluginOperationClaim,
   type HeldPluginOperationScope,
   type HeldPluginOperationResult,
+  type KnownFailedHeldObservation,
 } from "../maintenance-operation.js";
 import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
-import { compileQualifiedDirectoryPlugin } from "./compiler.js";
+import {
+  compileQualifiedDirectoryPlugin,
+  readSettledQualifiedCompilerFailure,
+  type SettledQualifiedCompilerFailure,
+} from "./compiler.js";
 import {
   isQualifiedDaemonOwner,
   getQualifiedDaemonObservation,
@@ -73,6 +78,8 @@ import {
 } from "./usage-sources/index.js";
 import type { PluginUsageSourceMetadata } from "./plugin-process-protocol.js";
 
+type HeldPluginDriverResult = HeldPluginOperationResult | KnownFailedHeldObservation;
+
 interface DirectoryReplacementInput {
   pluginId: string;
   path: string;
@@ -120,6 +127,7 @@ const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_ID
 interface PluginRuntimePort {
   getObservationEpoch?: PluginRuntime["getObservationEpoch"];
   observeQualifiedExecutions?: PluginRuntime["observeQualifiedExecutions"];
+  tryValidateHeldActivation?: PluginRuntime["tryValidateHeldActivation"];
   readonly maintenance?: PluginMaintenancePort;
   subscribeSessionOpenChanges?: PluginRuntime["subscribeSessionOpenChanges"];
   isToolPluginAvailable?: PluginRuntime["isToolPluginAvailable"];
@@ -659,7 +667,7 @@ export class PluginService {
   heldPluginOperation(
     claim: HeldPluginOperationClaim,
     scope: HeldPluginOperationScope,
-  ): Promise<HeldPluginOperationResult> {
+  ): Promise<HeldPluginDriverResult> {
     assertHeldPluginOperation(scope, claim);
     const native = this.dependencies.nativeMaintenance;
     if (!native?.runHeldOperation)
@@ -675,12 +683,20 @@ export class PluginService {
           throw new Error("Held plugin reservation identity mismatch");
         this.qualifiedEpoch++;
         this.qualifiedMutations++;
+        let result: HeldPluginDriverResult;
         try {
-          return await this.performHeldPluginOperation(held);
+          result = await this.performHeldPluginOperation(held);
         } finally {
           this.qualifiedMutations--;
           this.qualifiedEpoch++;
         }
+        const record = knownFailedHeldResults.get(result);
+        if (record) {
+          assertHeldPluginOperation(scope, claim);
+          record.epoch = this.getQualifiedObservationEpoch(record.owner);
+          if (record.epoch === null) throw new Error("Known failure observation unavailable");
+        }
+        return result;
       });
     const turn = this.lifecycle.then(admitted, admitted);
     this.lifecycle = turn.then(
@@ -692,7 +708,7 @@ export class PluginService {
 
   private async performHeldPluginOperation(
     held: PluginHeldOperation,
-  ): Promise<HeldPluginOperationResult> {
+  ): Promise<HeldPluginDriverResult> {
     const { claim } = held;
     const policy = this.dependencies.activationPolicy;
     const owner = this.dependencies.qualifiedDaemonOwner;
@@ -723,7 +739,7 @@ export class PluginService {
     return this.recoverHeldPlugin(held, source, state);
   }
 
-  private async verifyHeldPlugin(held: PluginHeldOperation): Promise<HeldPluginOperationResult> {
+  private async verifyHeldPlugin(held: PluginHeldOperation): Promise<HeldPluginDriverResult> {
     const { claim } = held;
     const loaded = this.runtime.getLoadedReceipt?.(claim.pluginId);
     if (
@@ -749,16 +765,20 @@ export class PluginService {
   private async replaceHeldPlugin(
     held: PluginHeldOperation,
     source: PluginSource,
-  ): Promise<HeldPluginOperationResult> {
+  ): Promise<HeldPluginDriverResult> {
     const { claim } = held;
     const policy = this.dependencies.activationPolicy!;
     if (source.enabled === false || claim.path === source.path)
       throw new Error("Held replacement requires enabled distinct source");
     const baseline = await this.requireManagedBaseline(claim.pluginId, source, policy);
-    await this.validateHeldCandidate(held, "activate");
+    const validation = await this.validateHeldCandidate(held, "activate");
     await this.runtime.observeQualifiedExecutions!();
     await this.assertHeldCas(held, source.path);
     await policy.replacing(claim.pluginId, source.path, claim.path, { source, receipt: baseline });
+    if (validation.attempt.outcome === "compiler_error") {
+      await policy.hold(claim.pluginId);
+      return this.certifyKnownCompilerFailure(held, validation.ticket, validation.attempt);
+    }
     try {
       await this.stopHeldPlugin(held);
       await this.launchHeldPlugin(held, "activate");
@@ -778,7 +798,7 @@ export class PluginService {
     held: PluginHeldOperation,
     source: PluginSource,
     state: ManagedPluginActivationState,
-  ): Promise<HeldPluginOperationResult> {
+  ): Promise<HeldPluginDriverResult> {
     const { claim } = held;
     const policy = this.dependencies.activationPolicy!;
     const baseline = state.baseline;
@@ -800,8 +820,12 @@ export class PluginService {
       loaded,
       policy,
     });
-    await this.validateHeldCandidate(held, "recover");
+    const validation = await this.validateHeldCandidate(held, "recover");
     await this.assertHeldCas(held, source.path);
+    if (validation.attempt.outcome === "compiler_error") {
+      await policy.hold(claim.pluginId);
+      return this.certifyKnownCompilerFailure(held, validation.ticket, validation.attempt);
+    }
     await policy.recovering(claim.pluginId, claim.expectedGeneration);
     try {
       await this.stopHeldPlugin(held);
@@ -818,22 +842,90 @@ export class PluginService {
     }
   }
 
-  private async validateHeldCandidate(
-    held: PluginHeldOperation,
-    operation: ActivationOperation,
-  ): Promise<void> {
+  private async validateHeldCandidate(held: PluginHeldOperation, operation: ActivationOperation) {
     const { claim } = held;
-    const policy = this.dependencies.activationPolicy!;
-    const ticket = await policy.authorize(claim.pluginId, claim.path, operation);
-    if (
-      !ticket?.authorization.passiveProfile ||
-      ticket.authorization.snapshotSha256 !== claim.snapshotSha256 ||
-      ticket.authorization.serverBundleSha256 !== claim.serverBundleSha256
-    )
-      throw new Error("Held candidate lacks exact protected passive authorization");
+    if (!this.runtime.tryValidateHeldActivation)
+      throw new Error("Actual held compiler unavailable");
     await this.checkRequirements(claim.path);
-    await this.runtime.validateActivation!(claim.pluginId, claim.path, operation, held);
-    await policy.authorize(claim.pluginId, claim.path, operation, undefined, ticket);
+    const result = await this.runtime.tryValidateHeldActivation(
+      claim.pluginId,
+      claim.path,
+      operation,
+      held,
+    );
+    if (
+      result.ticket.authorization.snapshotSha256 !== claim.snapshotSha256 ||
+      result.ticket.authorization.serverBundleSha256 !== claim.serverBundleSha256
+    )
+      throw new Error("Held candidate differs from protected artifact");
+    return result;
+  }
+
+  private async certifyKnownCompilerFailure(
+    held: PluginHeldOperation,
+    ticket: import("./activation-policy.js").ActivationTicket,
+    failure: SettledQualifiedCompilerFailure,
+  ): Promise<KnownFailedHeldObservation> {
+    const owner = this.dependencies.qualifiedDaemonOwner!;
+    const policy = this.dependencies.activationPolicy!;
+    if (!readSettledQualifiedCompilerFailure(failure, owner, held))
+      throw new Error("Missing actual compiler settlement");
+    const config = this.configStore.get();
+    const first = await policy.observeStatus(held.claim.pluginId);
+    const baseline = first.state.baseline;
+    if (!baseline || !baseline.receipt.snapshotSha256 || first.state.phase !== "held")
+      throw new Error("Known failure retained baseline unavailable");
+    await owner.refresh();
+    await this.runtime.observeQualifiedExecutions!();
+    const current = this.runtime.getLoadedReceipt?.(held.claim.pluginId) ?? null;
+    if (current && !isDeepStrictEqual(current, first.state.currentReceipt))
+      throw new Error("Known failure loaded receipt ambiguous");
+    const latest = await policy.authorize(
+      held.claim.pluginId,
+      held.claim.path,
+      ticket.authorization.operation,
+      undefined,
+      ticket,
+    );
+    if (latest?.policyRevision !== ticket.policyRevision)
+      throw new Error("Known failure policy changed");
+    const last = await policy.observeStatus(held.claim.pluginId);
+    assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+    if (
+      first.identity !== last.identity ||
+      this.configStore.get() !== config ||
+      current !== (this.runtime.getLoadedReceipt?.(held.claim.pluginId) ?? null) ||
+      !readSettledQualifiedCompilerFailure(failure, owner, held)
+    )
+      throw new Error("Known failure changed during certification");
+    const incarnation = owner.binding.expectedIncarnation;
+    if (typeof incarnation !== "string" || !incarnation)
+      throw new Error("Known failure owner incarnation unavailable");
+    const observation = freezeKnownFailedHeld({
+      outcome: "known_failed_held",
+      reason: "compiler_error",
+      pluginId: held.claim.pluginId,
+      nativeGeneration: last.state.generation,
+      current: {
+        registration: observeKnownFailureRegistration(config, held.claim.pluginId),
+        loaded: current,
+      },
+      baseline: {
+        path: baseline.source.path,
+        snapshotSha256: baseline.receipt.snapshotSha256,
+        serverBundleSha256: baseline.receipt.serverBundleSha256,
+      },
+    });
+    knownFailedHeldResults.set(observation, {
+      owner,
+      incarnation,
+      service: this,
+      held,
+      observation,
+      compilerFailure: failure,
+      epoch: null,
+    });
+    return observation;
   }
 
   private async assertHeldSource(held: PluginHeldOperation, expectedPath: string): Promise<void> {
@@ -890,7 +982,7 @@ export class PluginService {
   }
   private async finishHeldPluginOperation(
     held: PluginHeldOperation,
-  ): Promise<HeldPluginOperationResult> {
+  ): Promise<HeldPluginDriverResult> {
     assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
     await this.runtime.observeQualifiedExecutions!();
     const plugin = await this.requireItem(held.claim.pluginId);
@@ -1886,4 +1978,63 @@ async function recheckCohortJournals(
     if ((journal?.identity ?? null) !== (latest?.identity ?? null))
       throw new Error("Cohort journal changed");
   }
+}
+
+interface KnownFailedHeldRecord {
+  owner: QualifiedDaemonOwner;
+  incarnation: string;
+  service: PluginService;
+  held: PluginHeldOperation;
+  observation: KnownFailedHeldObservation;
+  compilerFailure: SettledQualifiedCompilerFailure;
+  epoch: number | null;
+}
+const knownFailedHeldResults = new WeakMap<object, KnownFailedHeldRecord>();
+function freezeKnownFailedHeld(value: KnownFailedHeldObservation): KnownFailedHeldObservation {
+  return Object.freeze({
+    ...value,
+    current: Object.freeze({
+      registration: value.current.registration
+        ? Object.freeze({ ...value.current.registration })
+        : null,
+      loaded: value.current.loaded ? Object.freeze({ ...value.current.loaded }) : null,
+    }),
+    baseline: Object.freeze({ ...value.baseline }),
+  });
+}
+/** Read-only native consumption of a normal return from the actual settled driver. */
+export function readKnownFailedHeld(
+  result: unknown,
+  scope: HeldPluginOperationScope,
+  claim: HeldPluginOperationClaim,
+): KnownFailedHeldObservation | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const record = knownFailedHeldResults.get(result);
+  if (!record) {
+    if ("outcome" in result) throw new Error("Unbranded known held outcome");
+    return undefined;
+  }
+  assertHeldPluginOperation(scope, claim);
+  if (
+    record.held.scope !== scope ||
+    !isDeepStrictEqual(record.held.claim, claim) ||
+    claim.operation === "verify" ||
+    record.owner.binding.expectedIncarnation !== record.incarnation ||
+    qualifiedServices.get(record.owner) !== record.service ||
+    record.epoch === null ||
+    record.epoch !== record.service.getQualifiedObservationEpoch(record.owner) ||
+    !readSettledQualifiedCompilerFailure(record.compilerFailure, record.owner, record.held)
+  )
+    throw new Error("Stale known held outcome");
+  record.owner.assertFresh();
+  return freezeKnownFailedHeld(record.observation);
+}
+
+function observeKnownFailureRegistration(
+  config: ReturnType<DaemonConfigStore["get"]>,
+  pluginId: string,
+): KnownFailedHeldObservation["current"]["registration"] {
+  const source = config.plugins?.[pluginId];
+  if (!source) return null;
+  return { path: source.path, enabled: config.pluginsEnabled === true && source.enabled !== false };
 }

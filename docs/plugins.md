@@ -86,6 +86,16 @@ unit tests. The genuine producer and native bootstrap integration must verify
 actual executing bindings, immutable artifacts, incarnation, and fresh child ACK
 before enabling support or restricted initialization.
 
+A compiler rejection can become `known_failed_held` only as a normal return from
+the native driver after the actual owned Worker and every helper settle, while
+current authority, baseline, CAS, and the full held cohort remain valid. A private
+provenance table binds that result to its original live scope and incarnation;
+wire tags and exception properties cannot create it. The native owner retains the
+same reservation with a durable recovery-only restriction. Generic errors,
+unsettled work, and existing uncertainty remain UNKNOWN. Baseline recovery and a
+separate verification require current authority; neither END nor restart is
+implicit. See [native maintenance](development.md) for the gated CLI outcome.
+
 ## Managed activation policy (fork)
 
 Set `PASEO_MANAGED_PLUGIN_POLICY` in the daemon administrator's launch environment to an absolute

@@ -122,8 +122,11 @@ function operationOutput<T>(data: T): SingleResult<T> {
   return {
     type: "single",
     data,
-    schema: { idField: () => "maintenance-operation", columns: [],
-      renderHuman: () => "Maintenance operation completed" },
+    schema: {
+      idField: () => "maintenance-operation",
+      columns: [],
+      renderHuman: () => "Maintenance operation completed",
+    },
   };
 }
 
@@ -202,42 +205,44 @@ export function daemonMaintenanceCommand(): Command {
       .requiredOption("--server-bundle-sha256 <sha256>", "Exact target bundle digest")
       .requiredOption("--owner-token-fd <fd>", "Private input FD (0 for stdin)"),
   ).action(
-    withOutput<ReturnType<typeof maintenancePluginOutput>, []>(async (options: CommandOptions, _command: Command) => {
-      const ownerToken = readMaintenanceOwnerToken(Number(options.ownerTokenFd));
-      const operation = String(options.operation);
-      if (operation !== "replace" && operation !== "recover" && operation !== "verify")
-        throw new Error("Invalid maintenance operation");
-      const expectedGeneration = Number(options.expectedGeneration);
-      if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0)
-        throw new Error("Invalid native generation");
-      const client = await connectToDaemon({ target: options.daemonTarget });
-      try {
-        const payload = await client.maintenancePluginOperation({
-          generation: generation(String(options.generation)),
-          transactionId: String(options.transactionId),
-          ownerToken,
-          expectedServerId: String(options.expectedServerId),
-          expectedDaemonIncarnation: String(options.expectedDaemonIncarnation),
-          operation,
-          pluginId: String(options.pluginId),
-          path: String(options.path),
-          expectedPath: String(options.expectedPath),
-          expectedGeneration,
-          snapshotSha256: String(options.snapshotSha256),
-          serverBundleSha256: String(options.serverBundleSha256),
-        });
-        const result = maintenancePluginOutput(
-          payload,
-          options.json === true &&
-            client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true,
-        );
-        // AnyCommandResult distributes its union: retain each result's schema correlation.
-        if ("outcome" in result) return operationOutput(result);
-        return operationOutput(result);
-      } finally {
-        await client.close();
-      }
-    }),
+    withOutput<ReturnType<typeof maintenancePluginOutput>, []>(
+      async (options: CommandOptions, _command: Command) => {
+        const ownerToken = readMaintenanceOwnerToken(Number(options.ownerTokenFd));
+        const operation = String(options.operation);
+        if (operation !== "replace" && operation !== "recover" && operation !== "verify")
+          throw new Error("Invalid maintenance operation");
+        const expectedGeneration = Number(options.expectedGeneration);
+        if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0)
+          throw new Error("Invalid native generation");
+        const client = await connectToDaemon({ target: options.daemonTarget });
+        try {
+          const payload = await client.maintenancePluginOperation({
+            generation: generation(String(options.generation)),
+            transactionId: String(options.transactionId),
+            ownerToken,
+            expectedServerId: String(options.expectedServerId),
+            expectedDaemonIncarnation: String(options.expectedDaemonIncarnation),
+            operation,
+            pluginId: String(options.pluginId),
+            path: String(options.path),
+            expectedPath: String(options.expectedPath),
+            expectedGeneration,
+            snapshotSha256: String(options.snapshotSha256),
+            serverBundleSha256: String(options.serverBundleSha256),
+          });
+          const result = maintenancePluginOutput(
+            payload,
+            options.json === true &&
+              client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true,
+          );
+          // AnyCommandResult distributes its union: retain each result's schema correlation.
+          if ("outcome" in result) return operationOutput(result);
+          return operationOutput(result);
+        } finally {
+          await client.close();
+        }
+      },
+    ),
   );
   addJsonOption(
     command

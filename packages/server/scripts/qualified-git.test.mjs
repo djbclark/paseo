@@ -101,8 +101,8 @@ int main(void) {
         }
         const streamErrors = [];
         for (const channel of [0, 1, 2, 3, 4, 9])
-          child.stdio[channel].on("error", (error) => {
-            streamErrors.push({ channel, code: error.code });
+          child.stdio[channel].on("error", (streamError) => {
+            streamErrors.push({ channel, code: streamError.code });
           });
         let output = "",
           error = "",
@@ -161,8 +161,9 @@ int main(void) {
         if (behavior === "observer-loss") {
           assert.ok(
             streamErrors.every(
-              (error) =>
-                [3, 4].includes(error.channel) && ["ECONNRESET", "EPIPE"].includes(error.code),
+              (streamError) =>
+                [3, 4].includes(streamError.channel) &&
+                ["ECONNRESET", "EPIPE"].includes(streamError.code),
             ),
           );
         } else assert.deepEqual(streamErrors, []);

@@ -146,3 +146,18 @@ test("finite ELF/cache parser derives actual Linux runtime inputs and rejects ma
   assert.ok(entries.every((row) => row.path.startsWith("/")));
   assert.throws(() => describeLoaderCache(cache.subarray(0, 48), elf.machine));
 });
+
+test("retained system metadata refuses old missing-payload manifests and unknown loader fields", async () => {
+  const { SystemClosureSchema, assertSystemClosureMetadata } =
+    await import("../dist/server/server/execution/system-closure.js");
+  assert.equal(SystemClosureSchema.safeParse(undefined).success, false);
+  assert.throws(() => assertSystemClosureMetadata({ files: [], externalLibraries: [] }));
+  assert.equal(
+    SystemClosureSchema.safeParse({
+      schemaVersion: 1,
+      profile: "linux-retained-system-closure-v1",
+      mountCommand: "override",
+    }).success,
+    false,
+  );
+});

@@ -1,3 +1,4 @@
+import type { SystemClosure, RetainedExternal } from "./system-closure.js";
 import type { TerminalWorkerRecord } from "../../terminal/terminal-worker-record.js";
 import type { ChildProcess } from "node:child_process";
 import type { Worker } from "node:worker_threads";
@@ -17,13 +18,16 @@ export interface DaemonManifest {
     recipe: unknown;
     runtimeSha256: string;
     daemonSha256: string;
-    externalLibraries: FileIdentity[];
+    externalLibraries: RetainedExternal[];
+    systemClosureSha256: string;
   };
   moduleTableSha256: string;
   distributionBuildId: string;
   files: FileIdentity[];
   runtime: FileIdentity;
-  externalLibraries: FileIdentity[];
+  externalLibraries: RetainedExternal[];
+  systemClosure: SystemClosure;
+  systemClosureSha256: string;
   esbuild: FileIdentity;
   helperInventory: FileIdentity[];
   helperClosureSha256: string;
@@ -88,6 +92,8 @@ export interface QualifiedDaemonOwner {
 
 /** Serializable observations only; none of these fields is an admission capability. */
 export interface QualifiedDaemonObservation {
+  systemClosureSha256: string;
+  systemObservation: { namespaceIdentity: string; mountinfoSha256: string };
   schemaVersion: 1;
   role: "daemon";
   distributionBuildId: string;

@@ -91,6 +91,8 @@ async function main() {
     "build-qualified-daemon.mjs",
     "qualified-builtin-sources.mjs",
     "build-qualified-builtins.mjs",
+    "retain-system-closure.mjs",
+    "qualified-system-namespace.py",
     "finalize-qualified-daemon.mjs",
     "archive-qualified-daemon.mjs",
   ])

@@ -1,3 +1,4 @@
+import { verifySystemClosure, verifySystemMappings } from "./system-closure.js";
 import { readBuiltinProfiles } from "./builtin-profile.js";
 import { canonicalBuiltinJson } from "./builtin-format.js";
 import builtinBindingsRecipe from "./builtin-bindings-recipe.json" with { type: "json" };
@@ -183,6 +184,7 @@ function assertBuiltinModuleTable(manifest: DaemonManifest): void {
     runtimeSha256: manifest.runtime.sha256,
     daemonSha256: manifest.files.find((file) => file.path === "daemon.mjs")?.sha256,
     externalLibraries: manifest.externalLibraries,
+    systemClosureSha256: manifest.systemClosureSha256,
   };
   if (
     JSON.stringify(manifest.builtinModuleTable) !== JSON.stringify(expectedTable) ||
@@ -286,6 +288,7 @@ export async function verifyEnclosingDistribution(root: string) {
   const helperInventory = [
     ...manifest.files.filter(
       (file) =>
+        file.path.startsWith("system-closure/") ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||
@@ -305,6 +308,7 @@ export async function verifyEnclosingDistribution(root: string) {
     JSON.stringify(manifest.helperInventory) !== JSON.stringify(helperInventory)
   )
     return unsupported();
+  await verifySystemClosure(root, manifest);
   await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });
   return {
     root,
@@ -323,7 +327,7 @@ export async function verifyEnclosingProcess(root: string) {
   if (
     process.execArgv.length ||
     Object.keys(process.env).some((key) =>
-      /^(NODE_OPTIONS|NODE_PATH|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
+      /^(NODE_OPTIONS|NODE_PATH|GLIBC_TUNABLES|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
     )
   )
     return unsupported();
@@ -337,16 +341,7 @@ export async function verifyEnclosingProcess(root: string) {
   const distribution = await verifyEnclosingDistribution(root);
   const observed = await observeLinuxProcess(process.pid);
   if (observed.executable !== path.join(root, "runtime/node")) return unsupported();
-  const maps = (await readFile("/proc/self/maps", "utf8")).split("\n");
-  const permitted = new Set([
-    observed.executable,
-    ...distribution.manifest.externalLibraries.map((file) => file.path),
-    ...distribution.manifest.files.map((file) => path.join(root, file.path)),
-  ]);
-  for (const line of maps) {
-    const match = line.match(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +(\/.*)$/);
-    if (match && !permitted.has(await realpath(match[1]!))) return unsupported();
-  }
+  const systemObservation = await verifySystemMappings(root, distribution.manifest, process.pid);
   await assertEnclosingAuthorityUnchanged(distribution);
-  return { ...distribution, observed };
+  return { ...distribution, observed, systemObservation };
 }

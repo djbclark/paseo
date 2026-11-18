@@ -170,6 +170,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       try {
         const current = await verifyEnclosingProcess(root);
         if (
+          JSON.stringify(current.systemObservation) !== JSON.stringify(initial.systemObservation) ||
           current.manifestSha256 !== initial.manifestSha256 ||
           current.observed.birth !== initial.observed.birth ||
           current.observed.image !== initial.observed.image ||
@@ -619,6 +620,8 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       });
     return {
       schemaVersion: 1,
+      systemClosureSha256: initial.manifest.systemClosureSha256,
+      systemObservation: initial.systemObservation,
       role: "daemon",
       distributionBuildId: initial.manifest.distributionBuildId,
       manifestSha256: initial.manifestSha256,

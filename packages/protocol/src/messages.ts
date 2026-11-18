@@ -1701,6 +1701,11 @@ export const ManagedPluginCohortStatusRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const ManagedPluginCohortV2StatusRequestSchema = z.object({
+  type: z.literal("plugins.managed.cohort.v2.status.request"),
+  requestId: z.string(),
+});
+
 export const ManagedPluginStatusRequestSchema = z.object({
   type: z.literal("plugins.managed.status.request"),
   requestId: z.string(),
@@ -3694,6 +3699,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PluginDirectoryReplaceRequestSchema,
   ManagedPluginStatusRequestSchema,
   ManagedPluginCohortStatusRequestSchema,
+  ManagedPluginCohortV2StatusRequestSchema,
   PluginRecoveryRequestSchema,
   PluginDirectoryInspectRequestSchema,
   PluginSourceInstallRequestSchema,
@@ -4115,6 +4121,7 @@ export const ServerInfoStatusPayloadSchema = z
         managedPluginPromotions: z.boolean().optional(),
         managedPluginStatus: z.boolean().optional(),
         managedPluginCohortStatus: z.boolean().optional(),
+        managedPluginCohortV2: z.boolean().optional(),
         // COMPAT(pluginSourceUpdates): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports reviewed updates.
         pluginSourceUpdates: z.boolean().optional(),
         // COMPAT(pluginThemes): added in v0.5.0, remove gate after 2027-08-20.
@@ -7432,6 +7439,94 @@ export const ManagedPluginCohortStatusSchema = z.discriminatedUnion("consistency
 export type ManagedPluginCohortStatus = z.infer<typeof ManagedPluginCohortStatusSchema>;
 export type ManagedPluginCohortExecution = z.infer<typeof ManagedPluginCohortExecutionSchema>;
 
+// V2 represents actual in-process builtins without inventing child receipts or journals.
+// A nullable profile/execution is provenance only and cannot authorize maintenance.
+export const ManagedBuiltinLoadedSchema = z
+  .object({
+    kind: z.literal("builtin-in-process"),
+    pluginId: PluginIdSchema,
+    instanceId: z.string().min(1),
+    enclosingIncarnation: z.string().min(1),
+    sourcePath: z.string().min(1),
+    sourceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    serverBundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    moduleTableSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    profileSha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .nullable(),
+    closure: QualifiedPluginClosureSchema,
+  })
+  .strict();
+export const ManagedBuiltinExecutionSchema = ManagedBuiltinLoadedSchema.extend({
+  contract: z.literal("builtin-in-process-v1"),
+  distributionBuildId: z.string().min(1),
+  profileSha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export const ManagedPluginCohortV2EntrySchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("directory"),
+      pluginId: PluginIdSchema,
+      registration: PluginSourceSchema.nullable(),
+      enabled: z.boolean().nullable(),
+      journal: ManagedPluginJournalSchema.nullable(),
+      loaded: z
+        .object({ kind: z.literal("plugin-child"), receipt: PluginLoadedReceiptSchema })
+        .strict()
+        .nullable(),
+      execution: ManagedPluginCohortExecutionSchema.extend({
+        kind: z.literal("plugin-child"),
+      })
+        .strict()
+        .nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("builtin-in-process"),
+      pluginId: PluginIdSchema,
+      registration: z.object({ path: z.string().min(1) }).strict(),
+      enabled: z.boolean(),
+      loaded: ManagedBuiltinLoadedSchema.nullable(),
+      execution: ManagedBuiltinExecutionSchema.nullable(),
+    })
+    .strict(),
+]);
+export const ManagedPluginCohortV2StatusSchema = z.discriminatedUnion("consistency", [
+  z
+    .object({
+      version: z.literal(2),
+      consistency: z.literal("coherent"),
+      observationEpoch: z.number().int().nonnegative(),
+      enclosing: z
+        .object({
+          serverId: z.string().min(1),
+          incarnation: z.string().min(1),
+          distributionBuildId: z.string().min(1),
+          closure: QualifiedPluginClosureSchema,
+        })
+        .strict(),
+      entries: z.array(ManagedPluginCohortV2EntrySchema),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(2),
+      consistency: z.literal("uncertain"),
+      reason: z.enum([
+        "busy",
+        "changed",
+        "authority-unavailable",
+        "unqualified-host",
+        "incomplete",
+      ]),
+    })
+    .strict(),
+]);
+export type ManagedPluginCohortV2Status = z.infer<typeof ManagedPluginCohortV2StatusSchema>;
+export type ManagedPluginCohortV2Entry = z.infer<typeof ManagedPluginCohortV2EntrySchema>;
+
 export const PluginListItemSchema = z.object({
   loaded: PluginLoadedReceiptSchema.optional(),
   promotionState: z
@@ -7526,6 +7621,11 @@ export const PluginDirectoryInstallResponseSchema = z.object({
 export const ManagedPluginCohortStatusResponseSchema = z.object({
   type: z.literal("plugins.managed.cohort.status.response"),
   payload: z.object({ requestId: z.string(), status: ManagedPluginCohortStatusSchema }).strict(),
+});
+
+export const ManagedPluginCohortV2StatusResponseSchema = z.object({
+  type: z.literal("plugins.managed.cohort.v2.status.response"),
+  payload: z.object({ requestId: z.string(), status: ManagedPluginCohortV2StatusSchema }).strict(),
 });
 
 export const ManagedPluginStatusResponseSchema = z.object({
@@ -7718,6 +7818,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PluginDirectoryReplaceResponseSchema,
   ManagedPluginStatusResponseSchema,
   ManagedPluginCohortStatusResponseSchema,
+  ManagedPluginCohortV2StatusResponseSchema,
   PluginRecoveryResponseSchema,
   PluginDirectoryInspectResponseSchema,
   PluginSourceInstallResponseSchema,

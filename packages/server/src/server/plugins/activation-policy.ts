@@ -34,10 +34,13 @@ const State = z.object({
   baseline: z.object({ source: PluginSourceSchema, receipt: PluginLoadedReceiptSchema }).optional(),
   currentReceipt: PluginLoadedReceiptSchema.optional(),
 });
+export type ManagedPluginActivationState = z.infer<typeof State>;
+type ManagedAuthorization = z.infer<typeof Authorization>;
 export type ActivationOperation = "activate" | "recover";
 export interface ActivationTicket {
   generation: number;
   authorization: z.infer<typeof Authorization>;
+  policyRevision: string;
 }
 
 /** Hash the complete administrator snapshot, including helper dependencies. Symlinks are refused. */
@@ -98,9 +101,9 @@ export class ManagedPluginActivationPolicy {
   ): Promise<ActivationTicket | undefined> {
     if (this.policyFile === undefined) return undefined;
     // Configured-but-unreadable/malformed policy holds EVERY activation, including unknown IDs.
-    const policy = ManagedPluginPolicySchema.parse(
-      JSON.parse(await readFile(this.policyFile, "utf8")),
-    );
+    const rawPolicy = await readFile(this.policyFile, "utf8");
+    const policyRevision = createHash("sha256").update(rawPolicy).digest("hex");
+    const policy = ManagedPluginPolicySchema.parse(JSON.parse(rawPolicy));
     const state = await this.status(id);
     const entry = policy.plugins[id];
     if (!entry && !this.enrolled.has(id) && state.generation === 0 && !state.enrolled)
@@ -111,14 +114,7 @@ export class ManagedPluginActivationPolicy {
       await this.save(id, state);
     }
     if (!entry) throw new Error(`Managed plugin authorization removed: ${id}`);
-    if (!ticket && state.phase !== "ready" && !this.replacements.has(id) && operation !== "recover")
-      throw new Error(`Plugin recovery required: ${id}`);
-    if (
-      ticket &&
-      state.generation !== ticket.generation &&
-      state.generation !== ticket.generation - 1
-    )
-      throw new Error("Activation generation changed");
+    this.assertJournalActivation({ id, state, operation, ticket });
     const generation = ticket ? ticket.generation - 1 : state.generation;
     const canonical = await realpath(directory);
     const matches = entry.authorizations.filter(
@@ -130,34 +126,62 @@ export class ManagedPluginActivationPolicy {
     const authorization = matches.length === 1 ? matches[0] : undefined;
     if (!authorization || canonical !== path.resolve(directory))
       throw new Error(`No exact managed activation authorization: ${id}`);
-    if (operation === "recover") {
-      const baseline = state.baseline;
-      if (
-        !baseline ||
-        baseline.receipt.sourcePath !== canonical ||
-        baseline.receipt.serverBundleSha256 !== authorization.serverBundleSha256 ||
-        baseline.receipt.snapshotRoot !== authorization.snapshotRoot ||
-        baseline.receipt.snapshotSha256 !== authorization.snapshotSha256
-      )
-        throw new Error("Recovery authorization differs from recorded loaded baseline");
-    }
+    if (operation === "recover") assertRecoveryIdentity(state, canonical, authorization);
     if (ticket && JSON.stringify(ticket.authorization) !== JSON.stringify(authorization))
       throw new Error(`Managed authorization changed: ${id}`);
-    const relative = path.relative(authorization.snapshotRoot, canonical);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
-      throw new Error("Plugin outside authorized snapshot");
-    for (const key of authorization.forbiddenEnvironment)
-      if (process.env[key] !== undefined)
-        throw new Error(`Forbidden plugin environment override: ${key}`);
-    if ((await hashPluginSnapshot(authorization.snapshotRoot)) !== authorization.snapshotSha256)
-      throw new Error(`Managed snapshot digest mismatch: ${id}`);
-    if (
-      bundle !== undefined &&
-      createHash("sha256").update(bundle).digest("hex") !== authorization.serverBundleSha256
-    )
-      throw new Error(`Compiled server bundle digest mismatch: ${id}`);
-    return { generation: generation + 1, authorization };
+    await verifyAuthorizedArtifact({ id, canonical, authorization, bundle });
+    if ((await readFile(this.policyFile, "utf8")) !== rawPolicy)
+      throw new Error("Managed policy changed during verification");
+    return { generation: generation + 1, authorization, policyRevision };
   }
+  async assertNativeAcquisitionAllowed(id?: string): Promise<void> {
+    if (this.policyFile === undefined) return;
+    const policy = ManagedPluginPolicySchema.parse(
+      JSON.parse(await readFile(this.policyFile, "utf8")),
+    );
+    if (id === undefined) {
+      if (Object.keys(policy.plugins).length)
+        throw new Error("Managed policy requires externally qualified directory installation");
+      return;
+    }
+    const state = await this.status(id);
+    if (policy.plugins[id]) {
+      this.enrolled.add(id);
+      if (!state.enrolled) await this.save(id, { ...state, enrolled: true });
+    }
+    if (policy.plugins[id] || this.enrolled.has(id) || state.enrolled || state.generation > 0)
+      throw new Error(
+        "Managed native acquisition is unsupported; use qualified directory replacement",
+      );
+  }
+
+  async dispatchAuthorized(input: PluginDispatch): Promise<void> {
+    const { id, ticket, canPublish, dispatch } = input;
+    if (this.policyFile !== undefined) {
+      const rawPolicy = await readFile(this.policyFile, "utf8");
+      const policy = ManagedPluginPolicySchema.parse(JSON.parse(rawPolicy));
+      if (!ticket && (policy.plugins[id] || this.enrolled.has(id)))
+        throw new Error("Managed enrollment changed before initialize");
+      if (ticket && createHash("sha256").update(rawPolicy).digest("hex") !== ticket.policyRevision)
+        throw new Error("Managed policy changed before initialize");
+    }
+    // Dispatch is synchronous after the final policy read and cancellation check; no intervening await.
+    if (!canPublish()) throw new Error(`Plugin start cancelled: ${id}`);
+    dispatch();
+  }
+
+  private assertJournalActivation(input: JournalActivationCheck): void {
+    const { id, state, operation, ticket } = input;
+    if (!ticket && state.phase !== "ready" && !this.replacements.has(id) && operation !== "recover")
+      throw new Error(`Plugin recovery required: ${id}`);
+    if (
+      ticket &&
+      state.generation !== ticket.generation &&
+      state.generation !== ticket.generation - 1
+    )
+      throw new Error("Activation generation changed");
+  }
+
   async arm(id: string, ticket: ActivationTicket | undefined): Promise<void> {
     if (ticket) {
       const state = await this.status(id);
@@ -210,11 +234,9 @@ export class ManagedPluginActivationPolicy {
     await this.save(id, { ...(await this.status(id)), phase: "ready" });
   }
   async finish(id: string, ticket: ActivationTicket | undefined, success: boolean): Promise<void> {
-    if (ticket)
-      await this.save(id, {
-        ...(await this.status(id)),
-        phase: success ? (this.replacements.has(id) ? "replacing" : "ready") : "held",
-      });
+    let phase: ManagedPluginActivationState["phase"] = "held";
+    if (success) phase = this.replacements.has(id) ? "replacing" : "ready";
+    if (ticket) await this.save(id, { ...(await this.status(id)), phase });
     if (!success) this.replacements.delete(id);
   }
   async replacing(
@@ -228,4 +250,55 @@ export class ManagedPluginActivationPolicy {
     await this.save(id, { ...state, phase: "replacing", oldPath, candidatePath, baseline });
     this.replacements.add(id);
   }
+}
+
+interface JournalActivationCheck {
+  id: string;
+  state: ManagedPluginActivationState;
+  operation: ActivationOperation;
+  ticket: ActivationTicket | undefined;
+}
+interface AuthorizedArtifactCheck {
+  id: string;
+  canonical: string;
+  authorization: ManagedAuthorization;
+  bundle: string | undefined;
+}
+function assertRecoveryIdentity(
+  state: ManagedPluginActivationState,
+  canonical: string,
+  authorization: ManagedAuthorization,
+): void {
+  const baseline = state.baseline;
+  if (
+    !baseline ||
+    baseline.receipt.sourcePath !== canonical ||
+    baseline.receipt.serverBundleSha256 !== authorization.serverBundleSha256 ||
+    baseline.receipt.snapshotRoot !== authorization.snapshotRoot ||
+    baseline.receipt.snapshotSha256 !== authorization.snapshotSha256
+  )
+    throw new Error("Recovery authorization differs from recorded loaded baseline");
+}
+async function verifyAuthorizedArtifact(input: AuthorizedArtifactCheck): Promise<void> {
+  const { id, canonical, authorization, bundle } = input;
+  const relative = path.relative(authorization.snapshotRoot, canonical);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+    throw new Error("Plugin outside authorized snapshot");
+  for (const key of authorization.forbiddenEnvironment)
+    if (process.env[key] !== undefined)
+      throw new Error(`Forbidden plugin environment override: ${key}`);
+  if ((await hashPluginSnapshot(authorization.snapshotRoot)) !== authorization.snapshotSha256)
+    throw new Error(`Managed snapshot digest mismatch: ${id}`);
+  if (
+    bundle !== undefined &&
+    createHash("sha256").update(bundle).digest("hex") !== authorization.serverBundleSha256
+  )
+    throw new Error(`Compiled server bundle digest mismatch: ${id}`);
+}
+
+interface PluginDispatch {
+  id: string;
+  ticket: ActivationTicket | undefined;
+  canPublish: () => boolean;
+  dispatch: () => void;
 }

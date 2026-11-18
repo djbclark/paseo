@@ -67,6 +67,23 @@ receipt remains unchanged when disk changes and disappears on stop/failure. Veri
 independently compiled qualified bytes, snapshot digest and child identity. Unmanaged generations
 are daemon-local; managed generations persist across restarts.
 
+Managed native Git/npm install/update is explicitly unsupported for enrolled IDs. The manager checks
+before acquisition and again before/after preparation for an enrollment change. With configured policy,
+an unspecified install ID is refused if managed entries exist because its identity is not yet known.
+Use an externally prepared, immutable, qualified directory. A running unmanaged plugin cannot be
+silently adopted: replacement/reload holds before stopping it unless its loaded receipt already binds
+a complete managed snapshot. Initial qualification/adoption needs explicitly approved maintenance;
+there is no implied rollback to unqualified bytes.
+
+At initialization dispatch, after socket attachment, the daemon reads the policy again, compares its
+whole-file SHA256 to the activation ticket, checks cancellation, and sends initialization in the same
+continuation with no intervening await. That check is the dispatch serialization point. Atomic policy
+publication effective before that final read prevents dispatch; a policy change published afterward
+affects later dispatch checks and does not revoke already-dispatched execution or undo its effects.
+Snapshots and dependency closure still require administrator-enforced immutability. Journals use atomic
+rename but are not fsynced: process-interruption recovery is covered; power-loss durability and orphan
+child reconciliation are not established by these tests.
+
 ### Replace a managed directory
 
 ```bash
@@ -88,8 +105,9 @@ Recovery requires a separate current `recover` authorization for the retained id
 expected generation. Revoking a candidate does not revoke an independently authorized baseline.
 Missing recovery authorization leaves the plugin stopped and exposes held/recovery-required state.
 An interrupted `activating` or `replacing` journal prevents automatic startup replay. The journal
-retains the previous registration and its independently captured loaded receipt. Managed Git updates
-also retain their previous snapshot and use this recovery journal. Reconcile through the supported
+retains the previous registration and its independently captured loaded receipt. Managed Git/npm acquisition, preparation and build are refused before they start; qualify snapshots
+externally and use directory replacement. Native moving refs and arbitrary random installation paths
+are not a qualification handoff. Unmanaged native updates keep their existing behavior. Reconcile through the supported
 API; do not edit the journal or restore a session database:
 
 ```bash

@@ -1,5 +1,9 @@
 import { realpath } from "node:fs/promises";
-import { ManagedPluginActivationPolicy, type ActivationOperation } from "./activation-policy.js";
+import {
+  ManagedPluginActivationPolicy,
+  type ActivationOperation,
+  type ActivationTicket,
+} from "./activation-policy.js";
 import type { PluginLoadedReceipt } from "@getpaseo/protocol/messages";
 import { validateWorktreePath } from "../../utils/worktree-path.js";
 import type { PluginHookPayload } from "@getpaseo/plugin/server";
@@ -75,7 +79,33 @@ interface PendingInvocation {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface DirectoryCompilation {
+  pluginId: string;
+  configuredPath: string;
+  directory: string;
+  operation: ActivationOperation;
+  ticket: ActivationTicket | undefined;
+  bundles: Awaited<ReturnType<typeof compileDirectoryPlugin>>;
+}
+interface ServerPluginActivation {
+  canPublish: () => boolean;
+  pluginId: string;
+  configuredPath: string;
+  directory: string;
+  operation: ActivationOperation;
+  ticket: ActivationTicket | undefined;
+  serverBundle: string;
+  clientBundle: string;
+  requirements: PluginRequirements | undefined;
+}
+
+interface ChildTermination {
+  closed: boolean;
+  completion: Promise<void>;
+}
+
 interface LoadedPlugin {
+  termination?: ChildTermination;
   loadedReceipt?: PluginLoadedReceipt;
   id: string;
   instanceId: string;
@@ -286,6 +316,33 @@ function send(child: PluginChild, message: PluginProcessRequest): Promise<void> 
   });
 }
 
+function observeChildTermination(child: PluginChild): ChildTermination {
+  const completion = Promise.withResolvers<void>();
+  const state: ChildTermination = { closed: false, completion: completion.promise };
+  child.on("close", () => {
+    state.closed = true;
+    completion.resolve();
+  });
+  return state;
+}
+async function terminateObservedChild(
+  child: PluginChild,
+  termination: ChildTermination,
+): Promise<void> {
+  terminatePluginChild(child);
+  const timer = setTimeout(() => child.kill("SIGKILL"), SOFT_SHUTDOWN_TIMEOUT_MS);
+  try {
+    await termination.completion;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function assertChildAlive(loaded: LoadedPlugin): void {
+  if (loaded.termination?.closed)
+    throw new Error(`Plugin process exited during activation: ${loaded.id}`);
+}
+
 export class PluginRuntime {
   private readonly plugins = new Map<string, LoadedPlugin>();
   private readonly activationGenerations = new Map<string, number>();
@@ -345,7 +402,9 @@ export class PluginRuntime {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
     });
-    if (!canPublish()) {
+    if (!canPublish() || loaded.termination?.closed) {
+      if (loaded.termination?.closed && loaded.loadedReceipt?.snapshotRoot)
+        await this.dependencies.activationPolicy?.hold(pluginId);
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
@@ -852,58 +911,67 @@ export class PluginRuntime {
     const { manifest } = bundles;
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
     const serverBundle = bundles.serverBundle;
-    if (!serverBundle) {
-      const currentTicket = await policy?.authorize(
-        pluginId,
-        configuredPath,
-        operation,
-        undefined,
-        ticket,
-      );
-      if (currentTicket) throw new Error("Managed activation requires a server bundle");
-      if (ticket) throw new Error("Managed activation requires a server bundle");
-      const clientBundle = bundles.clientBundle ?? "";
-      return {
-        id: pluginId,
-        instanceId: randomUUID(),
-        clientBundle,
-        clientBundleHash: hashClientBundle(clientBundle),
-        requirements: manifest.requirements,
-        methods: new Set(),
-        subscriptionMethods: new Set(),
-        subscriptions: new Map(),
-        hooks: [],
-        providers: [],
-        usageSources: [],
-        child: null,
-        outputCapture: null,
-        pending: new Map(),
-        providerConnections: new Map(),
-        providerConnectionTombstones: new Set(),
-        sessionSocket: null,
-        sessionClosed: null,
-      };
-    }
+    const compilation = { pluginId, configuredPath, directory, operation, ticket, bundles };
+    if (!serverBundle) return this.loadClientOnlyPlugin(compilation);
+    return this.launchPreparedPlugin({
+      canPublish,
+      pluginId,
+      configuredPath,
+      directory,
+      operation,
+      ticket,
+      serverBundle,
+      clientBundle: bundles.clientBundle ?? "",
+      requirements: manifest.requirements,
+    });
+  }
+
+  private async loadClientOnlyPlugin(input: DirectoryCompilation): Promise<LoadedPlugin> {
+    const { pluginId, configuredPath, operation, ticket, bundles } = input;
+    const { manifest } = bundles;
+    const policy = this.dependencies.activationPolicy;
     const currentTicket = await policy?.authorize(
       pluginId,
       configuredPath,
       operation,
-      serverBundle,
+      undefined,
       ticket,
     );
-    if (JSON.stringify(currentTicket) !== JSON.stringify(ticket))
-      throw new Error("Managed enrollment changed during compilation");
+    if (currentTicket) throw new Error("Managed activation requires a server bundle");
+    if (ticket) throw new Error("Managed activation requires a server bundle");
+    const clientBundle = bundles.clientBundle ?? "";
+    return {
+      id: pluginId,
+      instanceId: randomUUID(),
+      clientBundle,
+      clientBundleHash: hashClientBundle(clientBundle),
+      requirements: manifest.requirements,
+      methods: new Set(),
+      subscriptionMethods: new Set(),
+      subscriptions: new Map(),
+      hooks: [],
+      providers: [],
+      usageSources: [],
+      child: null,
+      outputCapture: null,
+      pending: new Map(),
+      providerConnections: new Map(),
+      providerConnectionTombstones: new Set(),
+      sessionSocket: null,
+      sessionClosed: null,
+    };
+  }
+
+  private async launchPreparedPlugin(input: ServerPluginActivation): Promise<LoadedPlugin> {
+    const { pluginId, directory, ticket, serverBundle, clientBundle, requirements } = input;
+    const policy = this.dependencies.activationPolicy;
+    await this.assertPreparedAuthorization(input, "Managed enrollment changed during compilation");
     await policy?.arm(pluginId, ticket);
     try {
-      const launchTicket = await policy?.authorize(
-        pluginId,
-        configuredPath,
-        operation,
-        serverBundle,
-        ticket,
+      await this.assertPreparedAuthorization(
+        input,
+        "Managed authorization changed before child launch",
       );
-      if (JSON.stringify(launchTicket) !== JSON.stringify(ticket))
-        throw new Error("Managed authorization changed before child launch");
     } catch (error) {
       await policy?.finish(pluginId, ticket, false);
       throw error;
@@ -914,48 +982,82 @@ export class PluginRuntime {
       const loaded = await this.launchPlugin({
         pluginId,
         pluginDirectory: directory,
-        requirements: manifest.requirements,
+        requirements,
         child: ticket && !this.dependencies.spawnChild ? spawnPluginChild({}) : this.spawnChild(),
         bundle: serverBundle,
-        clientBundle: bundles.clientBundle ?? "",
+        clientBundle,
+        beforeInitialize: async (dispatch) => {
+          if (policy)
+            await policy.dispatchAuthorized({
+              id: pluginId,
+              ticket,
+              canPublish: input.canPublish,
+              dispatch,
+            });
+          else {
+            if (!input.canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
+            dispatch();
+          }
+        },
       });
       launched = loaded;
-      {
-        const currentTicket = await policy?.authorize(
-          pluginId,
-          configuredPath,
-          operation,
-          serverBundle,
-          ticket,
-        );
-        if (JSON.stringify(currentTicket) !== JSON.stringify(ticket))
-          throw new Error("Managed enrollment changed during launch");
-      }
-      loaded.loadedReceipt = {
-        pluginId,
-        activationGeneration:
-          ticket?.generation ?? (this.activationGenerations.get(pluginId) ?? 0) + 1,
-        sourcePath: directory,
-        serverBundleSha256: createHash("sha256").update(serverBundle).digest("hex"),
-        processStartToken: loaded.instanceId,
-        startedAt,
-        ...(loaded.child?.pid ? { pid: loaded.child.pid } : {}),
-        ...(ticket
-          ? {
-              snapshotRoot: ticket.authorization.snapshotRoot,
-              snapshotSha256: ticket.authorization.snapshotSha256,
-            }
-          : {}),
-      };
-      this.activationGenerations.set(pluginId, loaded.loadedReceipt.activationGeneration);
-      await policy?.recordLoaded(pluginId, ticket, loaded.loadedReceipt);
-      await policy?.finish(pluginId, ticket, true);
+      assertChildAlive(loaded);
+      await this.assertPreparedAuthorization(input, "Managed enrollment changed during launch");
+      assertChildAlive(loaded);
+      await this.recordDirectoryReceipt(input, loaded, startedAt);
+      assertChildAlive(loaded);
       return loaded;
     } catch (error) {
       if (launched) await this.stopPlugin(launched);
       await policy?.finish(pluginId, ticket, false);
       throw error;
     }
+  }
+
+  private async assertPreparedAuthorization(
+    input: ServerPluginActivation,
+    message: string,
+  ): Promise<void> {
+    const { pluginId, configuredPath, operation, serverBundle, ticket } = input;
+    const currentTicket = await this.dependencies.activationPolicy?.authorize(
+      pluginId,
+      configuredPath,
+      operation,
+      serverBundle,
+      ticket,
+    );
+    if (JSON.stringify(currentTicket) !== JSON.stringify(ticket)) throw new Error(message);
+  }
+
+  private async recordDirectoryReceipt(
+    input: ServerPluginActivation,
+    loaded: LoadedPlugin,
+    startedAt: string,
+  ): Promise<void> {
+    const { pluginId, ticket, directory, serverBundle } = input;
+    const policy = this.dependencies.activationPolicy;
+    loaded.loadedReceipt = {
+      pluginId,
+      activationGeneration:
+        ticket?.generation ?? (this.activationGenerations.get(pluginId) ?? 0) + 1,
+      sourcePath: directory,
+      serverBundleSha256: createHash("sha256").update(serverBundle).digest("hex"),
+      processStartToken: loaded.instanceId,
+      startedAt,
+      ...(loaded.child?.pid ? { pid: loaded.child.pid } : {}),
+      ...(ticket
+        ? {
+            snapshotRoot: ticket.authorization.snapshotRoot,
+            snapshotSha256: ticket.authorization.snapshotSha256,
+          }
+        : {}),
+    };
+    this.activationGenerations.set(pluginId, loaded.loadedReceipt.activationGeneration);
+    assertChildAlive(loaded);
+    await policy?.recordLoaded(pluginId, ticket, loaded.loadedReceipt);
+    assertChildAlive(loaded);
+    await policy?.finish(pluginId, ticket, true);
+    assertChildAlive(loaded);
   }
 
   private async launchPlugin(input: {
@@ -965,8 +1067,10 @@ export class PluginRuntime {
     child: PluginChild;
     bundle: string;
     clientBundle: string;
+    beforeInitialize?: (dispatch: () => void) => Promise<void>;
   }): Promise<LoadedPlugin> {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
+    const termination = observeChildTermination(child);
     const sessionHost = this.sessionHost;
     if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {
@@ -980,8 +1084,8 @@ export class PluginRuntime {
     const pending = new Map<string, PendingInvocation>();
     const sessionAttachment = await sessionHost
       .attachPluginSocket(pluginId, session.socket)
-      .catch((error) => {
-        terminatePluginChild(child);
+      .catch(async (error) => {
+        await terminateObservedChild(child, termination);
         throw error;
       });
     let loaded: LoadedPlugin | null = null;
@@ -1041,22 +1145,30 @@ export class PluginRuntime {
             }
             void this.handleChildClose(loaded);
           });
-          void send(child, {
-            type: "initialize",
-            pluginId,
-            pluginDirectory: input.pluginDirectory,
-            appVersion: this.daemonVersion,
-            bundle,
-            settingsDirectory: this.dependencies.settingsDirectory
-              ? path.join(this.dependencies.settingsDirectory, pluginId)
-              : undefined,
-          }).catch(fail);
+          const initialize = () => {
+            if (termination.closed) {
+              fail(new Error(`Plugin ${pluginId} exited before initialize`));
+              return;
+            }
+            void send(child, {
+              type: "initialize",
+              pluginId,
+              pluginDirectory: input.pluginDirectory,
+              appVersion: this.daemonVersion,
+              bundle,
+              settingsDirectory: this.dependencies.settingsDirectory
+                ? path.join(this.dependencies.settingsDirectory, pluginId)
+                : undefined,
+            }).catch(fail);
+          };
+          if (input.beforeInitialize) void input.beforeInitialize(initialize).catch(fail);
+          else initialize();
         },
       );
     } catch (error) {
       session.socket.close();
       await sessionAttachment.closed;
-      terminatePluginChild(child);
+      await terminateObservedChild(child, termination);
       throw error;
     }
     loaded = {
@@ -1065,6 +1177,7 @@ export class PluginRuntime {
       clientBundle,
       clientBundleHash: hashClientBundle(clientBundle),
       requirements,
+      termination,
       methods: new Set(ready.methods),
       subscriptionMethods: new Set(ready.subscriptions ?? []),
       subscriptions: new Map(),
@@ -1506,17 +1619,15 @@ export class PluginRuntime {
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
       return;
     }
-    if (child.killed) {
+    const termination = loaded.termination;
+    if (!termination) throw new Error("Plugin child termination tracking is missing");
+    if (termination.closed) {
       sessionSocket.peerClosed();
       await sessionClosed;
       this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
       return;
     }
-    const closed = new Promise<void>((resolve) =>
-      child.on("close", () => {
-        resolve();
-      }),
-    );
+    const closed = termination.completion;
     if (child.connected) {
       await send(child, { type: "shutdown" }).catch(() => undefined);
     }

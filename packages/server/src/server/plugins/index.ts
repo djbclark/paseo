@@ -1,5 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
-import { ManagedPluginActivationPolicy, type ActivationOperation } from "./activation-policy.js";
+import {
+  ManagedPluginActivationPolicy,
+  type ActivationOperation,
+  type ManagedPluginActivationState,
+} from "./activation-policy.js";
 import type { PluginAgentToolsRuntime } from "./agent-tools.js";
 import type { PluginLifecycle } from "./lifecycle/index.js";
 import path from "node:path";
@@ -37,6 +41,44 @@ import {
   UsageSourceRegistry,
 } from "./usage-sources/index.js";
 import type { PluginUsageSourceMetadata } from "./plugin-process-protocol.js";
+
+interface DirectoryReplacementInput {
+  pluginId: string;
+  path: string;
+  expectedPath: string;
+  expectedGeneration: number;
+}
+interface PluginRecoveryInput {
+  pluginId: string;
+  expectedPath: string;
+  expectedGeneration: number;
+}
+interface ReplacementActivation {
+  pluginId: string;
+  source: PluginSource;
+  candidate: string;
+  policy: ManagedPluginActivationPolicy;
+}
+type RetainedPluginBaseline = NonNullable<ManagedPluginActivationState["baseline"]>;
+interface RetainedBaselineValidation {
+  pluginId: string;
+  baseline: RetainedPluginBaseline;
+  policy: ManagedPluginActivationPolicy;
+}
+interface RecoveryIdentityInspection {
+  pluginId: string;
+  current: PluginSource;
+  state: ManagedPluginActivationState;
+  baseline: RetainedPluginBaseline;
+  loaded: PluginListItem["loaded"];
+  policy: ManagedPluginActivationPolicy;
+}
+interface NativeUpdateActivation {
+  pluginId: string;
+  source: PluginSource;
+  candidate: ManagedPluginCandidate;
+  managedSources: ManagedPluginSources;
+}
 
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS);
 
@@ -341,68 +383,14 @@ export class PluginService {
     });
   }
 
-  async replaceDirectory(input: {
-    pluginId: string;
-    path: string;
-    expectedPath: string;
-    expectedGeneration: number;
-  }): Promise<PluginListItem> {
+  async replaceDirectory(input: DirectoryReplacementInput): Promise<PluginListItem> {
     return this.enqueue(async () => {
-      const { pluginId } = input;
-      const source = this.requireEnabledSource(pluginId);
-      const policy = this.dependencies.activationPolicy;
-      if (!policy) throw new Error("Directory replacement requires managed policy");
-      if (source.source !== "directory" || source.path !== input.expectedPath)
-        throw new Error("Directory source CAS mismatch");
-      if (this.configStore.get().pluginsEnabled !== true)
-        throw new Error("Plugins are globally disabled");
-      const state = await policy.status(pluginId);
-      if (state.generation !== input.expectedGeneration)
-        throw new Error("Stale activation generation");
-      const candidate = path.resolve(input.path);
-      if (candidate === source.path)
-        throw new Error("Replacement must use a distinct immutable source");
-      const authorization = await policy.authorize(pluginId, candidate);
-      if (!authorization)
-        throw new Error("Replacement requires enrolled binary-only authorization");
-      await this.checkRequirements(candidate);
-      if (!this.runtime.validateActivation)
-        throw new Error("Runtime cannot verify managed activation");
-      await this.runtime.validateActivation(pluginId, candidate);
-      await policy.authorize(pluginId, candidate, "activate", undefined, authorization);
-      if (this.requireSource(pluginId).path !== source.path || !this.canPublish(pluginId))
-        throw new Error("Source changed during replacement preparation");
-      const receipt = this.runtime.getLoadedReceipt?.(pluginId);
-      if (!receipt || receipt.sourcePath !== source.path)
-        throw new Error("Loaded baseline identity is ambiguous");
-      await policy.replacing(pluginId, source.path, candidate, { source, receipt });
+      const activation = await this.prepareReplacement(input);
+      const { pluginId, policy } = activation;
       try {
         const wasRunning = this.runtime.catalog().some((item) => item.id === pluginId);
         await this.stopPlugin(pluginId);
-        try {
-          await this.startExplicit(pluginId, candidate);
-          if (!this.canPublish(pluginId) || this.requireSource(pluginId).path !== source.path)
-            throw new Error("Replacement cancelled");
-          await this.patchSource(pluginId, { ...source, path: candidate });
-          await policy.committedReplacement(pluginId);
-        } catch (error) {
-          await this.stopPlugin(pluginId);
-          if (this.configStore.get().plugins?.[pluginId]?.path !== source.path) {
-            throw new Error("Replacement registration changed; recovery required", {
-              cause: error,
-            });
-          }
-          if (wasRunning && this.canPublish(pluginId)) {
-            try {
-              await this.assertRecoveryBaseline(pluginId, source.path);
-              await this.startExplicit(pluginId, source.path, "recover");
-              await policy.committedReplacement(pluginId);
-            } catch (recoveryError) {
-              throw new Error("Replacement failed; recovery required", { cause: recoveryError });
-            }
-          }
-          throw error;
-        }
+        await this.activateReplacement(activation, wasRunning);
         this.notify(pluginId);
         return this.requireItem(pluginId);
       } finally {
@@ -411,11 +399,92 @@ export class PluginService {
     });
   }
 
-  async recoverPlugin(input: {
-    pluginId: string;
-    expectedPath: string;
-    expectedGeneration: number;
-  }): Promise<PluginListItem> {
+  private async requireManagedBaseline(
+    pluginId: string,
+    source: PluginSource,
+    policy: ManagedPluginActivationPolicy,
+  ): Promise<NonNullable<PluginListItem["loaded"]>> {
+    const receipt = this.runtime.getLoadedReceipt?.(pluginId);
+    if (
+      !receipt ||
+      receipt.sourcePath !== source.path ||
+      !receipt.snapshotRoot ||
+      !receipt.snapshotSha256 ||
+      receipt.activationGeneration < 1
+    )
+      throw new Error(
+        "Unmanaged adoption held: complete managed baseline evidence is required before disruption",
+      );
+    const state = await policy.status(pluginId);
+    if (!isDeepStrictEqual(state.currentReceipt, receipt))
+      throw new Error("Loaded baseline identity is ambiguous");
+    return receipt;
+  }
+
+  private async prepareReplacement(
+    input: DirectoryReplacementInput,
+  ): Promise<ReplacementActivation> {
+    const { pluginId } = input;
+    const source = this.requireEnabledSource(pluginId);
+    const policy = this.dependencies.activationPolicy;
+    if (!policy) throw new Error("Directory replacement requires managed policy");
+    if (source.source !== "directory" || source.path !== input.expectedPath)
+      throw new Error("Directory source CAS mismatch");
+    if (this.configStore.get().pluginsEnabled !== true)
+      throw new Error("Plugins are globally disabled");
+    const state = await policy.status(pluginId);
+    if (state.generation !== input.expectedGeneration)
+      throw new Error("Stale activation generation");
+    const candidate = path.resolve(input.path);
+    if (candidate === source.path)
+      throw new Error("Replacement must use a distinct immutable source");
+    const authorization = await policy.authorize(pluginId, candidate);
+    if (!authorization) throw new Error("Replacement requires enrolled binary-only authorization");
+    await this.checkRequirements(candidate);
+    if (!this.runtime.validateActivation)
+      throw new Error("Runtime cannot verify managed activation");
+    await this.runtime.validateActivation(pluginId, candidate);
+    await policy.authorize(pluginId, candidate, "activate", undefined, authorization);
+    if (this.requireSource(pluginId).path !== source.path || !this.canPublish(pluginId))
+      throw new Error("Source changed during replacement preparation");
+    const receipt = await this.requireManagedBaseline(pluginId, source, policy);
+    await policy.replacing(pluginId, source.path, candidate, { source, receipt });
+    return { pluginId, policy, source, candidate };
+  }
+
+  private async activateReplacement(
+    input: ReplacementActivation,
+    wasRunning: boolean,
+  ): Promise<void> {
+    const { pluginId, source, candidate, policy } = input;
+    try {
+      await this.startExplicit(pluginId, candidate);
+      if (!this.canPublish(pluginId) || this.requireSource(pluginId).path !== source.path)
+        throw new Error("Replacement cancelled");
+      await this.patchSource(pluginId, { ...source, path: candidate });
+      await policy.committedReplacement(pluginId);
+    } catch (error) {
+      await this.stopPlugin(pluginId);
+      await policy.hold(pluginId);
+      if (this.configStore.get().plugins?.[pluginId]?.path !== source.path) {
+        throw new Error("Replacement registration changed; recovery required", {
+          cause: error,
+        });
+      }
+      if (wasRunning && this.canPublish(pluginId)) {
+        try {
+          await this.assertRecoveryBaseline(pluginId, source.path);
+          await this.startExplicit(pluginId, source.path, "recover");
+          await policy.committedReplacement(pluginId);
+        } catch (recoveryError) {
+          throw new Error("Replacement failed; recovery required", { cause: recoveryError });
+        }
+      }
+      throw error;
+    }
+  }
+
+  async recoverPlugin(input: PluginRecoveryInput): Promise<PluginListItem> {
     return this.enqueue(async () => {
       const { pluginId } = input;
       const policy = this.dependencies.activationPolicy;
@@ -428,26 +497,9 @@ export class PluginService {
         throw new Error("Recovery generation/source CAS mismatch");
       if (!baseline) throw new Error("Recovery requires a recorded baseline identity");
       const loaded = this.runtime.getLoadedReceipt?.(pluginId);
-      const knownSource =
-        current.path === baseline.source.path || current.path === state.candidatePath;
-      if (
-        !knownSource ||
-        (loaded &&
-          (!isDeepStrictEqual(loaded, state.currentReceipt) || loaded.sourcePath !== current.path))
-      ) {
-        await policy.hold(pluginId);
-        throw new Error("Loaded/current source identity is ambiguous; recovery held");
-      }
+      await this.inspectRecoveryIdentity({ pluginId, current, state, baseline, loaded, policy });
       try {
-        const ticket = await policy.authorize(pluginId, baseline.source.path, "recover");
-        if (
-          !ticket ||
-          ticket.authorization.serverBundleSha256 !== baseline.receipt.serverBundleSha256 ||
-          ticket.authorization.snapshotSha256 !== baseline.receipt.snapshotSha256 ||
-          ticket.authorization.snapshotRoot !== baseline.receipt.snapshotRoot
-        )
-          throw new Error("Recovery authorization does not match recorded baseline");
-        await this.runtime.validateActivation(pluginId, baseline.source.path, "recover");
+        await this.validateRetainedBaseline({ pluginId, baseline, policy });
         if (this.requireSource(pluginId).path !== current.path || !this.canPublish(pluginId))
           throw new Error("Recovery cancelled");
         await policy.recovering(pluginId, input.expectedGeneration);
@@ -474,6 +526,34 @@ export class PluginService {
     });
   }
 
+  private async inspectRecoveryIdentity(input: RecoveryIdentityInspection): Promise<void> {
+    const { pluginId, current, state, baseline, loaded, policy } = input;
+    const knownSource =
+      current.path === baseline.source.path || current.path === state.candidatePath;
+    if (
+      !knownSource ||
+      (loaded &&
+        (!isDeepStrictEqual(loaded, state.currentReceipt) || loaded.sourcePath !== current.path))
+    ) {
+      await policy.hold(pluginId);
+      throw new Error("Loaded/current source identity is ambiguous; recovery held");
+    }
+  }
+
+  private async validateRetainedBaseline(input: RetainedBaselineValidation): Promise<void> {
+    const { pluginId, baseline, policy } = input;
+    if (!this.runtime.validateActivation) throw new Error("Managed recovery unavailable");
+    const ticket = await policy.authorize(pluginId, baseline.source.path, "recover");
+    if (
+      !ticket ||
+      ticket.authorization.serverBundleSha256 !== baseline.receipt.serverBundleSha256 ||
+      ticket.authorization.snapshotSha256 !== baseline.receipt.snapshotSha256 ||
+      ticket.authorization.snapshotRoot !== baseline.receipt.snapshotRoot
+    )
+      throw new Error("Recovery authorization does not match recorded baseline");
+    await this.runtime.validateActivation(pluginId, baseline.source.path, "recover");
+  }
+
   async inspectDirectory(configuredPath: string): Promise<{ id: string }> {
     return readPluginManifest(path.resolve(configuredPath));
   }
@@ -497,6 +577,7 @@ export class PluginService {
     }
     const managedSources = this.requireManagedSources();
     return this.enqueue(async () => {
+      await this.dependencies.activationPolicy?.assertNativeAcquisitionAllowed(input.id);
       let candidate = await managedSources.prepareInstall({
         ...input,
         source: reference.source,
@@ -514,7 +595,9 @@ export class PluginService {
             `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
           );
         }
+        await this.dependencies.activationPolicy?.assertNativeAcquisitionAllowed(pluginId);
         await runPluginBuild(candidate.directory, candidate.build, this.logger);
+        await this.dependencies.activationPolicy?.assertNativeAcquisitionAllowed(pluginId);
         candidate = await managedSources.place(pluginId, candidate);
         await this.validateCandidate(candidate);
         await managedSources.verifyCandidate(pluginId, candidate);
@@ -617,7 +700,9 @@ export class PluginService {
         throw new Error("Plugins are globally disabled");
       }
       this.errors.delete(pluginId);
-      await this.dependencies.activationPolicy?.authorize(pluginId, source.path);
+      const ticket = await this.dependencies.activationPolicy?.authorize(pluginId, source.path);
+      if (ticket && this.dependencies.activationPolicy)
+        await this.requireManagedBaseline(pluginId, source, this.dependencies.activationPolicy);
       await this.stopPlugin(pluginId);
       await this.startExplicit(pluginId, source.path);
       this.notify(pluginId);
@@ -949,97 +1034,87 @@ export class PluginService {
     const pluginId = proposal.id;
     const managedSources = this.requireManagedSources();
     const source = this.requireSource(pluginId);
+    const policy = this.dependencies.activationPolicy;
+    await policy?.assertNativeAcquisitionAllowed(pluginId);
     let candidate = await managedSources.prepareUpdate(proposal, source.path);
     try {
       await this.checkRequirements(candidate.directory);
+      await policy?.assertNativeAcquisitionAllowed(pluginId);
       await runPluginBuild(candidate.directory, candidate.build, this.logger);
+      await policy?.assertNativeAcquisitionAllowed(pluginId);
       candidate = await managedSources.place(pluginId, candidate);
       await this.validateCandidate(candidate);
       await managedSources.verifyCandidate(pluginId, candidate, proposal.target);
       await managedSources.assertCurrent(proposal, this.requireSource(pluginId).path);
+      await policy?.assertNativeAcquisitionAllowed(pluginId);
     } catch (error) {
       await managedSources.discard(candidate);
       throw error;
     }
+    return this.activateNativeUpdate({ pluginId, source, candidate, managedSources });
+  }
 
-    const policy = this.dependencies.activationPolicy;
-    const ticket = await policy?.authorize(pluginId, candidate.directory);
-    if (ticket) {
-      if (!this.runtime.validateActivation) throw new Error("Managed verification unavailable");
-      await this.runtime.validateActivation(pluginId, candidate.directory);
-      await policy?.authorize(pluginId, candidate.directory, "activate", undefined, ticket);
-    }
+  private async activateNativeUpdate(input: NativeUpdateActivation): Promise<PluginUpdateResult> {
+    const { pluginId, candidate } = input;
     const current = this.requireSource(pluginId);
     const isRunning = this.runtime.catalog().some((plugin) => plugin.id === pluginId);
     const shouldActivate =
       current.enabled !== false && this.configStore.get().pluginsEnabled === true;
-    if (ticket) {
-      const receipt = this.runtime.getLoadedReceipt?.(pluginId);
-      if (!policy || !receipt || receipt.sourcePath !== current.path || !shouldActivate)
-        throw new Error("Managed update requires an independently loaded baseline");
-      await policy.replacing(pluginId, current.path, candidate.directory, {
-        source: current,
-        receipt,
-      });
-    }
+    await this.dependencies.activationPolicy?.assertNativeAcquisitionAllowed(pluginId);
+    await this.dependencies.activationPolicy?.authorize(pluginId, candidate.directory);
+    if (shouldActivate && isRunning) await this.stopPlugin(pluginId);
     try {
-      if (shouldActivate) {
-        await policy?.authorize(pluginId, candidate.directory, "activate", undefined, ticket);
-        if (isRunning) await this.stopPlugin(pluginId);
-        try {
-          await this.startExplicit(pluginId, candidate.directory);
-        } catch (error) {
-          try {
-            if (isRunning && this.canPublish(pluginId)) {
-              await this.assertRecoveryBaseline(pluginId, source.path);
-              await this.startExplicit(pluginId, source.path, "recover");
-              if (ticket) await policy?.committedReplacement(pluginId);
-            }
-          } catch (restoreError) {
-            if (ticket) await policy?.hold(pluginId);
-            throw new Error("Update failed; recovery required", { cause: restoreError });
-          } finally {
-            if (!ticket) await managedSources.discard(candidate);
-            this.notify(pluginId);
-          }
-          throw error;
-        }
-      }
-      const activatedSource = this.configStore.get().plugins?.[pluginId];
-      if (!activatedSource) {
-        await this.stopPlugin(pluginId);
-        if (!ticket) await managedSources.discard(candidate);
+      if (shouldActivate) await this.startExplicit(pluginId, candidate.directory);
+      if (!this.configStore.get().plugins?.[pluginId])
         throw new Error(`Plugin is no longer configured: ${pluginId}`);
-      }
       await this.patchSource(pluginId, (currentSource) => ({
         ...currentSource,
         path: candidate.directory,
       }));
-      if (ticket) await policy?.committedReplacement(pluginId);
-      this.errors.delete(pluginId);
-      this.notify(pluginId);
-      let warning: string | undefined;
-      if (!ticket) {
-        try {
-          await managedSources.removeVersion(pluginId, source.path);
-        } catch (error) {
-          warning = `Plugin updated, but previous installation cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
-        }
-      }
-      return {
-        id: pluginId,
-        outcome: "updated",
-        plugin: await this.requireItem(pluginId),
-        ...(warning ? { warning } : {}),
-      };
     } catch (error) {
-      if (ticket && this.configStore.get().plugins?.[pluginId]?.path !== source.path) {
-        await this.stopPlugin(pluginId);
-        await policy?.hold(pluginId);
-      }
+      await this.stopPlugin(pluginId);
+      await this.restoreNativeUpdate(input, isRunning);
       throw error;
+    }
+    this.errors.delete(pluginId);
+    this.notify(pluginId);
+    const warning = await this.cleanupNativeUpdate(input);
+    return {
+      id: pluginId,
+      outcome: "updated",
+      plugin: await this.requireItem(pluginId),
+      ...(warning ? { warning } : {}),
+    };
+  }
+
+  private async restoreNativeUpdate(
+    input: NativeUpdateActivation,
+    wasRunning: boolean,
+  ): Promise<void> {
+    const { pluginId, source, candidate, managedSources } = input;
+    try {
+      if (
+        wasRunning &&
+        this.canPublish(pluginId) &&
+        this.requireSource(pluginId).path === source.path
+      ) {
+        await this.assertRecoveryBaseline(pluginId, source.path);
+        await this.startExplicit(pluginId, source.path, "recover");
+      }
+    } catch (error) {
+      throw new Error("Update failed; recovery required", { cause: error });
     } finally {
-      if (ticket) policy?.releaseReplacement(pluginId);
+      await managedSources.discard(candidate);
+      this.notify(pluginId);
+    }
+  }
+
+  private async cleanupNativeUpdate(input: NativeUpdateActivation): Promise<string | undefined> {
+    try {
+      await input.managedSources.removeVersion(input.pluginId, input.source.path);
+      return undefined;
+    } catch (error) {
+      return `Plugin updated, but previous installation cleanup failed: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 

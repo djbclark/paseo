@@ -1,3 +1,6 @@
+import { ManagedPluginActivationPolicy, hashPluginSnapshot } from "./activation-policy.js";
+import { compileDirectoryPlugin } from "./compiler.js";
+import { realpath } from "node:fs/promises";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fork } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2189,3 +2192,124 @@ export default function contribute() {
     await runtime.stopAll();
   }
 });
+
+async function managedRuntimeFixture(source: string) {
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-managed-runtime-"));
+  temporaryDirectories.push(home);
+  const directory = await realpath(await createPlugin("managed-runtime", source));
+  const bundle = await compileDirectoryPlugin(directory, "0.4.0");
+  const file = path.join(home, "policy.json");
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      plugins: {
+        "managed-runtime": {
+          authorizations: [
+            {
+              operation: "activate",
+              expectedGeneration: 0,
+              sourcePath: directory,
+              snapshotRoot: directory,
+              snapshotSha256: await hashPluginSnapshot(directory),
+              serverBundleSha256: sha256(bundle.serverBundle ?? undefined),
+              state: "binary-only",
+              forbiddenEnvironment: [],
+            },
+          ],
+        },
+      },
+    }),
+  );
+  return { home, directory, file };
+}
+
+it.each(["revoke", "cancel"])(
+  "does not initialize executable code after %s during asynchronous socket attachment",
+  async (change) => {
+    const f = await managedRuntimeFixture("export default () => () => {};");
+    const policy = new ManagedPluginActivationPolicy(f.file, path.join(f.home, "journal"));
+    const attached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const child = createReloadChild("guarded", events);
+    let publish = true;
+    const runtime = createTestRuntime({
+      activationPolicy: policy,
+      spawnChild: () => child,
+      sessionHost: {
+        async attachPluginSocket(_id, socket) {
+          const closed = new Promise<void>((resolve) => socket.once("close", resolve));
+          attached.resolve();
+          await release.promise;
+          return { closed };
+        },
+      },
+    });
+    const starting = runtime.startPlugin("managed-runtime", f.directory, () => publish);
+    const rejected = expect(starting).rejects.toThrow();
+    await attached.promise;
+    if (change === "revoke")
+      await writeFile(
+        f.file,
+        JSON.stringify({ version: 1, plugins: { "managed-runtime": { authorizations: [] } } }),
+      );
+    else publish = false;
+    release.resolve();
+    await rejected;
+    expect(events).not.toContain("start:guarded");
+    expect(runtime.getLoadedReceipt("managed-runtime")).toBeUndefined();
+    await runtime.stopAll();
+  },
+);
+
+it.each(["verify", "journal"])(
+  "rejects natural child exit during post-ready %s without receipt or shutdown hang",
+  async (boundary) => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-natural-exit-"));
+    temporaryDirectories.push(home);
+    const signal = path.join(home, "exit-now");
+    const f = await managedRuntimeFixture(
+      `import { existsSync } from 'node:fs'; export default function() { const timer = setInterval(() => { if(existsSync(${JSON.stringify(signal)})) process.exit(0); }, 10); return () => clearInterval(timer); }`,
+    );
+    const closed = Promise.withResolvers<void>();
+    let calls = 0;
+    class ExitDuringPolicyIo extends ManagedPluginActivationPolicy {
+      override async authorize(...args: Parameters<ManagedPluginActivationPolicy["authorize"]>) {
+        const ticket = await super.authorize(...args);
+        calls++;
+        if (boundary === "verify" && calls === 4) {
+          await writeFile(signal, "exit");
+          await closed.promise;
+        }
+        return ticket;
+      }
+      override async recordLoaded(
+        ...args: Parameters<ManagedPluginActivationPolicy["recordLoaded"]>
+      ) {
+        await super.recordLoaded(...args);
+        if (boundary === "journal") {
+          await writeFile(signal, "exit");
+          await closed.promise;
+        }
+      }
+    }
+    const policy = new ExitDuringPolicyIo(f.file, path.join(f.home, "journal"));
+    const runtime = createTestRuntime({
+      activationPolicy: policy,
+      spawnChild: () => {
+        const child = spawnObservedPluginProcess(() => {});
+        child.once("close", () => closed.resolve());
+        return child;
+      },
+    });
+    await expect(runtime.startPlugin("managed-runtime", f.directory)).rejects.toThrow(
+      "exited during activation",
+    );
+    expect(runtime.getLoadedReceipt("managed-runtime")).toBeUndefined();
+    expect(runtime.catalog()).toEqual([]);
+    await runtime.stopAll();
+    expect((await policy.status("managed-runtime")).phase).toBe("held");
+  },
+  15_000,
+);

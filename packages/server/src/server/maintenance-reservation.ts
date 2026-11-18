@@ -254,8 +254,10 @@ export class MaintenanceReservation {
   }
   /** Installed API only, never scoped eligibility or permission. */
   supportsHeldRecoveryAPI(): boolean {
-    return typeof this.participant.supportsHeldRecoveryV1 === "function" &&
-      typeof this.participant.beginHeldRecoveryV1 === "function";
+    return (
+      typeof this.participant.supportsHeldRecoveryV1 === "function" &&
+      typeof this.participant.beginHeldRecoveryV1 === "function"
+    );
   }
 
   assertTransport(
@@ -306,8 +308,14 @@ export class MaintenanceReservation {
   ) {
     this.assertTransport(input);
     const driver = this.pluginOperation;
-    if (!driver || !(this.supportsPluginOperations() ||
-      ((input.operation === "recover" || input.operation === "verify") && this.supportsHeldRecoveryAPI())))
+    if (
+      !driver ||
+      !(
+        this.supportsPluginOperations() ||
+        ((input.operation === "recover" || input.operation === "verify") &&
+          this.supportsHeldRecoveryAPI())
+      )
+    )
       throw new Error("Held plugin operation unsupported");
     this.assertPluginTarget(input);
     // Copy only public claim fields; bearer and transport metadata never reach the driver.
@@ -340,7 +348,10 @@ export class MaintenanceReservation {
       if (
         !authority.qualified ||
         !authority.daemonIncarnation ||
-        !(authority.features.maintenancePluginOperationV1 || authority.features.maintenanceHeldRecoveryV1)
+        !(
+          authority.features.maintenancePluginOperationV1 ||
+          authority.features.maintenanceHeldRecoveryV1
+        )
       )
         throw new Error("Maintenance owner unavailable");
       const metadata = {
@@ -350,7 +361,12 @@ export class MaintenanceReservation {
       };
       const known = acceptedKnownFailures.get(result);
       if (known) {
-        if (!(authority.features.maintenanceKnownFailedHeldV1 || authority.features.maintenanceHeldRecoveryV1))
+        if (
+          !(
+            authority.features.maintenanceKnownFailedHeldV1 ||
+            authority.features.maintenanceHeldRecoveryV1
+          )
+        )
           throw new Error("Known held capability unavailable");
         this.assertNoUnknownWork();
         return { ...known, ...metadata };
@@ -757,7 +773,10 @@ export class MaintenanceReservation {
     return this.executeAdmitted(entry.release, operation);
   }
 
-  private authenticateOperationOwner(claim: HeldPluginOperationClaim, ownerToken: string): RecordV1 {
+  private authenticateOperationOwner(
+    claim: HeldPluginOperationClaim,
+    ownerToken: string,
+  ): RecordV1 {
     const record = this.record;
     if (
       this.failed ||
@@ -808,15 +827,13 @@ export class MaintenanceReservation {
     try {
       const held = await this.operationBarrier(claim);
       assertHeldPluginOperation(scope, claim);
-      if (held !== "held")
-        throw new Error("Maintenance operation cohort unavailable");
+      if (held !== "held") throw new Error("Maintenance operation cohort unavailable");
       const result = await this.executeAdmitted(release, () => operation(scope));
       assertHeldPluginOperation(scope, claim);
       const known = readPrivateKnownFailedHeld(result, scope, claim);
       const successor = await this.operationBarrier(claim, known);
       assertHeldPluginOperation(scope, claim);
-      if (successor !== "held")
-        throw new Error("Maintenance successor not safely held");
+      if (successor !== "held") throw new Error("Maintenance successor not safely held");
       this.operationLane(claim, known);
       await this.commitHeldOutcome(
         scope,
@@ -846,7 +863,10 @@ export class MaintenanceReservation {
     }
   }
 
-  private operationLane(claim: HeldPluginOperationClaim, known?: KnownFailedHeldObservation): "global" | "scoped" {
+  private operationLane(
+    claim: HeldPluginOperationClaim,
+    known?: KnownFailedHeldObservation,
+  ): "global" | "scoped" {
     this.assertNoUnknownWork();
     if (!this.ready) throw new Error("Maintenance startup incomplete");
     if (this.isReady()) {
@@ -856,9 +876,15 @@ export class MaintenanceReservation {
     }
     this.assertNoUnknownWork();
     const restricted = this.record?.recoveryOnly;
-    const eligibleOrigin = known !== undefined || (restricted?.pluginId === claim.pluginId &&
-      (claim.operation === "recover" || claim.operation === "verify"));
-    const identity = { generation: claim.generation, transactionId: claim.transactionId, pluginId: claim.pluginId };
+    const eligibleOrigin =
+      known !== undefined ||
+      (restricted?.pluginId === claim.pluginId &&
+        (claim.operation === "recover" || claim.operation === "verify"));
+    const identity = {
+      generation: claim.generation,
+      transactionId: claim.transactionId,
+      pluginId: claim.pluginId,
+    };
     if (eligibleOrigin && this.participant.supportsHeldRecoveryV1?.(identity) === true) {
       this.assertNoUnknownWork();
       return "scoped";
@@ -868,9 +894,14 @@ export class MaintenanceReservation {
 
   private operationBarrier(claim: HeldPluginOperationClaim, known?: KnownFailedHeldObservation) {
     const lane = this.operationLane(claim, known);
-    const identity = { generation: claim.generation, transactionId: claim.transactionId, pluginId: claim.pluginId };
+    const identity = {
+      generation: claim.generation,
+      transactionId: claim.transactionId,
+      pluginId: claim.pluginId,
+    };
     // Select before the real barrier. UNKNOWN/BUSY are never retried on another lane.
-    return lane === "global" ? this.participant.begin({ generation: claim.generation, transactionId: claim.transactionId })
+    return lane === "global"
+      ? this.participant.begin({ generation: claim.generation, transactionId: claim.transactionId })
       : this.participant.beginHeldRecoveryV1!(identity);
   }
 

@@ -1798,56 +1798,124 @@ describe("native maintenance participant serialization", () => {
   });
   test("original live scope authenticates across its own cohort transition but cannot revive UNKNOWN", async () => {
     let globalReady = true;
-    const f = await fixture({ supportsV1: () => globalReady, begin: async () => "held", end: async () => {} });
+    const f = await fixture({
+      supportsV1: () => globalReady,
+      begin: async () => "held",
+      end: async () => {},
+    });
     const held = await f.reservation.begin(1, "scope-continuity");
-    const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "scope-continuity", operation: "replace", pluginId: "unit", path: "/B", expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+    const claim: HeldPluginOperationClaim = {
+      generation: 1,
+      transactionId: "scope-continuity",
+      operation: "replace",
+      pluginId: "unit",
+      path: "/B",
+      expectedPath: "/A",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    };
     let retained!: HeldPluginOperationScope;
     try {
-      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
-        retained = scope;
-        globalReady = false;
-        assertHeldPluginOperation(scope, claim);
-        await expect(f.reservation.begin(2, "ordinary")).rejects.toThrow();
-        expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
-        f.reservation.holdForUnknownWork();
-        expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
-        return { nativeGeneration: 2 };
-      })).rejects.toThrow();
+      await expect(
+        f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
+          retained = scope;
+          globalReady = false;
+          assertHeldPluginOperation(scope, claim);
+          await expect(f.reservation.begin(2, "ordinary")).rejects.toThrow();
+          expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
+          f.reservation.holdForUnknownWork();
+          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+          return { nativeGeneration: 2 };
+        }),
+      ).rejects.toThrow();
       expect(() => assertHeldPluginOperation(retained, claim)).toThrow();
       expect(f.reservation.status().state).toBe("recovery-required");
-    } finally { await f.reservation.flushStorage(); f.close(); }
+    } finally {
+      await f.reservation.flushStorage();
+      f.close();
+    }
   });
   test("lifecycle ABA invalidates original scope even if readiness is restored", async () => {
-    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "held",
+      end: async () => {},
+    });
     const held = await f.reservation.begin(1, "lifecycle-aba");
-    const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "lifecycle-aba", operation: "replace", pluginId: "unit", path: "/B", expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+    const claim: HeldPluginOperationClaim = {
+      generation: 1,
+      transactionId: "lifecycle-aba",
+      operation: "replace",
+      pluginId: "unit",
+      path: "/B",
+      expectedPath: "/A",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    };
     try {
-      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
-        f.reservation.setReady(false); f.reservation.setReady(true);
-        expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
-      })).rejects.toThrow();
-    } finally { await f.reservation.flushStorage(); f.close(); }
+      await expect(
+        f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
+          f.reservation.setReady(false);
+          f.reservation.setReady(true);
+          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await f.reservation.flushStorage();
+      f.close();
+    }
   });
   test("UNKNOWN from a chosen real global barrier never retries the scoped API", async () => {
     const begin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValue("held");
-    const scoped = vi.fn<NonNullable<PluginMaintenancePort["beginHeldRecoveryV1"]>>().mockResolvedValue("held");
-    const f = await fixture({ supportsV1: () => true, begin, end: async () => {}, supportsHeldRecoveryV1: () => true, beginHeldRecoveryV1: scoped });
+    const scoped = vi
+      .fn<NonNullable<PluginMaintenancePort["beginHeldRecoveryV1"]>>()
+      .mockResolvedValue("held");
+    const f = await fixture({
+      supportsV1: () => true,
+      begin,
+      end: async () => {},
+      supportsHeldRecoveryV1: () => true,
+      beginHeldRecoveryV1: scoped,
+    });
     const held = await f.reservation.begin(1, "no-fallback");
-    const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "no-fallback", operation: "replace", pluginId: "unit", path: "/B", expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+    const claim: HeldPluginOperationClaim = {
+      generation: 1,
+      transactionId: "no-fallback",
+      operation: "replace",
+      pluginId: "unit",
+      path: "/B",
+      expectedPath: "/A",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    };
     const operation = vi.fn(async () => {});
     try {
       begin.mockResolvedValueOnce("unknown");
-      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, operation)).rejects.toThrow();
+      await expect(
+        f.reservation.ownerPluginOperation(claim, held.ownerToken, operation),
+      ).rejects.toThrow();
       expect(scoped).not.toHaveBeenCalled();
       expect(operation).not.toHaveBeenCalled();
-    } finally { await f.reservation.flushStorage(); f.close(); }
+    } finally {
+      await f.reservation.flushStorage();
+      f.close();
+    }
   });
   test("missing/fake parent capability is unsupported while raw restore barrier still installs", async () => {
     const rawBegin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValue("held");
     const rawEnd = vi.fn(async () => {});
-    const raw = { supportsV1: () => true, begin: rawBegin, end: rawEnd,
+    const raw = {
+      supportsV1: () => true,
+      begin: rawBegin,
+      end: rawEnd,
       supportsHeldRecoveryV1: () => true,
-      beginHeldRecoveryV1: vi.fn<NonNullable<PluginMaintenancePort["beginHeldRecoveryV1"]>>().mockResolvedValue("held") };
+      beginHeldRecoveryV1: vi
+        .fn<NonNullable<PluginMaintenancePort["beginHeldRecoveryV1"]>>()
+        .mockResolvedValue("held"),
+    };
     const fakeBinding = {
       capability: { assertQualifiedExecution: () => {}, evidenceDigest: "candidate" },
       expectedClosure: "candidate",
@@ -1863,8 +1931,20 @@ describe("native maintenance participant serialization", () => {
       const authority = await qualifiedDaemonExecutionAccess(chain);
       const participant = qualifiedMaintenanceParticipant(raw, authority);
       expect(participant.supportsV1()).toBe(false);
-      expect(participant.supportsHeldRecoveryV1?.({ generation: 1, transactionId: "restore", pluginId: "unit" })).toBe(false);
-      await expect(participant.beginHeldRecoveryV1!({ generation: 1, transactionId: "restore", pluginId: "unit" })).rejects.toThrow();
+      expect(
+        participant.supportsHeldRecoveryV1?.({
+          generation: 1,
+          transactionId: "restore",
+          pluginId: "unit",
+        }),
+      ).toBe(false);
+      await expect(
+        participant.beginHeldRecoveryV1!({
+          generation: 1,
+          transactionId: "restore",
+          pluginId: "unit",
+        }),
+      ).rejects.toThrow();
       expect(
         await participant.restoreBeforeStart!({ generation: 1, transactionId: "restore" }),
       ).toBe("unknown");

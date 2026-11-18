@@ -262,6 +262,30 @@ Use the beta path when you need to:
 - send a build to a user who is hitting a specific problem
 - iterate on `beta.1`, `beta.2`, `beta.3`, and so on before deciding to ship broadly
 
+## Qualified execution hosts
+
+Qualified execution hosts are separate from update permission. The Linux plugin-host
+producer builds a sealed SDK/client/protocol/zod bundle and a builtin-only role wrapper.
+`packages/server/scripts/build-qualified-host.mjs` takes explicit CI build IDs;
+`finalize-qualified-host.mjs` inventories the copied Node runtime and mapped native
+libraries and writes the manifest beside the distribution, outside its hashed files.
+The controller must qualify that final artifact before adding its canonical retained
+root and manifest digest to the real account home's protected
+`.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` qualifications array.
+The finalizer does not write authority. The first hermetic Linux retained-root adapter requires runtime and manifest paths to have root-owned,
+non-group/world-writable ancestry; the running account must be unprivileged. This narrow
+Linux profile supports no external helpers and rejects unexpected dependencies.
+
+Only the qualified role wrapper can produce the loaded namespace binding and private
+in-process capability. JSON observations, build IDs, an installed version or a new disk
+hash cannot create that capability. Preserve immutable retained roots for running
+processes; changing the visible install pointer cannot relabel a loaded host. Qualification
+revocation holds support without changing its original observed identity. Source/dev,
+macOS/Electron, supervisor/daemon/compiler roles and activity SDK revisions not present
+in the sealed bundle remain unsupported. A plugin-host receipt alone cannot authorize
+native maintenance or desktop activation. Root integrates the reviewed activity singleton,
+parent chain and private child IPC before lifting any existing hold.
+
 ## Staged rollout (stable channel)
 
 Stable desktop releases go out via a linear time-based rollout for automatic update checks: 0% admitted when the updater manifests appear, 100% admitted 36 hours later, linear ramp in between. Manual checks bypass the rollout so a user can install immediately when they click **Check**. Beta releases bypass the rollout entirely — beta users always receive updates immediately.

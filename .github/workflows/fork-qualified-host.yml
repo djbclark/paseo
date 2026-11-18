@@ -1,0 +1,33 @@
+name: Fork Qualified Host
+on:
+  push:
+    branches: [fork/qualified-execution-host]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: qualified-host-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+jobs:
+  sealed-linux-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: node scripts/npm-retry.mjs ci
+      - name: Build actual workspace SDK declarations and code
+        run: npm run build:server
+      - name: Typecheck server producer
+        run: npm run typecheck --workspace=@getpaseo/server
+      - name: Focused producer lint
+        run: npm run lint -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs
+      - name: Focused formatting
+        run: npm run format:check:files -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs .github/workflows/fork-qualified-host.yml
+      - name: Genuine protected-root A/B launches and closed dependency negatives
+        run: node --test packages/server/scripts/qualified-host.test.mjs

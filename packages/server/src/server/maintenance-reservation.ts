@@ -1,3 +1,4 @@
+import { assertHeldPluginOperationResult } from "./maintenance-operation.js";
 import type { HeldPluginOperationClaim, HeldPluginOperationScope, HeldPluginOperationDriver } from "./maintenance-operation.js";
 import {
   emptyMaintenanceParticipant,
@@ -197,7 +198,7 @@ export class MaintenanceReservation {
       const result = await driver(claim, scope);
       this.assertTransport(input);
       assertHeldPluginOperation(scope, claim);
-      if (!Number.isSafeInteger(result.nativeGeneration) || result.nativeGeneration < input.expectedGeneration || result.plugin.id !== input.pluginId) throw new Error("Invalid held plugin operation result");
+      assertHeldPluginOperationResult(claim, result);
       const authority = this.transportAuthority();
       if (!authority.qualified || !authority.daemonIncarnation) throw new Error("Maintenance owner unavailable");
       return { ...result, maintenance: { ...this.status(), authority }, serverId: authority.serverId, daemonIncarnation: authority.daemonIncarnation };

@@ -1,8 +1,9 @@
+import type { HeldPluginOperationClaim, HeldPluginOperationScope } from "../../maintenance-operation.js";
 import {
   qualifiedMaintenanceParticipant,
-  qualifiedParentExecutionAssertion,
+  qualifiedDaemonExecutionAccess,
   type PluginMaintenancePort,
-  type QualifiedParentExecution,
+  type QualifiedDaemonOwner,
 } from "../../maintenance-participant.js";
 import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import * as maintenanceFs from "node:fs";
@@ -11,7 +12,7 @@ import * as maintenanceOs from "node:os";
 import { verifyOfflineMaintenance } from "../../maintenance-offline.js";
 import { WorkspaceSetupRuntime } from "../../workspace-setup-runtime.js";
 import { AgentManager } from "../../agent/agent-manager.js";
-import { MaintenanceReservation, guardMaintenanceMethod } from "../../maintenance-reservation.js";
+import { MaintenanceReservation, guardMaintenanceMethod, assertHeldPluginOperation } from "../../maintenance-reservation.js";
 import {
   mkdtempSync as makeMaintenanceHome,
   readFileSync as readMaintenanceFile,
@@ -1434,6 +1435,37 @@ describe("native maintenance participant serialization", () => {
       f.close();
     }
   });
+  test("private held operation authenticates exact scope and blocks END until actual settlement", async () => {
+    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    let finish!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    let retained!: HeldPluginOperationScope;
+    const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "held-operation", operation: "replace", pluginId: "unit-plugin", path: "/retained/B", expectedPath: "/retained/A", expectedGeneration: 4, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+    try {
+      const held = await f.reservation.begin(1, claim.transactionId);
+      await expect(f.reservation.ownerPluginOperation(claim, "wrong", async () => {})).rejects.toThrow("ownership");
+      expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
+      const pending = f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
+        retained = scope;
+        assertHeldPluginOperation(scope, claim);
+        expect(() => assertHeldPluginOperation(scope, { ...claim, expectedGeneration: 5 })).toThrow();
+        expect(() => assertHeldPluginOperation(scope, { ...claim, path: "/candidate/substitute" })).toThrow();
+        expect(() => f.reservation.enter()).toThrow();
+        entered();
+        await f.reservation.runHeldOperation(scope, claim, () => gate);
+        // Actual plugin CAS may advance inside the operation; native authority keeps the original claim.
+        return { nativeGeneration: 6 };
+      });
+      await started;
+      await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("busy");
+      finish();
+      expect(await pending).toEqual({ nativeGeneration: 6 });
+      expect(() => assertHeldPluginOperation(retained, claim)).toThrow();
+      await f.reservation.end(1, held.ownerToken);
+    } finally { finish?.(); f.close(); }
+  });
   test("missing/fake parent capability is unsupported while raw restore barrier still installs", async () => {
     const rawBegin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValue("held");
     const rawEnd = vi.fn(async () => {});
@@ -1443,16 +1475,17 @@ describe("native maintenance participant serialization", () => {
       expectedClosure: "candidate",
       expectedIncarnation: "candidate",
     };
-    const fake: QualifiedParentExecution = {
-      supervisor: fakeBinding,
-      daemon: fakeBinding,
-      compiler: fakeBinding,
+    const fake: QualifiedDaemonOwner = {
+      binding: fakeBinding,
+      evidenceDigest: "candidate",
+      assertFresh: () => {},
+      refresh: async () => {},
     };
     for (const chain of [undefined, fake]) {
-      const assert = await qualifiedParentExecutionAssertion(chain);
-      const participant = qualifiedMaintenanceParticipant(raw, assert);
+      const authority = await qualifiedDaemonExecutionAccess(chain);
+      const participant = qualifiedMaintenanceParticipant(raw, authority);
       expect(participant.supportsV1()).toBe(false);
-      expect(await participant.begin({ generation: 1, transactionId: "restore" })).toBe("unknown");
+      expect(await participant.restoreBeforeStart!({ generation: 1, transactionId: "restore" })).toBe("unknown");
       await expect(participant.end({ generation: 1, transactionId: "restore" })).rejects.toThrow();
     }
     expect(rawBegin).toHaveBeenCalledTimes(2);

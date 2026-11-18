@@ -1,3 +1,4 @@
+import type { HeldPluginOperationClaim, HeldPluginOperationScope } from "./maintenance-operation.js";
 /** Private in-process protocol. No bearer token or candidate approval crosses this port. */
 export interface MaintenanceIdentity {
   generation: number;
@@ -8,11 +9,13 @@ export interface PluginMaintenancePort {
   begin(identity: MaintenanceIdentity): Promise<"held" | "known-busy" | "unknown">;
   /** Qualified release, or confirmed rollback of every unpublished provisional barrier. */
   end(identity: MaintenanceIdentity): Promise<void>;
+  restoreBeforeStart?(identity: MaintenanceIdentity): Promise<"held" | "known-busy" | "unknown">;
 }
 
 export interface NativePluginAdmission {
   enterWork(): () => void;
   holdForUnknownWork(): void;
+  runHeldOperation<T>(scope: HeldPluginOperationScope, expected: HeldPluginOperationClaim, operation: () => Promise<T>): Promise<T>;
   runQualifiedInitialization<T>(operation: () => Promise<T>): Promise<T>;
 }
 
@@ -51,78 +54,74 @@ export interface QualifiedExecutionBinding {
   readonly expectedClosure: unknown;
   readonly expectedIncarnation: unknown;
 }
-export interface QualifiedParentExecution {
-  readonly supervisor: QualifiedExecutionBinding;
-  readonly daemon: QualifiedExecutionBinding;
-  readonly compiler: QualifiedExecutionBinding;
+export interface QualifiedDaemonOwner {
+  readonly binding: QualifiedExecutionBinding;
+  readonly evidenceDigest: string;
+  assertFresh(): void;
+  refresh(): Promise<void>;
+}
+export interface QualifiedDaemonAccess {
+  assertQualified(): void;
+  refresh(): Promise<void>;
+  incarnation(): string;
 }
 
-/** Fixed producer namespace only: no JSON/env/path/test flag can construct authority. */
-export async function qualifiedParentExecutionAssertion(
-  chain: QualifiedParentExecution | undefined,
-): Promise<() => void> {
-  let isBinding: ((binding: unknown, role: string) => boolean) | undefined;
-  let assertChain: ((chain: QualifiedParentExecution) => void) | undefined;
-  if (chain) {
-    try {
-      const producerModule = "./execution/qualified-host.js";
-      const producer: Record<string, unknown> = await import(producerModule);
-      if (typeof producer.isQualifiedExecutionBinding === "function")
-        isBinding = producer.isQualifiedExecutionBinding as typeof isBinding;
-      if (typeof producer.assertQualifiedParentExecutionChain === "function")
-        assertChain = producer.assertQualifiedParentExecutionChain as typeof assertChain;
-    } catch {
-      /* Absent producer is unsupported, never a disk/JSON fallback. */
-    }
-  }
+/** Fixed producer namespace only. No config, JSON or caller callback can grant. */
+export async function qualifiedDaemonExecutionAccess(owner: QualifiedDaemonOwner | undefined): Promise<QualifiedDaemonAccess> {
+  const producerModule = "./execution/qualified-host.js";
+  let isOwner: ((value: unknown) => boolean) | undefined;
+  let isBinding: ((value: unknown, role: string) => boolean) | undefined;
+  try {
+    const producer: Record<string, unknown> = await import(producerModule);
+    if (typeof producer.isQualifiedDaemonOwner === "function") isOwner = producer.isQualifiedDaemonOwner as typeof isOwner;
+    if (typeof producer.isQualifiedExecutionBinding === "function") isBinding = producer.isQualifiedExecutionBinding as typeof isBinding;
+  } catch { /* Missing genuine enclosing daemon producer remains unsupported. */ }
   const assertQualified = () => {
-    // Producer-private role/incarnation/parent-link bindings reject a real child
-    // capability relabeled as a parent role, as well as fake duck callbacks.
-    if (!chain || !assertChain || !isBinding)
-      throw new Error("Qualified parent execution unavailable");
-    for (const role of ["supervisor", "daemon", "compiler"] as const) {
-      if (isBinding(chain[role], role) !== true) throw new Error("Unqualified parent role");
-    }
-    const chainResult: unknown = assertChain(chain);
-    if (chainResult !== undefined) throw new Error("Invalid qualified parent assertion");
-    for (const binding of [chain.supervisor, chain.daemon, chain.compiler]) {
-      const result: unknown = binding.capability.assertQualifiedExecution(
-        binding.expectedClosure,
-        binding.expectedIncarnation,
-      );
-      if (result !== undefined) throw new Error("Invalid qualified execution assertion");
-    }
+    if (!owner || !isOwner || !isBinding || isOwner(owner) !== true || isBinding(owner.binding, "daemon") !== true) throw new Error("Qualified enclosing daemon unavailable");
+    owner.assertFresh();
+    const binding = owner.binding;
+    binding.capability.assertQualifiedExecution(binding.expectedClosure, binding.expectedIncarnation);
+    if (typeof binding.expectedIncarnation !== "string" || !binding.expectedIncarnation) throw new Error("Invalid enclosing daemon incarnation");
   };
-  return assertQualified;
+  return {
+    assertQualified,
+    async refresh() {
+      assertQualified();
+      await owner!.refresh();
+      assertQualified();
+    },
+    incarnation() { assertQualified(); return owner!.binding.expectedIncarnation as string; },
+  };
 }
 
 export function qualifiedMaintenanceParticipant(
   participant: PluginMaintenancePort,
-  assertQualified: () => void,
+  authority: QualifiedDaemonAccess,
 ): PluginMaintenancePort {
   return {
     supportsV1() {
       try {
-        assertQualified();
+        authority.assertQualified();
         return participant.supportsV1() === true;
       } catch {
         return false;
       }
     },
     async begin(identity) {
-      // Restore must close the real parent barrier before startup even if complete
-      // executing-role qualification is not yet available. Never END to gain receipts.
+      await authority.refresh();
       const result = await participant.begin(identity);
-      try {
-        assertQualified();
-        return result;
-      } catch {
-        return "unknown";
-      }
+      authority.assertQualified();
+      return result;
+    },
+    async restoreBeforeStart(identity) {
+      const result = await participant.begin(identity);
+      try { authority.assertQualified(); return result; } catch { return "unknown"; }
     },
     async end(identity) {
-      assertQualified();
+      await authority.refresh();
+      authority.assertQualified();
       await participant.end(identity);
+      authority.assertQualified();
     },
   };
 }

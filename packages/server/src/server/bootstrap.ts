@@ -1,10 +1,10 @@
 import {
   pluginMaintenancePort,
   qualifiedMaintenanceParticipant,
-  qualifiedParentExecutionAssertion,
+  qualifiedDaemonExecutionAccess,
   unsupportedMaintenanceParticipant,
   type NativePluginAdmission,
-  type QualifiedParentExecution,
+  type QualifiedDaemonOwner,
 } from "./maintenance-participant.js";
 import { MaintenanceReservation, guardMaintenanceMethod } from "./maintenance-reservation.js";
 import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
@@ -519,7 +519,7 @@ export interface PaseoDaemon {
 
 export interface PaseoDaemonDependencies {
   /** Trusted qualified role-wrapper injection only; never loaded from daemon config or JSON. */
-  qualifiedExecution?: QualifiedParentExecution;
+  qualifiedDaemonOwner?: QualifiedDaemonOwner;
   builtinPlugins?: BuiltinPluginLoader;
   hubRelationshipRemote?: HubRelationshipRemote;
   hubRelationshipClock?: HubRelationshipClock;
@@ -717,15 +717,14 @@ async function createPaseoDaemonInExecutionContext(
     });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
-  const assertQualifiedParent = await qualifiedParentExecutionAssertion(
-    dependencies.qualifiedExecution,
-  );
+  const qualifiedDaemon = await qualifiedDaemonExecutionAccess(dependencies.qualifiedDaemonOwner);
   let pluginBootstrapWindow = false;
   const nativeMaintenance: NativePluginAdmission = {
     enterWork: () => maintenance.enter(),
+    runHeldOperation: (scope, expected, operation) => maintenance.runHeldOperation(scope, expected, operation),
     holdForUnknownWork: () => maintenance.holdForUnknownWork(),
     async runQualifiedInitialization(operation) {
-      assertQualifiedParent();
+      qualifiedDaemon.assertQualified();
       if (pluginBootstrapWindow) return maintenance.runQualifiedInitialization(operation);
       // A normal reload is a new admission, never a bootstrap/recovery bypass.
       const release = maintenance.enter();
@@ -738,8 +737,10 @@ async function createPaseoDaemonInExecutionContext(
   };
   const pluginDependencies: NonNullable<ConstructorParameters<typeof PluginService>[3]> & {
     nativeMaintenance: NativePluginAdmission;
+    qualifiedDaemonOwner?: QualifiedDaemonOwner;
   } = {
     nativeMaintenance,
+    qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
     activationPolicy: new ManagedPluginActivationPolicy(
       process.env.PASEO_MANAGED_PLUGIN_POLICY,
       path.join(config.paseoHome, "plugin-promotions"),
@@ -765,7 +766,7 @@ async function createPaseoDaemonInExecutionContext(
   maintenance.bindParticipant(
     qualifiedMaintenanceParticipant(
       rawPluginMaintenance ?? unsupportedMaintenanceParticipant,
-      assertQualifiedParent,
+      qualifiedDaemon,
     ),
   );
 

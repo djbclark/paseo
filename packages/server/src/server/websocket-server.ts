@@ -532,6 +532,11 @@ const OWNER_SESSION_ADMISSION: SessionAdmission = {
 };
 
 export class MissingDaemonVersionError extends Error {
+  private installCreationAdmission(): void {
+    const reservation = this.agentManager.maintenanceReservation;
+    if (reservation) guardMaintenanceMethod(this.creationService, "create", reservation);
+  }
+
   constructor() {
     super("VoiceAssistantWebSocketServer requires a non-empty daemonVersion.");
     this.name = "MissingDaemonVersionError";
@@ -760,9 +765,7 @@ export class VoiceAssistantWebSocketServer {
       (snapshot) => this.validateCompletedCreation(snapshot),
       join(paseoHome, "agent-requests"),
     );
-    if (agentManager.maintenanceReservation) {
-      guardMaintenanceMethod(this.creationService, "create", agentManager.maintenanceReservation);
-    }
+    this.installCreationAdmission();
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;

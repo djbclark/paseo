@@ -3293,7 +3293,19 @@ export class Session {
     }
   }
 
+  private dispatchMaintenanceMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "daemon.maintenance.begin.request":
+      case "daemon.maintenance.status.request":
+      case "daemon.maintenance.end.request":
+        return this.handleMaintenanceRequest(msg);
+      default: return undefined;
+    }
+  }
+
   private dispatchAgentConfigMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    const maintenance = this.dispatchMaintenanceMessage(msg);
+    if (maintenance) return maintenance;
     switch (msg.type) {
       case "set_agent_mode_request":
         return this.agentConfigSession.handleSetAgentModeRequest(msg);
@@ -3314,10 +3326,7 @@ export class Session {
           },
         });
         return undefined;
-      case "daemon.maintenance.begin.request":
-      case "daemon.maintenance.status.request":
-      case "daemon.maintenance.end.request":
-        return this.handleMaintenanceRequest(msg);
+
       case "daemon.get_status.request":
         return this.daemonSession.handleGetStatusRequest(msg);
       case "daemon.get_pairing_offer.request":

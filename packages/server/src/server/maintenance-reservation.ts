@@ -138,8 +138,8 @@ export class MaintenanceReservation {
   private storage<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.storageTail.then(operation);
     this.storageTail = result.then(
-      () => {},
-      () => {},
+      () => undefined,
+      () => undefined,
     );
     return result;
   }

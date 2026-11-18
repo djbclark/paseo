@@ -53,18 +53,10 @@ export function daemonMaintenanceCommand(): Command {
         }
         const client = await connectToDaemon({ target: options.daemonTarget });
         try {
-          const payload =
-            operation === "begin"
-              ? await client.maintenanceBegin({
-                  generation: generation(String(options.generation ?? "")),
-                  transactionId: String(options.transactionId ?? ""),
-                })
-              : operation === "end"
-                ? await client.maintenanceEnd({
-                    generation: generation(String(options.generation ?? "")),
-                    ownerToken: token,
-                  })
-                : await client.maintenanceStatus();
+          let payload;
+          if (operation === "begin") payload = await client.maintenanceBegin({ generation: generation(String(options.generation ?? "")), transactionId: String(options.transactionId ?? "") });
+          else if (operation === "end") payload = await client.maintenanceEnd({ generation: generation(String(options.generation ?? "")), ownerToken: token });
+          else payload = await client.maintenanceStatus();
           if (payload.error || !payload.result) throw new Error("Maintenance request refused");
           return { type: "single" as const, data: payload.result, schema };
         } finally {

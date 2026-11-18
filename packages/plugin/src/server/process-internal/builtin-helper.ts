@@ -1,4 +1,5 @@
 import { execFile, type ChildProcess } from "node:child_process";
+import { builtinExecCallback, collectBuiltinExecFile } from "./builtin-exec-collector.js";
 import { promisify } from "node:util";
 import { acquirePluginHelper, type PluginHelperOperation } from "./activity.js";
 
@@ -41,10 +42,13 @@ const promisifiedExecFile = (...args: unknown[]) => {
 /** Fixed builtin evaluator facade only; public directory plugin bindings stay unchanged. */
 export const execQualifiedBuiltinFile = new Proxy(nativeExecFile, {
   apply(target, thisArgument, args: unknown[]): ChildProcess {
-    const helper = acquirePluginHelper(describeExecFile(args));
+    const operation = describeExecFile(args);
+    const helper = acquirePluginHelper(operation);
     let child: ChildProcess | undefined;
     try {
-      const spawned: ChildProcess = Reflect.apply(target, thisArgument, args);
+      const spawned: ChildProcess = helper.builtinExecFile
+        ? collectBuiltinExecFile(helper.builtinExecFile, operation, builtinExecCallback(args))
+        : Reflect.apply(target, thisArgument, args);
       child = spawned;
       spawned.once("close", helper.release);
       spawned.once("error", helper.failed);

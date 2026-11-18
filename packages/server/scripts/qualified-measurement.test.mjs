@@ -96,3 +96,53 @@ test("descriptive builtin data and wrong role cannot mint an original instance",
     producer.createQualifiedBuiltinInstance(fakeOwner, "worktree-include"),
   );
 });
+
+test("measurement explicitly requests V2 without adding selectors or coercing V1", () => {
+  assert.deepEqual(
+    parseQualifiedMeasurementRequest({
+      type: "qualified.measurement.request",
+      schemaVersion: 2,
+      nonce: "abcdefghijklmnop",
+    }),
+    { type: "qualified.measurement.request", schemaVersion: 2, nonce: "abcdefghijklmnop" },
+  );
+  assert.equal(
+    parseQualifiedMeasurementRequest({
+      type: "qualified.measurement.request",
+      schemaVersion: 3,
+      nonce: "abcdefghijklmnop",
+    }),
+    null,
+  );
+});
+
+test("finite ELF/cache parser derives actual Linux runtime inputs and rejects malformed metadata", async (t) => {
+  if (process.platform !== "linux") return t.skip("Linux ELF profile only");
+  const { readFile } = await import("node:fs/promises");
+  const { describeElf, describeLoaderCache } =
+    await import("../dist/server/server/execution/elf-format.js");
+  const bytes = await readFile(process.execPath);
+  const elf = describeElf(bytes);
+  assert.equal(elf.machine, process.arch === "x64" ? 62 : 183);
+  assert.ok(elf.interpreter?.startsWith("/"));
+  assert.ok(elf.needed.length > 0);
+  for (const malformed of [Buffer.alloc(0), bytes.subarray(0, 60), Buffer.from(bytes)]) {
+    if (malformed.length === bytes.length) malformed[5] = 2;
+    assert.throws(() => describeElf(malformed));
+  }
+  const changed = Buffer.from(bytes);
+  const ph = Number(changed.readBigUInt64LE(32));
+  for (let i = 0; i < changed.readUInt16LE(56); i++) {
+    const row = ph + i * changed.readUInt16LE(54);
+    if (changed.readUInt32LE(row) === 2) {
+      changed.writeBigInt64LE(0x6ffffefcn, Number(changed.readBigUInt64LE(row + 8)));
+      break;
+    }
+  }
+  assert.throws(() => describeElf(changed));
+  const cache = await readFile("/etc/ld.so.cache");
+  const entries = describeLoaderCache(cache, elf.machine);
+  assert.ok(entries.length > 0);
+  assert.ok(entries.every((row) => row.path.startsWith("/")));
+  assert.throws(() => describeLoaderCache(cache.subarray(0, 48), elf.machine));
+});

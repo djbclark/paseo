@@ -3,7 +3,7 @@ const MAX_JSON_BYTES = 16777216;
 const Request = z
   .object({
     type: z.literal("qualified.measurement.request"),
-    schemaVersion: z.literal(1),
+    schemaVersion: z.union([z.literal(1), z.literal(2)]),
     nonce: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
   })
   .strict();

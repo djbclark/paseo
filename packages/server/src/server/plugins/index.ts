@@ -513,6 +513,7 @@ export class PluginService {
     if (this.starting || this.qualifiedMutations || this.pendingOperations.size)
       return uncertain("busy");
     if (!this.runtime.observeQualifiedExecutions) return uncertain("unqualified-host");
+    if (this.builtinPluginIds.size) return uncertain("incomplete");
     try {
       await owner.refresh();
       const beforeEpoch = this.getQualifiedObservationEpoch(owner);
@@ -1426,12 +1427,10 @@ export class PluginService {
   }
 
   private async startBuiltinDuringBootstrap(plugin: BuiltinPlugin): Promise<void> {
-    const ticket = await this.dependencies.activationPolicy?.authorize(plugin.id, plugin.directory);
-    if (!ticket?.authorization.passiveProfile) return this.runtime.startBuiltinPlugin?.(plugin);
     const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!owner || !isQualifiedDaemonOwner(owner)) return this.runtime.startBuiltinPlugin?.(plugin);
     const native = this.dependencies.nativeMaintenance;
-    if (!owner || !isQualifiedDaemonOwner(owner) || !native)
-      throw new Error("Qualified builtin initialization unavailable");
+    if (!native) throw new Error("Qualified builtin initialization unavailable");
     return runQualifiedPluginInitialization(
       owner,
       native,

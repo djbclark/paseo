@@ -236,16 +236,16 @@ describe("maintenance confirmed failed-held serialization (wire unit)", () => {
   };
   test("only gated coherent alternative yields completed-held JSON, with no token", () => {
     const payload = { requestId: "operation", result: null, error: null, knownFailedHeld: known };
-    const result = maintenancePluginOutput(payload, true);
-    expect(result).toEqual(known);
-    if (!("outcome" in result)) throw new Error("Expected confirmed held alternative");
+    const serializedOutcome = maintenancePluginOutput(payload, true);
+    expect(serializedOutcome).toEqual(known);
+    if (!("outcome" in serializedOutcome)) throw new Error("Expected confirmed held alternative");
     expect(
       render(
-        { type: "single", data: result, schema: { columns: [], idField: () => "held" } },
+        { type: "single", data: serializedOutcome, schema: { columns: [], idField: () => "held" } },
         { format: "json" },
       ),
     ).toBe(JSON.stringify(known, null, 2));
-    expect(JSON.stringify(result)).not.toContain("ownerToken");
+    expect(JSON.stringify(serializedOutcome)).not.toContain("ownerToken");
     expect(() =>
       maintenancePluginOutput(
         {

@@ -210,3 +210,53 @@ it("restores the original admitted context and permits its necessary late helper
   await expect.poll(() => owner.state()).toBe("held");
   owner.end(identity);
 });
+
+it("retirement closes new roots and waits for actual admitted helper closure", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "plugin-retirement-"));
+  roots.push(home);
+  const release = path.join(home, "release");
+  const begun = path.join(home, "begun");
+  const owner = new PluginActivityOwner();
+  const root = owner.acquire();
+  const child = root.run(() =>
+    spawnProcess(
+      process.execPath,
+      [
+        "-e",
+        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(begun)},'yes');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(timer)},10)`,
+      ],
+      { stdio: "pipe" },
+    ),
+  );
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  await expect.poll(() => signal(begun)).toBe("yes");
+  const cleanup = owner.retirementCleanup();
+  cleanup.release();
+  root.release();
+  let drained = false;
+  const retirement = owner.waitForRetirement().then(() => {
+    drained = true;
+    return undefined;
+  });
+  expect(() => owner.acquire()).toThrow("admission is closed");
+  expect(drained).toBe(false);
+  expect(owner.state()).toBe("known-busy");
+  try {
+    await writeFile(release, "finish");
+    await closed;
+    await retirement;
+    expect(drained).toBe(true);
+  } finally {
+    await writeFile(release, "finish");
+    await closed;
+  }
+});
+it("uncertain cleanup never becomes a successful retirement", async () => {
+  const owner = new PluginActivityOwner();
+  const cleanup = owner.retirementCleanup();
+  const retirement = owner.waitForRetirement();
+  owner.markUnknown();
+  cleanup.release();
+  await expect(retirement).rejects.toThrow("uncertain");
+  await expect(owner.waitForRetirement()).rejects.toThrow("uncertain");
+});

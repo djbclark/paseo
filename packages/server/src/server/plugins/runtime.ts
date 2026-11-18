@@ -1,3 +1,6 @@
+import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
+import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
+import type { ManagedPluginCohortExecution } from "@getpaseo/protocol/messages";
 import { PluginExecutionOwner } from "./execution-owner.js";
 import { isPluginExecutionRoot } from "./execution-roots.js";
 import {
@@ -11,6 +14,7 @@ import {
   ManagedPluginActivationPolicy,
   type ActivationOperation,
   type ActivationTicket,
+  type PassivePluginProfile,
 } from "./activation-policy.js";
 import type { PluginLoadedReceipt } from "@getpaseo/protocol/messages";
 import { validateWorktreePath } from "../../utils/worktree-path.js";
@@ -113,6 +117,8 @@ interface ChildTermination {
 }
 
 interface LoadedPlugin {
+  qualifiedChild?: QualifiedOwnedChild;
+  activationTicket?: ActivationTicket;
   executionOwner?: PluginExecutionOwner;
   termination?: ChildTermination;
   loadedReceipt?: PluginLoadedReceipt;
@@ -175,6 +181,7 @@ interface RemoteProviderConnection {
 }
 
 interface PluginRuntimeDependencies {
+  qualifiedDaemonOwner?: QualifiedDaemonOwner;
   nativeMaintenance?: NativePluginAdmission;
   activationPolicy?: ManagedPluginActivationPolicy;
   settingsDirectory?: string;
@@ -541,6 +548,65 @@ export class PluginRuntime {
       bundles.serverBundle ?? undefined,
       ticket,
     );
+  }
+
+  async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const policy = this.dependencies.activationPolicy;
+    if (!owner || !isQualifiedDaemonOwner(owner) || !policy)
+      throw new Error("Qualified runtime authority unavailable");
+    const epoch = this.observationEpoch;
+    await owner.refresh();
+    const result = new Map<string, ManagedPluginCohortExecution>();
+    for (const [id, loaded] of this.plugins)
+      result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    await owner.refresh();
+    if (epoch !== this.observationEpoch) throw new Error("Plugin cohort changed");
+    return result;
+  }
+
+  private async observeQualifiedExecution(
+    id: string,
+    loaded: LoadedPlugin,
+    owner: QualifiedDaemonOwner,
+    policy: ManagedPluginActivationPolicy,
+  ): Promise<ManagedPluginCohortExecution> {
+    const child = loaded.qualifiedChild;
+    const ticket = loaded.activationTicket;
+    const receipt = loaded.loadedReceipt;
+    const profile = ticket?.authorization.passiveProfile;
+    if (
+      !child ||
+      !ticket ||
+      !receipt ||
+      !profile ||
+      loaded.child !== child.child ||
+      loaded.termination?.closed ||
+      loaded.executionOwner?.busy()
+    )
+      throw new Error("Unqualified or busy plugin in executing cohort");
+    owner.assertOwnedExecutionHandle(child.child, "plugin-child", child.incarnation);
+    child.assertFresh();
+    if (receipt.processStartToken !== child.incarnation)
+      throw new Error("Loaded execution identity mismatch");
+    const observation = await child.challenge();
+    if (observation.incarnation !== receipt.processStartToken || observation.pid !== receipt.pid)
+      throw new Error("Fresh child observation mismatch");
+    assertProfileClosure(profile, child);
+    const before = await policy.observeLoadedQualification(id, receipt, ticket);
+    const enclosingIncarnation = owner.binding.expectedIncarnation;
+    if (typeof enclosingIncarnation !== "string" || !enclosingIncarnation)
+      throw new Error("Missing enclosing execution incarnation");
+    owner.assertQualification(child.closure, enclosingIncarnation);
+    const after = await policy.observeLoadedQualification(id, receipt, ticket);
+    if (before !== after || this.plugins.get(id) !== loaded || loaded.termination?.closed)
+      throw new Error("Plugin execution changed during observation");
+    return {
+      contract: "native-passive-contract-1",
+      incarnation: child.incarnation,
+      distributionBuildId: observation.distributionBuildId,
+      closure: { ...child.closure },
+    };
   }
 
   getLoadedReceipt(pluginId: string): PluginLoadedReceipt | undefined {
@@ -1173,6 +1239,9 @@ export class PluginRuntime {
       () => this.maintenanceIdentity !== null || this.maintenanceUncertain,
       () => {
         if (this.dependencies.nativeMaintenance) this.maintenanceUncertain = true;
+      },
+      () => {
+        this.observationEpoch++;
       },
     );
     childExecutionOwners.set(child, executionOwner);
@@ -1823,4 +1892,13 @@ function readConnectionId(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const connectionId = Reflect.get(value, "connectionId");
   return typeof connectionId === "string" ? connectionId : null;
+}
+
+function assertProfileClosure(profile: PassivePluginProfile, child: QualifiedOwnedChild): void {
+  if (
+    profile.runtimeClosureSha256 !== child.closure.runtimeClosureSha256 ||
+    profile.helperClosureSha256 !== child.closure.helperClosureSha256 ||
+    profile.qualificationSha256 !== child.closure.qualificationSha256
+  )
+    throw new Error("Protected plugin profile differs from actual executing closure");
 }

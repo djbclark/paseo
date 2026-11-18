@@ -527,3 +527,63 @@ describe("native BEGIN refusal metadata and idle counter compatibility", () => {
     expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, errorCode: "BUSY" } }).success).toBe(false);
   });
 });
+
+it("parses strict complete cohort observations without granting authority from unknown fields", () => {
+  const request = { type: "plugins.managed.cohort.status.request", requestId: "cohort" };
+  expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+  const closure = {
+    runtimeClosureSha256: "a".repeat(64),
+    helperClosureSha256: "b".repeat(64),
+    qualificationSha256: "c".repeat(64),
+  };
+  const status = {
+    version: 1,
+    consistency: "coherent",
+    observationEpoch: 3,
+    enclosing: {
+      serverId: "server",
+      incarnation: "daemon-birth",
+      distributionBuildId: "build",
+      closure,
+    },
+    entries: [
+      {
+        pluginId: "retained",
+        registration: null,
+        enabled: null,
+        journal: { version: 1, generation: 9, phase: "held" },
+        loaded: null,
+        execution: null,
+      },
+    ],
+  };
+  const response = {
+    type: "plugins.managed.cohort.status.response",
+    payload: { requestId: "cohort", status },
+  };
+  expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+  expect(
+    SessionOutboundMessageSchema.safeParse({
+      ...response,
+      payload: { requestId: "cohort", status: { ...status, qualified: true } },
+    }).success,
+  ).toBe(false);
+  expect(
+    SessionOutboundMessageSchema.safeParse({
+      ...response,
+      payload: {
+        requestId: "cohort",
+        status: { ...status, enclosing: { ...status.enclosing, ownerToken: "forbidden" } },
+      },
+    }).success,
+  ).toBe(false);
+  expect(
+    SessionOutboundMessageSchema.parse({
+      ...response,
+      payload: {
+        requestId: "cohort",
+        status: { version: 1, consistency: "uncertain", reason: "incomplete" },
+      },
+    }),
+  ).toMatchObject({ payload: { status: { consistency: "uncertain" } } });
+});

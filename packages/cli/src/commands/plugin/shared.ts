@@ -6,6 +6,7 @@ import { connectToDaemon } from "../../utils/client.js";
 type PluginFeature =
   | "managedPluginPromotions"
   | "managedPluginStatus"
+  | "managedPluginCohortStatus"
   | "pluginManagement"
   | "pluginLogs"
   | "pluginSourceUpdates"
@@ -99,6 +100,18 @@ export async function withManagedPluginStatusClient<T>(
     target,
     "managedPluginStatus",
     "Update the host to inspect coherent managed plugin status.",
+    run,
+  );
+}
+
+export async function withManagedPluginCohortClient<T>(
+  target: DaemonTarget,
+  run: (client: DaemonClient) => Promise<T>,
+): Promise<T> {
+  return withPluginClient(
+    target,
+    "managedPluginCohortStatus",
+    "Update the host to inspect the complete managed plugin cohort.",
     run,
   );
 }

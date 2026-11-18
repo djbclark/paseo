@@ -7,6 +7,7 @@ function workspace(input: {
   title?: string;
   subtitle?: string;
   changeRequestNumber?: number | null;
+  agentIds?: string[];
   activityAt?: Date | null;
 }): CommandCenterWorkspaceResult {
   return {
@@ -18,6 +19,7 @@ function workspace(input: {
     subtitle: input.subtitle ?? "",
     project: { viewKey: "project", name: "project", iconDataUri: null },
     changeRequestNumber: input.changeRequestNumber ?? null,
+    agentIds: input.agentIds ?? [],
     activityAt: input.activityAt ?? null,
     run: () => undefined,
   };
@@ -81,6 +83,33 @@ describe("filterAndRankWorkspaces", () => {
   it("ranks an exact change request above an ordinary text match", () => {
     const text = workspace({ id: "a-text", title: "Migration 42" });
     expect(ids([text, subject], "42")).toEqual(["payments", "a-text"]);
+  });
+
+  it("matches the beginning of an agent ID, case-insensitively", () => {
+    const withAgent = workspace({
+      id: "agents",
+      title: "Unrelated title",
+      agentIds: ["54b15a51-1111-4222-8333-444455556666"],
+    });
+    const other = workspace({ id: "other", agentIds: ["99999999-1111-4222-8333-444455556666"] });
+    for (const query of [
+      "54b1",
+      "54B15A51",
+      " 54b15a51-1111 ",
+      "54b15a51-1111-4222-8333-444455556666",
+    ]) {
+      expect(ids([other, withAgent], query)).toEqual(["agents"]);
+    }
+  });
+
+  it("does not match mid-ID text or prefixes shorter than four characters", () => {
+    const withAgent = workspace({
+      id: "agents",
+      title: "Unrelated title",
+      agentIds: ["54b15a51-1111-4222-8333-444455556666"],
+    });
+    expect(ids([withAgent], "15a5")).toEqual([]);
+    expect(ids([withAgent], "54b")).toEqual([]);
   });
 
   it("orders workspaces in the same match tier by recency", () => {

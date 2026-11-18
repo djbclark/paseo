@@ -24,10 +24,27 @@ function parseChangeRequestQuery(query: string): number | null {
   return Number.isSafeInteger(number) ? number : null;
 }
 
+/** Shortest hex run treated as an agent-ID prefix; shorter runs collide with ordinary words. */
+const MIN_AGENT_ID_PREFIX_LENGTH = 4;
+const AGENT_ID_PREFIX_QUERY = /^[0-9a-f-]+$/i;
+
+/**
+ * Whether the query is the beginning of one of the workspace's agent IDs (`54b15a51`, or a longer
+ * prefix up to the full UUID). Agent IDs are unique, so a hit identifies the workspace.
+ */
+function matchesAgentIdPrefix(workspace: CommandCenterWorkspaceResult, query: string): boolean {
+  const prefix = query.trim().toLowerCase();
+  if (prefix.length < MIN_AGENT_ID_PREFIX_LENGTH || !AGENT_ID_PREFIX_QUERY.test(prefix)) {
+    return false;
+  }
+  return workspace.agentIds.some((agentId) => agentId.toLowerCase().startsWith(prefix));
+}
+
 interface ScoredWorkspace {
   workspace: CommandCenterWorkspaceResult;
   score: CommandCenterScore | null;
   changeRequestHit: boolean;
+  agentIdHit: boolean;
 }
 
 function searchFields(workspace: CommandCenterWorkspaceResult) {
@@ -37,6 +54,9 @@ function searchFields(workspace: CommandCenterWorkspaceResult) {
 function compareScoredWorkspaces(left: ScoredWorkspace, right: ScoredWorkspace): number {
   if (left.changeRequestHit !== right.changeRequestHit) {
     return left.changeRequestHit ? -1 : 1;
+  }
+  if (left.agentIdHit !== right.agentIdHit) {
+    return left.agentIdHit ? -1 : 1;
   }
   if (left.score && right.score) {
     const scoreDelta = compareBuiltInScores(left.score, right.score);
@@ -57,7 +77,10 @@ export function filterAndRankWorkspaces(
     const score = scoreSearchFields(query, searchFields(workspace));
     const changeRequestHit =
       changeRequestNumber !== null && workspace.changeRequestNumber === changeRequestNumber;
-    if (score || changeRequestHit) matches.push({ workspace, score, changeRequestHit });
+    const agentIdHit = matchesAgentIdPrefix(workspace, query);
+    if (score || changeRequestHit || agentIdHit) {
+      matches.push({ workspace, score, changeRequestHit, agentIdHit });
+    }
   }
   matches.sort(compareScoredWorkspaces);
   return matches.map((match) => match.workspace);

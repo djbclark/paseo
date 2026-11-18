@@ -180,6 +180,14 @@ function useBuiltInRows(open: boolean): {
       nextRows.set(row.id, stable);
       return stable;
     };
+    const agentIdsByWorkspaceKey = new Map<string, string[]>();
+    for (const agent of agents) {
+      if (!agent.workspaceId) continue;
+      const key = `${agent.serverId}:${agent.workspaceId}`;
+      const ids = agentIdsByWorkspaceKey.get(key);
+      if (ids) ids.push(agent.id);
+      else agentIdsByWorkspaceKey.set(key, [agent.id]);
+    }
     const allWorkspaces: CommandCenterWorkspaceResult[] = [];
     for (const project of projects) {
       const workspaceProject = {
@@ -204,6 +212,7 @@ function useBuiltInRows(open: boolean): {
               workspaceId: workspace.id,
               project: workspaceProject,
               changeRequestNumber: workspace.changeRequestNumber,
+              agentIds: agentIdsByWorkspaceKey.get(`${host.serverId}:${workspace.id}`) ?? [],
               activityAt: workspace.statusEnteredAt,
               run: createWorkspaceResultAction(host.serverId, workspace.id),
             }),

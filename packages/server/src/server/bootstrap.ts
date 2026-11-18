@@ -261,7 +261,10 @@ import {
 } from "./hub/relationship-remote.js";
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
-import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./plugins/builtin/index.js";
+import {
+  BuiltinPluginLoader,
+  createQualifiedBuiltinPluginLoader,
+} from "./plugins/builtin/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;

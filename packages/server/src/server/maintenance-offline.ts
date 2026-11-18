@@ -117,7 +117,14 @@ export function parseMaintenanceRecord(value: unknown): MaintenanceRecord {
   if (
     Object.keys(record).some(
       (key) =>
-        !["schemaVersion", "generation", "transactionId", "tokenDigest", "uncertain", "recoveryOnly"].includes(key),
+        ![
+          "schemaVersion",
+          "generation",
+          "transactionId",
+          "tokenDigest",
+          "uncertain",
+          "recoveryOnly",
+        ].includes(key),
     ) ||
     record.schemaVersion !== 1 ||
     !Number.isSafeInteger(record.generation) ||

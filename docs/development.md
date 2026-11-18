@@ -788,7 +788,6 @@ can be cleared durably. The original native intent remains distinct from a fresh
 transaction and plugin CAS. No automatic baseline restart, new BEGIN, token journal, or unknown-latch
 reset is part of this path. A restart preserves the restriction and admission hold.
 
-
 Begin closes admission before observing work. It refuses in-flight operations, open terminals,
 and all live provider sessions (including idle sessions whose autonomous work cannot be proved
 quiet), discovery children, and remaining provider-process ledger entries. It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,

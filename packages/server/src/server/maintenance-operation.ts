@@ -81,17 +81,22 @@ export function assertHeldPluginOperationResult(
     throw new Error("Held plugin operation CAS mismatch");
 }
 
-
 /** Fixed bundled module only; absent committed private validator means unsupported. */
 export function supportsKnownFailedHeld(): boolean {
-  return "readKnownFailedHeld" in heldPluginOperation && typeof heldPluginOperation.readKnownFailedHeld === "function";
+  return (
+    "readKnownFailedHeld" in heldPluginOperation &&
+    typeof heldPluginOperation.readKnownFailedHeld === "function"
+  );
 }
 export function readPrivateKnownFailedHeld(
   result: unknown,
   scope: HeldPluginOperationScope,
   claim: HeldPluginOperationClaim,
 ): KnownFailedHeldObservation | undefined {
-  if (!("readKnownFailedHeld" in heldPluginOperation) || typeof heldPluginOperation.readKnownFailedHeld !== "function") {
+  if (
+    !("readKnownFailedHeld" in heldPluginOperation) ||
+    typeof heldPluginOperation.readKnownFailedHeld !== "function"
+  ) {
     if (result && typeof result === "object" && "outcome" in result)
       throw new Error("Known held outcome unsupported");
     return undefined;
@@ -99,12 +104,21 @@ export function readPrivateKnownFailedHeld(
   // The fixed plugin module owns the private provenance table. No caller callback is accepted.
   const observation = heldPluginOperation.readKnownFailedHeld(result, scope, claim);
   if (observation === undefined) return undefined;
-  if (!observation || observation.outcome !== "known_failed_held" ||
+  if (
+    !observation ||
+    observation.outcome !== "known_failed_held" ||
     !["compiler_error", "initialization_rejected"].includes(observation.reason) ||
-    observation.pluginId !== claim.pluginId || claim.operation === "verify" ||
-    !Number.isSafeInteger(observation.nativeGeneration) || observation.nativeGeneration < claim.expectedGeneration)
+    observation.pluginId !== claim.pluginId ||
+    claim.operation === "verify" ||
+    !Number.isSafeInteger(observation.nativeGeneration) ||
+    observation.nativeGeneration < claim.expectedGeneration
+  )
     throw new Error("Invalid known held outcome");
-  parseRecoveryOnly({ pluginId: observation.pluginId, nativeGeneration: observation.nativeGeneration,
-    baseline: observation.baseline, phase: "recover-required" });
+  parseRecoveryOnly({
+    pluginId: observation.pluginId,
+    nativeGeneration: observation.nativeGeneration,
+    baseline: observation.baseline,
+    phase: "recover-required",
+  });
   return observation;
 }

@@ -89,7 +89,11 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       external: externals,
       metafile: true,
       banner: { js: banner },
-      define: { __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId), ...define },
+      define: {
+        __PASEO_QUALIFIED_PLUGIN_ENTRY__: "true",
+        __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
+        ...define,
+      },
       plugins: [
         {
           name: "qualified-no-optional-native-accelerators",

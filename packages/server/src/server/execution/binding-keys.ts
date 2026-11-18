@@ -1,6 +1,7 @@
 export const QUALIFIED_BINDING_KEYS = Object.freeze(
   [
     "@getpaseo/plugin/internal/activity",
+    "@getpaseo/plugin/internal/builtin-helper",
     "@getpaseo/plugin",
     "@getpaseo/plugin/server",
     "@getpaseo/plugin/server/provider",

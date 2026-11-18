@@ -82,3 +82,17 @@ test("builtin profile rows require exact finite artifact identity without granti
   ])
     assert.equal(readBuiltinProfiles(value), null);
 });
+
+test("descriptive builtin data and wrong role cannot mint an original instance", async () => {
+  const producer = await import("../dist/server/server/execution/builtin-instance.js");
+  const fakeOwner = {
+    root: "/retained",
+    binding: { expectedIncarnation: "fake" },
+    assertFresh() {},
+    refresh: async () => {},
+  };
+  assert.throws(() => producer.assertQualifiedBuiltinInstance({}, fakeOwner, "worktree-include"));
+  await assert.rejects(() =>
+    producer.createQualifiedBuiltinInstance(fakeOwner, "worktree-include"),
+  );
+});

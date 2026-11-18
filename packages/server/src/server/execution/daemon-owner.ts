@@ -1,3 +1,4 @@
+import { refreshBuiltinInstances } from "./builtin-instance.js";
 import { qualifiedManagedEnvironment } from "./managed-policy-environment.js";
 import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
@@ -24,11 +25,21 @@ import type {
   QualifiedDaemonOwner,
   OwnedObservation,
   QualifiedDaemonObservation,
+  DaemonManifest,
 } from "./daemon-types.js";
+import type { QualifiedBuiltinProfile } from "./builtin-profile.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
 const owners = new WeakSet<object>();
 const bindings = new WeakSet<object>();
+const builtinContexts = new WeakMap<
+  object,
+  () => {
+    manifest: DaemonManifest;
+    profiles: QualifiedBuiltinProfile[] | null;
+    authorityIdentity: string;
+  }
+>();
 const observations = new WeakMap<object, () => QualifiedDaemonObservation>();
 let instance: Promise<QualifiedDaemonOwner> | null = null;
 let executingOwner: QualifiedDaemonOwner | null = null;
@@ -89,6 +100,8 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   const file = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
   const root = path.dirname(file);
   const initial = await verifyEnclosingProcess(root);
+  let builtinProfiles = initial.builtinProfiles;
+  let builtinAuthorityIdentity = initial.authorityIdentity;
   if (
     path.basename(file) !== "daemon.mjs" ||
     (await realpath(process.argv[1] ?? "")) !== path.join(root, "role.cjs")
@@ -164,7 +177,10 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         )
           return unsupported();
         for (const observe of observers.values()) await observe();
+        await refreshBuiltinInstances(owner);
         await assertEnclosingAuthorityUnchanged(current);
+        builtinProfiles = current.builtinProfiles;
+        builtinAuthorityIdentity = current.authorityIdentity;
         fresh = true;
       } catch (error) {
         failed = true;
@@ -624,6 +640,14 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       pluginHosts: hosts,
     };
   });
+  builtinContexts.set(owner, () => {
+    assertFresh();
+    return structuredClone({
+      manifest: initial.manifest,
+      profiles: builtinProfiles,
+      authorityIdentity: builtinAuthorityIdentity,
+    });
+  });
   owners.add(owner);
   bindings.add(binding);
   executingOwner = owner;
@@ -667,4 +691,16 @@ export function getQualifiedDaemonObservation(owner: unknown): QualifiedDaemonOb
   const observe = observations.get(owner);
   if (!observe) return unsupported();
   return structuredClone(observe());
+}
+
+/** Fixed producer input only. Descriptive rows cannot mint an execution owner. */
+export function readQualifiedBuiltinContext(owner: unknown): {
+  manifest: DaemonManifest;
+  profiles: QualifiedBuiltinProfile[] | null;
+  authorityIdentity: string;
+} {
+  if (!isQualifiedDaemonOwner(owner)) return unsupported();
+  const read = builtinContexts.get(owner);
+  if (!read) return unsupported();
+  return read();
 }

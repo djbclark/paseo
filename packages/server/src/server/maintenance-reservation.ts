@@ -77,6 +77,8 @@ export class MaintenanceReservation {
   private recovery = false;
   private pending = false;
   private inFlight = 0;
+  private activityRevision = 0;
+  private readinessRevision = 0;
   private readonly leases = new WeakMap<() => void, { active: boolean }>();
   private failed = false;
   private readonly path: string;
@@ -354,6 +356,7 @@ export class MaintenanceReservation {
     }
   }
   setReady(ready: boolean): void {
+    if (this.ready !== ready) this.readinessRevision++;
     this.ready = ready;
   }
 
@@ -364,6 +367,7 @@ export class MaintenanceReservation {
   }
 
   private lease(): () => void {
+    this.activityRevision++;
     this.inFlight++;
     const state = { active: true };
     const release = () => {
@@ -471,6 +475,35 @@ export class MaintenanceReservation {
     return true;
   }
 
+  private persistenceAuthority(
+    previous: RecordV1 | null,
+    next: RecordV1,
+    identity: MaintenanceIdentity,
+  ): (committed: boolean) => void {
+    const readinessRevision = this.readinessRevision;
+    const activityRevision = this.activityRevision;
+    return (committed) => {
+      this.assertNoUnknownWork();
+      if (!this.pending || !this.isReady()) throw new Error("Maintenance authority not ready");
+      // Check after the synchronous participant/producer assertions as well. No
+      // async preparation may replace the sampled owner or admit even completed cleanup.
+      this.assertNoUnknownWork();
+      if (
+        !this.ready ||
+        this.readinessRevision !== readinessRevision ||
+        this.inFlight ||
+        this.activityRevision !== activityRevision
+      )
+        throw new Error("Maintenance work or readiness changed during persistence");
+      if (
+        this.record !== (committed ? next : previous) ||
+        next.generation !== identity.generation ||
+        next.transactionId !== identity.transactionId
+      )
+        throw new Error("Maintenance persistence ownership changed");
+    };
+  }
+
   async begin(
     generation: number,
     transactionId: string,
@@ -503,15 +536,15 @@ export class MaintenanceReservation {
       if (knownBusy) throw new Error("Maintenance known busy");
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
-      await this.storage(() =>
-        this.persist({
-          schemaVersion: 1,
-          generation,
-          transactionId,
-          tokenDigest: digest(ownerToken),
-        }),
-      );
-      this.assertNoUnknownWork();
+      const next: RecordV1 = {
+        schemaVersion: 1,
+        generation,
+        transactionId,
+        tokenDigest: digest(ownerToken),
+      };
+      const validate = this.persistenceAuthority(this.record, next, identity);
+      await this.storage(() => this.persist(next, false, validate));
+      validate(true);
       this.recovery = false;
       this.pending = false;
       return { ...this.status(), ownerToken };
@@ -558,10 +591,12 @@ export class MaintenanceReservation {
       if (fresh !== "held" || !this.participant.supportsV1())
         throw new Error("Maintenance participant not safely held");
       this.assertNoUnknownWork();
-      await this.storage(() => this.persist({ ...record, tokenDigest: null }));
-      this.assertNoUnknownWork();
+      const next: RecordV1 = { ...record, tokenDigest: null };
+      const validate = this.persistenceAuthority(record, next, identity);
+      await this.storage(() => this.persist(next, false, validate));
+      validate(true);
       await this.participant.end(identity);
-      this.assertNoUnknownWork();
+      validate(true);
       this.recovery = false;
     } catch (error) {
       if (!knownBusy) {
@@ -662,7 +697,11 @@ export class MaintenanceReservation {
     }
   }
 
-  private persist(record: RecordV1, uncertain = false): Promise<void> {
+  private persist(
+    record: RecordV1,
+    uncertain = false,
+    validate?: (committed: boolean) => void,
+  ): Promise<void> {
     return this.writeAtomically(
       this.path,
       record,
@@ -670,6 +709,7 @@ export class MaintenanceReservation {
         this.record = record;
       },
       uncertain,
+      validate,
     );
   }
 
@@ -678,6 +718,7 @@ export class MaintenanceReservation {
     value: unknown,
     committed?: () => void,
     uncertain = false,
+    validate?: (committed: boolean) => void,
   ): Promise<void> {
     const temporary = `${path}.${randomBytes(12).toString("hex")}.tmp`;
     const revision = this.revision;
@@ -693,6 +734,7 @@ export class MaintenanceReservation {
       // between final revision/latch check, rename and committed-state update.
       if (revision !== this.revision || (!uncertain && this.failed))
         throw new Error("Maintenance activity became unknown before commit");
+      validate?.(false);
       renameSync(temporary, path);
       committed?.();
       directory = await open(this.home, "r");
@@ -700,6 +742,7 @@ export class MaintenanceReservation {
       await directory.close();
       directory = undefined;
       if (!uncertain) this.assertNoUnknownWork();
+      validate?.(true);
     } catch (error) {
       this.failed = true;
       this.recovery = true;

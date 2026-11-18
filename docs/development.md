@@ -789,7 +789,11 @@ For end, token/generation validation authorizes release and atomic rename of the
 record is the logical commit point; directory fsync establishes durability. A lost response is not
 the commit point. Startup waits for bounded asynchronous protected reads before exposing the owner.
 File preparation and directory durability are asynchronous; the final revision/latch check, rename
-and committed-state update do not yield. An unknown-work notification closes admission immediately;
+and committed-state update do not yield. BEGIN and END also recheck exact record ownership,
+readiness/support and zero work in that section and after durability. Cleanup remains admitted;
+cleanup or readiness changes invalidate a pending sample even if they finish before commit.
+A postcommit refusal preserves the actual renamed held/idle record and never cancels cleanup.
+An unknown-work notification closes admission immediately;
 a queued uncertainty write is durable only after its own commit. BEGIN and END drain relevant writes
 and recheck failure before success; END never releases participants before directory durability.
 After an I/O failure the current process stays closed, while restart reads the

@@ -4100,7 +4100,7 @@ export class AgentManager {
     }
 
     return {
-      text: chunks.toReversed().join(""),
+      text: [...chunks].reverse().join(""),
       startsAtBeginning,
     };
   }

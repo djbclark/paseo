@@ -1,3 +1,4 @@
+import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -166,8 +167,21 @@ function assertManifestIdentity(
     manifest.esbuild.path !== "runtime/esbuild"
   )
     return unsupported();
+  if (JSON.stringify(manifest.builtinPlugins) !== JSON.stringify(builtinPlugins))
+    return unsupported();
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return unsupported();
+}
+async function assertBuiltinInventory(root: string, names: string[]): Promise<void> {
+  const builtinDirectories = (
+    await readdir(path.join(root, "builtin-plugins"), { withFileTypes: true })
+  )
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  if (JSON.stringify(builtinDirectories) !== JSON.stringify(builtinPlugins)) return unsupported();
+  for (const id of builtinPlugins)
+    if (!names.includes(`builtin-plugins/${id}/paseo-plugin.json`)) return unsupported();
 }
 export async function verifyEnclosingDistribution(root: string) {
   if (
@@ -199,6 +213,7 @@ export async function verifyEnclosingDistribution(root: string) {
     }
   }
   await visit(root);
+  await assertBuiltinInventory(root, names);
   if (
     JSON.stringify(names.sort()) !== JSON.stringify(manifest.files.map((file) => file.path).sort())
   )

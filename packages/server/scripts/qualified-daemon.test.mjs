@@ -5,6 +5,7 @@ import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { userInfo } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 
 // Disposable Linux CI only. This fixture checks the real v2 acquisition gate;
 // native/plugin/controller A-B-A acceptance is owned by the coupled fixture.
@@ -75,6 +76,25 @@ test(
     await mkdir(path.dirname(policyPath), { recursive: true, mode: 0o700 });
     const raw = await readFile(`${staged}.manifest.json`);
     const manifest = JSON.parse(raw);
+    assert.deepEqual(manifest.builtinPlugins, builtinPlugins);
+    const inputs = JSON.parse(await readFile(path.join(staged, "inputs.json"), "utf8"));
+    assert.deepEqual(inputs.builtinPlugins, builtinPlugins);
+    for (const id of builtinPlugins) {
+      const name = `builtin-plugins/${id}/paseo-plugin.json`;
+      const file = manifest.files.find((row) => row.path === name);
+      assert.ok(file, `Actual builtin source missing: ${id}`);
+      assert.equal(
+        file.sha256,
+        createHash("sha256")
+          .update(await readFile(path.join(staged, name)))
+          .digest("hex"),
+      );
+      assert.ok(
+        inputs.sourceInputs.some(
+          (row) => row.path === `plugins/${id}/paseo-plugin.json` && row.sha256 === file.sha256,
+        ),
+      );
+    }
     const enrollment = {
       immutableRoot: root,
       immutabilityAdapter: "linux-root-owned-retained-v1",

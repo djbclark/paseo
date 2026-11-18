@@ -773,6 +773,22 @@ A timeout or lost operation response stays held and requires recovery, without a
 CLI JSON is bare result data. Native status authority describes only the enclosing daemon; it does
 not substitute for the separately required coherent full-cohort qualification.
 
+A confirmed settled candidate failure uses the separate `maintenanceKnownFailedHeldV1` capability
+and a completed-held JSON alternative: `outcome: "known_failed_held"` with finite redacted reason,
+current plugin CAS, and retained baseline metadata. Its CLI exit status is zero; replacement did
+not succeed. Accept it only from the same retained authenticated transport and live in-memory owner
+token, with fresh current authority/cohort and matching durable `recoveryOnly` status. Missing
+capability, arbitrary exceptions, lost replies, or reconnects stay uncertain. Baseline metadata
+must match independently retained recovery consent; it does not grant permission.
+
+The existing native record keeps the same token digest, generation and transaction while restricted.
+END and another replacement are refused. Explicit current recovery must load the exact baseline,
+then a separate current verify must establish its receipt and full held cohort before the restriction
+can be cleared durably. The original native intent remains distinct from a fresh installer Journal
+transaction and plugin CAS. No automatic baseline restart, new BEGIN, token journal, or unknown-latch
+reset is part of this path. A restart preserves the restriction and admission hold.
+
+
 Begin closes admission before observing work. It refuses in-flight operations, open terminals,
 and all live provider sessions (including idle sessions whose autonomous work cannot be proved
 quiet), discovery children, and remaining provider-process ledger entries. It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,

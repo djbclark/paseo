@@ -626,3 +626,20 @@ it("parses strict complete cohort observations without granting authority from u
     }),
   ).toMatchObject({ payload: { status: { consistency: "uncertain" } } });
 });
+
+
+describe("maintenance known failed-held additive protocol", () => {
+  const baseline = { path: "/retained/A", snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+  const known = { outcome: "known_failed_held", reason: "initialization_rejected", pluginId: "unit", nativeGeneration: 6,
+    current: { registration: null, loaded: null }, baseline,
+    maintenance: { schemaVersion: 1, state: "recovery-required", generation: 1, transactionId: "native-tx", recoveryRequired: true,
+      reservationGeneration: 1, ready: true, recoveryOnly: { pluginId: "unit", nativeGeneration: 6, baseline, phase: "recover-required" } },
+    serverId: "server", daemonIncarnation: "incarnation" };
+  it("parses a separate completed-held alternative and rejects arbitrary reason/token metadata", () => {
+    const response = { type: "daemon.maintenance.plugin.operation.response", payload: { requestId: "held", result: null, error: null, knownFailedHeld: known } };
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, reason: "timeout" } } }).success).toBe(false);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, ownerToken: "forbidden" } } }).success).toBe(false);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, maintenance: { ...known.maintenance, recoveryOnly: { ...known.maintenance.recoveryOnly, phase: "released" } } } } }).success).toBe(false);
+  });
+});

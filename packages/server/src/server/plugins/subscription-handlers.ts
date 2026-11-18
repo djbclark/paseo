@@ -37,11 +37,11 @@ export class PluginSubscriptionHandlers {
   private readonly active = new Map<string, ActiveSubscription>();
   private readonly channel: SubscriptionChannel;
 
-  constructor(
-    channel: SubscriptionChannel,
-    private readonly activityOwner?: PluginActivityOwner,
-  ) {
+  private readonly activityOwner: PluginActivityOwner | undefined;
+
+  constructor(channel: SubscriptionChannel, activityOwner?: PluginActivityOwner) {
     this.channel = channel;
+    this.activityOwner = activityOwner;
   }
 
   has(name: string): boolean {

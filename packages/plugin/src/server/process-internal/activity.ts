@@ -20,7 +20,10 @@ export class PluginActivityOwner {
   private activity = 0;
   private uncertain = false;
   private passive = false;
-  constructor(private readonly onUnknown: () => void = () => {}) {}
+  private readonly onUnknown: () => void;
+  constructor(onUnknown: () => void = () => {}) {
+    this.onUnknown = onUnknown;
+  }
   qualifyPassive(): void {
     this.passive = true;
   }

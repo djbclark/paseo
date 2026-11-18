@@ -241,9 +241,8 @@ describe("maintenance process execution boundary", () => {
       child.send!("finish");
       await closed;
       const held = await reservation.begin(1, "child-closed");
-      expect(() =>
-        reservation.execute(() => spawnProcess(process.execPath, ["-e", "process.exit(99)"])),
-      ).toThrow("maintenance");
+      const launchWhileHeld = () => spawnProcess(process.execPath, ["-e", "process.exit(99)"]);
+      expect(() => reservation.execute(launchWhileHeld)).toThrow("maintenance");
       await expect(
         reservation.execute(() => execCommand(process.execPath, ["-e", "process.exit(99)"])),
       ).rejects.toThrow("maintenance");

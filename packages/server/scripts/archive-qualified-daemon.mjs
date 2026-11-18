@@ -90,6 +90,7 @@ async function main() {
   for (const name of [
     "build-qualified-daemon.mjs",
     "qualified-builtin-sources.mjs",
+    "build-qualified-builtins.mjs",
     "finalize-qualified-daemon.mjs",
     "archive-qualified-daemon.mjs",
   ])

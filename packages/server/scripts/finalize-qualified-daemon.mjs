@@ -118,6 +118,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     schemaVersion: 2,
     profile: "enclosing-daemon-v2",
     builtinPlugins,
+    builtinArtifacts: inputs.builtinArtifacts,
     distributionBuildId: inputs.distributionBuildId,
     files,
     runtime: files.find((file) => file.path === "runtime/node"),

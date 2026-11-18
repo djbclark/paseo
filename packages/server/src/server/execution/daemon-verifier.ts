@@ -172,6 +172,36 @@ function assertManifestIdentity(
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return unsupported();
 }
+function assertBuiltinArtifacts(manifest: DaemonManifest): void {
+  if (
+    !Array.isArray(manifest.builtinArtifacts) ||
+    JSON.stringify(manifest.builtinArtifacts.map((row) => row.id)) !==
+      JSON.stringify(builtinPlugins)
+  )
+    return unsupported();
+  for (const row of manifest.builtinArtifacts) {
+    const prefix = `builtin-compiled/${row.id}`;
+    if (
+      row.factoryPath !== `${prefix}/server.factory.js` ||
+      row.manifestPath !== `${prefix}/manifest.json` ||
+      row.metafilePath !== `${prefix}/metafile.json` ||
+      !/^[a-f0-9]{64}$/.test(row.sourceSha256) ||
+      !Array.isArray(row.moduleImports)
+    )
+      return unsupported();
+    const factory = manifest.files.find((file) => file.path === row.factoryPath);
+    const original = manifest.files.find((file) => file.path === `${prefix}/server-original.js`);
+    if (
+      !factory ||
+      factory.sha256 !== row.serverBundleSha256 ||
+      !original ||
+      original.sha256 !== row.originalServerBundleSha256 ||
+      !manifest.files.some((file) => file.path === row.manifestPath) ||
+      !manifest.files.some((file) => file.path === row.metafilePath)
+    )
+      return unsupported();
+  }
+}
 async function assertBuiltinInventory(root: string, names: string[]): Promise<void> {
   const builtinDirectories = (
     await readdir(path.join(root, "builtin-plugins"), { withFileTypes: true })
@@ -200,6 +230,7 @@ export async function verifyEnclosingDistribution(root: string) {
   const manifestSha256 = digest(raw);
   const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
   assertManifestIdentity(manifest, expected, manifestSha256);
+  assertBuiltinArtifacts(manifest);
   const names: string[] = [];
   async function visit(directory: string): Promise<void> {
     for (const name of await readdir(directory)) {

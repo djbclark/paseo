@@ -7,7 +7,11 @@ import {
   unsupported,
 } from "./daemon-verifier.js";
 import { assertQualifiedDaemonEvaluation, isQualifiedDaemonBinding } from "./daemon-owner.js";
-export { getQualifiedDaemonOwner, isQualifiedDaemonOwner } from "./daemon-owner.js";
+export {
+  getQualifiedDaemonOwner,
+  isQualifiedDaemonOwner,
+  getQualifiedDaemonObservation,
+} from "./daemon-owner.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 import { createHash, randomUUID } from "node:crypto";
 import { qualifiedBindings } from "./qualified-bindings.js";

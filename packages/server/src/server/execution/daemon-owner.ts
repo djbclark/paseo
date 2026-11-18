@@ -19,11 +19,16 @@ import {
   unsupported,
 } from "./daemon-verifier.js";
 import type { QualifiedExecutionBinding } from "./types.js";
-import type { QualifiedDaemonOwner, OwnedObservation } from "./daemon-types.js";
+import type {
+  QualifiedDaemonOwner,
+  OwnedObservation,
+  QualifiedDaemonObservation,
+} from "./daemon-types.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
 const owners = new WeakSet<object>();
 const bindings = new WeakSet<object>();
+const observations = new WeakMap<object, () => QualifiedDaemonObservation>();
 let instance: Promise<QualifiedDaemonOwner> | null = null;
 let executingOwner: QualifiedDaemonOwner | null = null;
 interface HandleRecord {
@@ -500,6 +505,44 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   });
   await assertEnclosingAuthorityUnchanged(initial);
   installQualifiedPluginHelperGuard();
+  const artifact = initial.manifest.files.find((entry) => entry.path === "daemon.mjs");
+  if (!artifact) return unsupported();
+  observations.set(owner, () => {
+    assertFresh();
+    const ownedHandles = [...observers.keys()].map((handle) => {
+      const record = handles.get(handle);
+      if (!record) return unsupported();
+      const actual = handle as ChildProcess | Worker;
+      assertOwnedExecutionHandle(actual, record.kind, record.incarnation);
+      return {
+        kind: record.kind,
+        pid: actual instanceof Worker ? process.pid : actual.pid!,
+        threadId: actual instanceof Worker ? actual.threadId : null,
+        incarnation: record.incarnation,
+      };
+    });
+    return {
+      schemaVersion: 1,
+      role: "daemon",
+      distributionBuildId: initial.manifest.distributionBuildId,
+      manifestSha256: initial.manifestSha256,
+      pid: process.pid,
+      incarnation,
+      bootId: initial.observed.bootId,
+      osBirthIdentity: initial.observed.birth,
+      executable: initial.observed.executable,
+      executableIdentity: initial.observed.image,
+      evidenceDigest,
+      closure: initial.closure,
+      namespaces: [...namespaces.keys()].sort().map((bindingKey) => ({
+        bindingKey,
+        moduleBuildId: `${initial.manifest.distributionBuildId}:daemon`,
+        artifactSha256: artifact.sha256,
+        qualifiedOrigin: `${root}/daemon.mjs#${bindingKey}`,
+      })),
+      ownedHandles,
+    };
+  });
   owners.add(owner);
   bindings.add(binding);
   executingOwner = owner;
@@ -535,4 +578,12 @@ export function isQualifiedDaemonBinding(value: unknown): value is QualifiedExec
 export function assertQualifiedDaemonEvaluation(): void {
   if (!executingOwner || !owners.has(executingOwner)) return unsupported();
   executingOwner.assertFresh();
+}
+
+/** Data-only view from the same executing private owner/table; never deserializes a brand. */
+export function getQualifiedDaemonObservation(owner: unknown): QualifiedDaemonObservation {
+  if (!isQualifiedDaemonOwner(owner)) return unsupported();
+  const observe = observations.get(owner);
+  if (!observe) return unsupported();
+  return structuredClone(observe());
 }

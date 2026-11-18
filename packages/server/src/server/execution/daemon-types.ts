@@ -1,7 +1,7 @@
 import type { TerminalWorkerRecord } from "../../terminal/terminal-worker-record.js";
 import type { ChildProcess } from "node:child_process";
 import type { Worker } from "node:worker_threads";
-import type { FileIdentity, QualifiedExecutionBinding } from "./types.js";
+import type { FileIdentity, QualifiedExecutionBinding, HostEvidence } from "./types.js";
 export interface QualifiedClosure {
   runtimeClosureSha256: string;
   helperClosureSha256: string;
@@ -26,6 +26,8 @@ export interface DaemonManifest {
   bindingKeys: string[];
 }
 export interface OwnedObservation {
+  /** Data-only namespace receipt from actual verified plugin-child realm. */
+  hostEvidence?: HostEvidence;
   manifestSha256: string;
   distributionBuildId: string;
   incarnation: string;
@@ -72,4 +74,32 @@ export interface QualifiedDaemonOwner {
     kind: "plugin-child" | "compiler" | "terminal-worker",
     incarnation: string,
   ): void;
+}
+
+/** Serializable observations only; none of these fields is an admission capability. */
+export interface QualifiedDaemonObservation {
+  schemaVersion: 1;
+  role: "daemon";
+  distributionBuildId: string;
+  manifestSha256: string;
+  pid: number;
+  incarnation: string;
+  bootId: string;
+  osBirthIdentity: string;
+  executable: string;
+  executableIdentity: string;
+  evidenceDigest: string;
+  closure: Readonly<QualifiedClosure>;
+  namespaces: readonly {
+    bindingKey: string;
+    moduleBuildId: string;
+    artifactSha256: string;
+    qualifiedOrigin: string;
+  }[];
+  ownedHandles: readonly {
+    kind: "plugin-child" | "compiler" | "terminal-worker";
+    pid: number;
+    threadId: number | null;
+    incarnation: string;
+  }[];
 }

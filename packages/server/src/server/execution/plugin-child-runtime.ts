@@ -51,5 +51,6 @@ export async function respondQualifiedChallenge(challenge: string): Promise<void
     incarnation: state.evidence.process.processStartToken,
     manifestSha256: state.evidence.qualificationManifestSha256,
     distributionBuildId: state.evidence.distributionBuildId,
+    hostEvidence: state.evidence,
   });
 }

@@ -40,6 +40,23 @@ async function gitBytes() {
     await descriptor.close();
   }
 }
+function gitBuildProvenance() {
+  const options = {
+    encoding: "utf8",
+    timeout: 10000,
+    maxBuffer: 65536,
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+  };
+  const version = spawnSync("/usr/bin/git", ["--version", "--build-options"], options);
+  const source = spawnSync(
+    "/usr/bin/dpkg-query",
+    ["-W", "-f", "${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n", "git"],
+    options,
+  );
+  if (version.status !== 0 || source.status !== 0)
+    throw new Error("Git build/source provenance unavailable");
+  return { buildOptions: version.stdout, sourcePackage: source.stdout };
+}
 /** Builds measured inputs only. No helper profile, launch permission or settlement grant. */
 export async function buildQualifiedGit(root) {
   if (process.platform !== "linux") throw new Error("Linux finite Git only");
@@ -92,7 +109,7 @@ export async function buildQualifiedGit(root) {
       version: compile(["--version"]),
       flags,
     },
-    git: { sha256: hash(bytes), size: bytes.length },
+    git: { sha256: hash(bytes), size: bytes.length, ...gitBuildProvenance() },
   };
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

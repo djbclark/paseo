@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   MISSING_MAINTENANCE_AUTHORITY,
   readProtectedMaintenanceJson,
@@ -19,12 +20,17 @@ export interface MaintenanceStatus {
 type RecordV1 = MaintenanceRecord;
 const digest = (token: string) => createHash("sha256").update(token).digest("hex");
 
+interface ExecutionScope { owner: MaintenanceReservation; leases: (() => void)[]; }
+const executionOwner = new AsyncLocalStorage<ExecutionScope | undefined>();
+export function currentMaintenanceExecution(): MaintenanceReservation | undefined { return executionOwner.getStore()?.owner; }
+
 /** Single daemon event-loop admission lane. Acquiring a lease never yields. */
 export class MaintenanceReservation {
   private record: RecordV1 | null = null;
   private recovery = false;
   private pending = false;
   private inFlight = 0;
+  private readonly leases = new WeakMap<() => void, { active: boolean }>();
   private failed = false;
   private readonly path: string;
 
@@ -92,23 +98,48 @@ export class MaintenanceReservation {
   enter(): () => void {
     if (this.failed || this.pending || this.record?.tokenDigest)
       throw new Error("Daemon maintenance admission held");
+    return this.lease();
+  }
+
+  private lease(): () => void {
     this.inFlight++;
-    let released = false;
-    return () => {
-      if (!released) {
-        released = true;
-        this.inFlight--;
-      }
-    };
+    const state = { active: true };
+    const release = () => { if (state.active) { state.active = false; this.inFlight--; } };
+    this.leases.set(release, state);
+    return release;
+  }
+
+  enterProcess(): () => void {
+    const scope = executionOwner.getStore();
+    // A real already-admitted continuation may finish under a provisional/uncertain
+    // barrier. Expired async scopes cannot revive work after every owning lease ends.
+    if (scope?.owner === this && scope.leases.some(release => this.leases.get(release)?.active)) return this.lease();
+    return this.enter();
+  }
+
+  executeAdmitted<T>(release: () => void, operation: () => T): T {
+    if (!this.leases.get(release)?.active) throw new Error("Expired maintenance activity lease");
+    const current = executionOwner.getStore();
+    return executionOwner.run({ owner: this, leases: [release, ...(current?.owner === this ? current.leases : [])] }, operation);
   }
 
   async run<T>(operation: () => Promise<T>): Promise<T> {
     const release = this.enter();
     try {
-      return await operation();
+      return await this.executeAdmitted(release, operation);
     } finally {
       release();
     }
+  }
+
+  async runCleanup<T>(operation: () => Promise<T>): Promise<T> {
+    const release = this.lease();
+    try { return await executionOwner.run(undefined, operation); } finally { release(); }
+  }
+
+  execute<T>(operation: () => T): T {
+    const current = executionOwner.getStore();
+    return executionOwner.run(current?.owner === this ? current : { owner: this, leases: [] }, operation);
   }
 
   status(): MaintenanceStatus {
@@ -272,7 +303,16 @@ export function guardMaintenanceStream<T extends object, K extends keyof T>(
   owner[key] = async function* (...args: unknown[]) {
     const release = reservation.enter();
     try {
-      yield* operation.apply(owner, args);
+      const iterator = operation.apply(owner, args);
+      yield* {
+        [Symbol.asyncIterator]() {
+          return {
+            next: (value?: unknown) => reservation.executeAdmitted(release, () => iterator.next(value)),
+            return: (value?: unknown) => reservation.executeAdmitted(release, () => iterator.return(value)),
+            throw: (error?: unknown) => reservation.executeAdmitted(release, () => iterator.throw(error)),
+          };
+        },
+      };
     } finally {
       release();
     }

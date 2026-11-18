@@ -627,10 +627,23 @@ export async function createPaseoDaemon(
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  await mkdir(config.paseoHome, { recursive: true, mode: 0o700 });
+  let observe: () => Promise<boolean> = async () => { throw new Error("Maintenance startup incomplete"); };
+  const maintenance = new MaintenanceReservation(config.paseoHome, () => observe());
+  maintenance.setReady(false);
+  return maintenance.execute(() => createPaseoDaemonInExecutionContext(config, rootLogger, dependencies, maintenance, next => { observe = next; }));
+}
+
+async function createPaseoDaemonInExecutionContext(
+  config: PaseoDaemonConfig,
+  rootLogger: Logger,
+  dependencies: PaseoDaemonDependencies,
+  maintenance: MaintenanceReservation,
+  setQuiescenceObserver: (observe: () => Promise<boolean>) => void,
+): Promise<PaseoDaemon> {
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
-  await mkdir(config.paseoHome, { recursive: true, mode: 0o700 });
-  const maintenance = new MaintenanceReservation(config.paseoHome, async () => {
+  setQuiescenceObserver(async () => {
     const unavailable = terminalManager.getUnavailableError?.();
     if (unavailable) throw unavailable;
     if (!agentManager.isMaintenanceQuiet()) return false;
@@ -638,9 +651,9 @@ export async function createPaseoDaemon(
     const terminals = await terminalManager.adoptTerminals();
     if (!Number.isSafeInteger(terminals) || terminals < 0)
       throw new Error("Unknown terminal observation");
-    return terminals === 0 && agentManager.isMaintenanceQuiet();
+    const providerProcesses = await managedProcesses.list();
+    return terminals === 0 && providerProcesses.length === 0 && agentManager.isMaintenanceQuiet();
   });
-  maintenance.setReady(false);
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
   await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
     logger.warn(
@@ -1020,6 +1033,7 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     logger,
     snapshotManager: {
+      maintenance,
       refreshTimeoutMs: config.providerCatalogRefreshTimeoutMs,
       runtimeSettings: config.agentProviderSettings,
       providerOverrides: config.providerOverrides,
@@ -1928,7 +1942,7 @@ export async function createPaseoDaemon(
               workspaceLabelService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
-            await pluginRuntime.start();
+            await maintenance.execute(() => pluginRuntime.start());
             providerSnapshotManager.settlePluginProviders();
             restartRecovery.resumePending();
             await finishSubscriptions.start();
@@ -2087,8 +2101,8 @@ export async function createPaseoDaemon(
     serviceProxy,
     scriptRuntimeStore,
     browserToolsBroker,
-    start,
-    stop,
+    start: () => maintenance.execute(start),
+    stop: (options) => maintenance.runCleanup(() => stop(options)),
     getListenTarget: () => boundListenTarget,
     getServerId: () => serverId,
   };

@@ -738,7 +738,7 @@ there is no second token read or automatic expiry.
 
 Begin closes admission before observing work. It refuses in-flight operations, open terminals,
 and all live provider sessions (including idle sessions whose autonomous work cannot be proved
-quiet). It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,
+quiet), discovery children, and remaining provider-process ledger entries. It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,
 worktree creation, workspace setup/scripts, and scheduled execution share that admission owner.
 
 The daemon stores the token digest, generation and transaction in
@@ -748,7 +748,10 @@ zero-generation idle record is not a controller generation. Missing established 
 malformed records, unsafe paths and uncertain reads refuse startup. Never delete the enrollment
 marker to clear a hold.
 
-Known busy work refuses begin and reopens admission without cancelling anything. Unknown
+Known busy work refuses begin and reopens admission without cancelling anything. Known unavailable
+or unsupported provider queries with confirmed successful cleanup return ordinary errors, without
+creating a recovery hold. Failed close or unknown cleanup outcome holds admission. A query timeout
+or response is not proof its child ended: the process lease lasts through actual close. Unknown
 observations persist an uncertain recovery hold where storage permits; any persistence lifecycle
 failure latches the current process closed. Pending status reports held; failure status reports
 recovery-required even before a token exists. An uncertain hold without an issued owner token

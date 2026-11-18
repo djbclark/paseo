@@ -2383,7 +2383,14 @@ export class Session {
   /**
    * Main entry point for processing session messages
    */
-  public async handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
+  public handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
+    const handle = () => this.handleMessageInExecutionContext(msg, source);
+    // Reads remain available. Only concrete execution beneath the request acquires admission.
+    return this.agentManager.maintenanceReservation
+      ? this.agentManager.maintenanceReservation.execute(handle) : handle();
+  }
+
+  private async handleMessageInExecutionContext(msg: SessionInboundMessage, source?: object): Promise<void> {
     return this.delivery.request(source, msg, () => this.handleRequest(msg, source));
   }
 

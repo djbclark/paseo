@@ -1,3 +1,4 @@
+import { guardProviderClient } from "../provider-maintenance.js";
 import {
   type MaintenanceReservation,
   guardMaintenanceMethod,
@@ -927,7 +928,7 @@ export class AgentManager {
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
-    this.clients.set(provider, client);
+    this.clients.set(provider, guardProviderClient(client, this.maintenanceReservation));
   }
 
   updateProviderRegistry(input: {
@@ -947,7 +948,7 @@ export class AgentManager {
     this.clients.clear();
     for (const [provider, client] of Object.entries(input.clients)) {
       if (client) {
-        this.clients.set(provider, client);
+        this.clients.set(provider, guardProviderClient(client, this.maintenanceReservation));
       }
     }
 
@@ -1123,6 +1124,7 @@ export class AgentManager {
   installMaintenanceReservation(reservation: MaintenanceReservation): void {
     if (this.maintenanceReservation) throw new Error("Maintenance already installed");
     this.maintenanceReservation = reservation;
+    for (const client of this.clients.values()) guardProviderClient(client, reservation);
     for (const key of [
       "createAgent",
       "createAgentFromRecord",
@@ -1152,7 +1154,7 @@ export class AgentManager {
       this.collectingRuntimes.size === 0 &&
       this.lifecycleMutationTails.size === 0 &&
       this.foregroundMutationTails.size === 0 &&
-      Array.from(this.agents.values()).every((agent) => agent.lifecycle === "closed")
+      this.agents.size === 0
     );
   }
 
@@ -1335,14 +1337,7 @@ export class AgentManager {
   private withDiscoveryAdmission<T>(operation: () => Promise<T>): Promise<T> {
     const reservation = this.maintenanceReservation;
     if (!reservation) return operation();
-    return reservation.run(async () => {
-      try {
-        return await operation();
-      } catch (error) {
-        reservation.holdForUnknownWork();
-        throw error;
-      }
-    });
+    return reservation.run(operation);
   }
 
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
@@ -2192,7 +2187,7 @@ export class AgentManager {
     const close = this.runLifecycleMutation(agentId, async () => {
       // A preceding reload or archive may already have closed the durable agent.
       if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
-    });
+    }, true);
     this.inFlightAgentCloses.set(agentId, close);
     const clearClose = () => {
       if (this.inFlightAgentCloses.get(agentId) === close) {
@@ -3019,7 +3014,14 @@ export class AgentManager {
     await this.writeStoredMetadata(agentId, updates);
   }
 
-  private async runLifecycleMutation<T>(agentId: string, mutation: () => Promise<T>): Promise<T> {
+  private runLifecycleMutation<T>(agentId: string, mutation: () => Promise<T>, cleanup = false): Promise<T> {
+    const run = () => this.runLifecycleMutationAdmitted(agentId, mutation);
+    return this.maintenanceReservation
+      ? cleanup ? this.maintenanceReservation.runCleanup(run) : this.maintenanceReservation.run(run)
+      : run();
+  }
+
+  private async runLifecycleMutationAdmitted<T>(agentId: string, mutation: () => Promise<T>): Promise<T> {
     // Parent cascade classifies a child inside the same lane used by open-tab
     // label writes, so a received ownership update cannot be overtaken.
     const previous = this.lifecycleMutationTails.get(agentId) ?? Promise.resolve();

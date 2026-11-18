@@ -14,6 +14,7 @@ export interface PluginMaintenancePort {
 }
 export interface NativePluginAdmission {
   enterWork(): () => void;
+  runAdmittedWork?<T>(lease: () => void, operation: () => T): T;
   holdForUnknownWork(): void;
   runQualifiedInitialization<T>(operation: () => Promise<T>): Promise<T>;
   runHeldOperation?<T>(

@@ -15,6 +15,7 @@ export async function buildQualifiedHost({ outDir, distributionBuildId, roleBuil
     target: "node22",
     metafile: true,
     define: {
+      __PASEO_QUALIFIED_PLUGIN_ENTRY__: "true",
       __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
       __QUALIFIED_ROLE_ID__: JSON.stringify(roleBuildId),
     },

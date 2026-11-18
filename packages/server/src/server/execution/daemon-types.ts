@@ -10,6 +10,16 @@ export interface QualifiedClosure {
 export interface DaemonManifest {
   schemaVersion: 2;
   profile: "enclosing-daemon-v2";
+  builtinPlugins: string[];
+  builtinArtifacts: QualifiedBuiltinArtifact[];
+  builtinModuleTable: {
+    schemaVersion: 1;
+    recipe: unknown;
+    runtimeSha256: string;
+    daemonSha256: string;
+    externalLibraries: FileIdentity[];
+  };
+  moduleTableSha256: string;
   distributionBuildId: string;
   files: FileIdentity[];
   runtime: FileIdentity;
@@ -103,4 +113,17 @@ export interface QualifiedDaemonObservation {
     threadId: number | null;
     incarnation: string;
   }[];
+}
+
+export interface QualifiedBuiltinArtifact {
+  moduleTableSha256: string;
+  sourceIdentityPath: string;
+  id: string;
+  sourceSha256: string;
+  serverBundleSha256: string;
+  originalServerBundleSha256: string;
+  factoryPath: string;
+  manifestPath: string;
+  metafilePath: string;
+  moduleImports: string[];
 }

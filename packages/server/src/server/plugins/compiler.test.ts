@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
@@ -1261,3 +1262,171 @@ it("does not recognize a descriptive compiler error as actual settled execution 
     readSettledQualifiedCompilerFailure(Object.freeze({ outcome: "compiler_error" }), owner, held),
   ).toBeUndefined();
 });
+
+class CompilerWorkerEvidenceInbox {
+  readonly messages: Array<Record<string, unknown>> = [];
+  private readonly waiters = new Set<() => void>();
+  private failure: Error | undefined;
+  push(message: Record<string, unknown>): void {
+    this.messages.push(message);
+    for (const notify of this.waiters) notify();
+  }
+  fail(error: Error): void {
+    this.failure = error;
+    for (const notify of this.waiters) notify();
+  }
+  async until(predicate: () => boolean): Promise<void> {
+    while (!predicate()) {
+      if (this.failure) throw this.failure;
+      await new Promise<void>((resolve) => {
+        const notify = () => {
+          this.waiters.delete(notify);
+          resolve();
+        };
+        this.waiters.add(notify);
+      });
+    }
+  }
+}
+
+it.runIf(process.platform === "linux")(
+  "lets an admitted cold compile start its real helper after a delayed regular manifest read",
+  async () => {
+    const plugin = await createSplitPlugin();
+    const manifest = path.join(plugin.directory, "paseo-plugin.json");
+    const sentinel = path.join(plugin.directory, "late-helper-was-run");
+    await writeFile(manifest, JSON.stringify({ id: "delayed" }));
+    // A kernel file lease blocks the REAL open/read of a regular manifest. No
+    // compiler/readFile callback or settlement event is replaced. F_SETLEASE:
+    // https://man7.org/linux/man-pages/man2/F_SETLEASE.2const.html
+    const leaseScript = `import fcntl, os, signal, sys
+signal.signal(signal.SIGIO, lambda *_: print("manifest-open-blocked", flush=True))
+fd = os.open(sys.argv[1], os.O_RDWR)
+fcntl.fcntl(fd, fcntl.F_SETOWN, os.getpid())
+fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+print("lease-ready", flush=True)
+sys.stdin.buffer.readline()
+fcntl.fcntl(fd, fcntl.F_SETLEASE, fcntl.F_UNLCK)
+os.close(fd)
+print("lease-released", flush=True)
+`;
+    const inbox = new CompilerWorkerEvidenceInbox();
+    const lease = spawn("python3", ["-c", leaseScript, manifest], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let leaseOutput = "";
+    let leaseErrors = "";
+    lease.stdout.on("data", (data: Buffer) => {
+      leaseOutput += data.toString();
+      inbox.push({ leaseOutput });
+    });
+    lease.stderr.on("data", (data: Buffer) => {
+      leaseErrors += data.toString();
+    });
+    lease.on("error", (error) => inbox.fail(error));
+    lease.stdin.on("error", () => {});
+    const leaseClosed = new Promise<number | null>((resolve) =>
+      lease.once("close", (code) => {
+        if (code !== 0) inbox.fail(new Error(`Manifest lease failed: ${leaseErrors}`));
+        resolve(code);
+      }),
+    );
+    // Use the actual CI-built worker, not tsx (whose loader can prewarm esbuild).
+    const entry = new URL("../../../dist/server/server/plugins/compiler-worker.js", import.meta.url)
+      .href;
+    const driver = new URL(
+      "../../../dist/server/server/plugins/compiler-esbuild.js",
+      import.meta.url,
+    ).href;
+    let worker: Worker | undefined;
+    try {
+      await inbox.until(() => leaseOutput.includes("lease-ready"));
+      worker = new Worker(
+        `const {parentPort} = require("node:worker_threads");
+const childProcess = require("node:child_process");
+const {syncBuiltinESMExports} = require("node:module");
+const actualSpawn = childProcess.spawn;
+const actualClosePromises = [];
+childProcess.spawn = function(...args) {
+  const child = Reflect.apply(actualSpawn, childProcess, args);
+  actualClosePromises.push(new Promise((resolve) => child.once("close", () => {
+    parentPort.postMessage({test:"helper-closed",pid:child.pid}); resolve();
+  })));
+  parentPort.postMessage({test:"helper-started",pid:child.pid});
+  return child;
+};
+syncBuiltinESMExports();
+(async () => {
+  const compiler = await import(${JSON.stringify(entry)});
+  let retired = false;
+  parentPort.on("message", () => {
+    if (retired) return;
+    retired = true;
+    const drained = compiler.retireQualifiedCompilerTasks();
+    parentPort.postMessage({test:"retiring"});
+    void drained.then(async () => {
+      parentPort.postMessage({test:"tasks-drained"});
+      const {loadEsbuild} = await import(${JSON.stringify(driver)});
+      loadEsbuild().stop();
+      await Promise.all(actualClosePromises);
+      parentPort.postMessage({test:"helpers-settled"});
+    });
+  });
+  parentPort.postMessage({test:"ready"});
+})().catch((error) => { throw error; });`,
+        { eval: true, execArgv: [] },
+      );
+      worker.on("message", (message: Record<string, unknown>) => inbox.push(message));
+      worker.on("error", (error) => inbox.fail(error));
+      await inbox.until(() => inbox.messages.some((message) => message.test === "ready"));
+      worker.postMessage({ kind: "directory", directory: plugin.directory, version: "0.4.0" }, []);
+      await inbox.until(() => leaseOutput.includes("manifest-open-blocked"));
+      await inbox.until(() => inbox.messages.some((message) => message.test === "retiring"));
+      const late = {
+        kind: "prepare",
+        directory: plugin.directory,
+        commands: [
+          [
+            process.execPath,
+            "-e",
+            `require('node:fs').writeFileSync(${JSON.stringify(sentinel)},'ran')`,
+          ],
+        ],
+        environment: {},
+      };
+      worker.postMessage(late, []);
+      await inbox.until(() => inbox.messages.some((message) => message.kind === "error"));
+      expect(inbox.messages.some((message) => message.kind === "result")).toBe(false);
+      expect(inbox.messages.some((message) => message.test === "tasks-drained")).toBe(false);
+      expect(inbox.messages.some((message) => message.test === "helper-started")).toBe(false);
+      lease.stdin.end("release\n");
+      expect(await leaseClosed).toBe(0);
+      await inbox.until(() => inbox.messages.some((message) => message.test === "helpers-settled"));
+      expect(inbox.messages.find((message) => message.kind === "result")?.value).toMatchObject({
+        serverBundle: expect.stringContaining("probe"),
+      });
+      const started = inbox.messages.filter((message) => message.test === "helper-started");
+      const closed = inbox.messages.filter((message) => message.test === "helper-closed");
+      expect(started.length).toBeGreaterThan(0);
+      expect(started.map((message) => message.pid)).toEqual(closed.map((message) => message.pid));
+      expect(
+        inbox.messages.findIndex((message) => message.test === "tasks-drained"),
+      ).toBeGreaterThan(inbox.messages.findIndex((message) => message.kind === "result"));
+      worker.postMessage(late, []);
+      await inbox.until(
+        () => inbox.messages.filter((message) => message.kind === "error").length === 2,
+      );
+      expect(inbox.messages.filter((message) => message.test === "helper-started")).toHaveLength(
+        started.length,
+      );
+      await expect(
+        import("node:fs/promises").then(({ stat }) => stat(sentinel)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (!lease.stdin.destroyed) lease.stdin.end("release\n");
+      await leaseClosed;
+      await worker?.terminate();
+    }
+  },
+  30_000,
+);

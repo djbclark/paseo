@@ -63,6 +63,11 @@
       "types": "./dist/server/process-internal/activity.d.ts",
       "source": "./src/server/process-internal/activity.ts",
       "default": "./dist/server/process-internal/activity.js"
+    },
+    "./internal/builtin-helper": {
+      "types": "./dist/server/process-internal/builtin-helper.d.ts",
+      "source": "./src/server/process-internal/builtin-helper.ts",
+      "default": "./dist/server/process-internal/builtin-helper.js"
     }
   },
   "publishConfig": {

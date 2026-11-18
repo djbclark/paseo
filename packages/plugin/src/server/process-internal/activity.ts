@@ -1,4 +1,5 @@
-import { AsyncLocalStorage } from "node:async_hooks";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { AsyncResource, AsyncLocalStorage } from "node:async_hooks";
 
 export interface PluginBarrierIdentity {
   generation: number;
@@ -8,15 +9,45 @@ export interface PluginBarrierIdentity {
 export type PluginBarrierState = "held" | "known-busy" | "unknown";
 interface ActivityLease {
   owner: PluginActivityOwner;
+  resource: AsyncResource;
   references: number;
   allowHelpers: boolean;
   onSettled: () => void;
 }
 const activityScope = new AsyncLocalStorage<ActivityLease>();
-let qualifiedHelperAdmission: (() => void) | undefined;
+export interface PluginHelperOperation {
+  readonly kind: "spawn" | "execFile";
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly options: Readonly<SpawnOptions> & {
+    readonly encoding?: string | null;
+    readonly maxBuffer?: number;
+  };
+}
+export interface PluginHelperAdmissionRequest {
+  readonly activityOwner: PluginActivityOwner | undefined;
+  readonly root: object | undefined;
+  readonly operation: PluginHelperOperation;
+}
+export interface PluginHelperAdmissionPermit {
+  readonly settled: Promise<void>;
+  bind(child: ChildProcess): void;
+  failed(error: unknown): void;
+}
+export interface PluginHelperLease {
+  bind(child: ChildProcess): void;
+  failed(error: unknown): void;
+  release(): void;
+}
+const originalActivityRoots = new WeakSet<object>();
+let qualifiedHelperAdmission:
+  | ((request: PluginHelperAdmissionRequest) => PluginHelperAdmissionPermit | void)
+  | undefined;
 
 /** Trusted sealed startup installs this before any candidate code; it can never be replaced. */
-export function installQualifiedHelperAdmission(guard: () => void): void {
+export function installQualifiedHelperAdmission(
+  guard: (request: PluginHelperAdmissionRequest) => PluginHelperAdmissionPermit | void,
+): void {
   if (qualifiedHelperAdmission) throw new Error("Qualified helper admission is already installed");
   if (typeof guard !== "function") throw new Error("Qualified helper admission requires a guard");
   qualifiedHelperAdmission = guard;
@@ -28,9 +59,17 @@ export class PluginActivityOwner {
   private activity = 0;
   private uncertain = false;
   private passive = false;
+  private retired = false;
+  private readonly drainWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
   private readonly onUnknown: () => void;
   constructor(onUnknown: () => void = () => {}) {
     this.onUnknown = onUnknown;
+  }
+  assertLiveRoot(root: object): void {
+    if (!originalActivityRoots.has(root)) throw new Error("Unknown plugin activity root");
+    const lease = root as ActivityLease;
+    if (lease.owner !== this || lease.references <= 0)
+      throw new Error("Expired plugin activity root");
   }
   qualifyPassive(): void {
     this.passive = true;
@@ -54,10 +93,27 @@ export class PluginActivityOwner {
     if (this.uncertain) return;
     this.uncertain = true;
     this.onUnknown();
+    for (const waiter of this.drainWaiters)
+      waiter.reject(new Error("Plugin activity is uncertain"));
+    this.drainWaiters.clear();
   }
   acquire(onSettled: () => void = () => {}): PluginActivityLease {
-    if (this.barrier || this.uncertain) throw new Error("Plugin maintenance admission is closed");
+    if (this.barrier || this.uncertain || this.retired)
+      throw new Error("Plugin maintenance admission is closed");
     return this.makeLease(true, onSettled);
+  }
+  /** Lifecycle cleanup is admitted once by the actual worker, before closing new roots. */
+  retirementCleanup(): PluginActivityLease {
+    if (this.retired || this.uncertain) throw new Error("Plugin retirement is uncertain");
+    const lease = this.makeLease(true, () => {});
+    this.retired = true;
+    return lease;
+  }
+  waitForRetirement(): Promise<void> {
+    if (!this.retired || this.uncertain)
+      return Promise.reject(new Error("Plugin retirement is uncertain"));
+    if (this.activity === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => this.drainWaiters.add({ resolve, reject }));
   }
   initialization(): PluginActivityLease {
     if (this.uncertain) throw new Error("Plugin initialization activity is uncertain");
@@ -71,7 +127,7 @@ export class PluginActivityOwner {
     this.activity++;
     let released = false;
     return {
-      run: (task) => activityScope.run(lease, task),
+      run: (task) => lease.resource.runInAsyncScope(() => activityScope.run(lease, task)),
       release: () => {
         if (released) return;
         released = true;
@@ -80,11 +136,18 @@ export class PluginActivityOwner {
     };
   }
   private makeLease(allowHelpers: boolean, onSettled: () => void): PluginActivityLease {
-    const lease: ActivityLease = { owner: this, references: 1, allowHelpers, onSettled };
+    const lease: ActivityLease = {
+      owner: this,
+      resource: new AsyncResource("paseo.plugin.activity"),
+      references: 1,
+      allowHelpers,
+      onSettled,
+    };
+    originalActivityRoots.add(lease);
     this.activity++;
     let released = false;
     return {
-      run: (task) => activityScope.run(lease, task),
+      run: (task) => lease.resource.runInAsyncScope(() => activityScope.run(lease, task)),
       release: () => {
         if (released) return;
         released = true;
@@ -110,17 +173,75 @@ export class PluginActivityOwner {
   private release(lease: ActivityLease): void {
     lease.references--;
     this.activity--;
-    if (lease.references === 0) lease.onSettled();
+    if (lease.references === 0) {
+      lease.resource.emitDestroy();
+      lease.onSettled();
+    }
+    if (this.retired && this.activity === 0 && !this.uncertain) {
+      for (const waiter of this.drainWaiters) waiter.resolve();
+      this.drainWaiters.clear();
+    }
   }
 }
 export interface PluginActivityLease {
   run<T>(task: () => T): T;
   release(): void;
 }
-export function acquirePluginHelper(): () => void {
-  qualifiedHelperAdmission?.();
+export function acquirePluginHelper(operation: PluginHelperOperation): PluginHelperLease {
   const lease = activityScope.getStore();
-  return lease ? lease.owner.helper(lease) : () => {};
+  const admission = qualifiedHelperAdmission?.({
+    activityOwner: lease?.owner,
+    root: lease,
+    operation,
+  });
+  const permit = admission ? admission : undefined;
+  let release: () => void;
+  try {
+    release = lease ? lease.owner.helper(lease) : () => {};
+  } catch (error) {
+    permit?.failed(error);
+    throw error;
+  }
+  let released = false;
+  let failed = false;
+  let bound = false;
+  let leaderClosed = false;
+  let settled = permit === undefined;
+  const releaseActual = () => {
+    if (!released && leaderClosed && settled) {
+      released = true;
+      release();
+    }
+  };
+  if (permit)
+    void permit.settled.then(
+      () => {
+        settled = true;
+        releaseActual();
+        return undefined;
+      },
+      (error) => {
+        lease?.owner.markUnknown();
+        permit.failed(error);
+        return undefined;
+      },
+    );
+  return {
+    bind(child) {
+      if (bound || released) throw new Error("Plugin helper handle already bound or settled");
+      bound = true;
+      permit?.bind(child);
+    },
+    failed(error) {
+      if (failed) return;
+      failed = true;
+      permit?.failed(error);
+    },
+    release() {
+      leaderClosed = true;
+      releaseActual();
+    },
+  };
 }
 function sameBarrier(left: PluginBarrierIdentity, right: PluginBarrierIdentity): boolean {
   return (
@@ -132,5 +253,5 @@ function sameBarrier(left: PluginBarrierIdentity, right: PluginBarrierIdentity):
 
 export function bindPluginActivity<T>(task: () => T): () => T {
   const lease = activityScope.getStore();
-  return lease ? () => activityScope.run(lease, task) : task;
+  return lease ? () => lease.resource.runInAsyncScope(() => activityScope.run(lease, task)) : task;
 }

@@ -3,9 +3,17 @@ import {
   type QualifiedPluginInitialization,
 } from "./qualified-initialization.js";
 import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
-import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
+import {
+  isQualifiedDaemonOwner,
+  createQualifiedBuiltinInstance,
+  assertQualifiedBuiltinInstance,
+  getQualifiedBuiltinObservation,
+} from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
-import type { ManagedPluginCohortExecution } from "@getpaseo/protocol/messages";
+import type {
+  ManagedPluginCohortV2Entry,
+  ManagedPluginCohortExecution,
+} from "@getpaseo/protocol/messages";
 import { PluginExecutionOwner } from "./execution-owner.js";
 import { isPluginExecutionRoot } from "./execution-roots.js";
 import {
@@ -130,6 +138,7 @@ interface ChildTermination {
 
 interface LoadedPlugin {
   qualifiedChild?: QualifiedOwnedChild;
+  builtinInstance?: { child: InternalPluginChild; directory: string };
   activationTicket?: ActivationTicket;
   executionOwner?: PluginExecutionOwner;
   termination?: ChildTermination;
@@ -346,12 +355,15 @@ function send(child: PluginChild, message: PluginProcessRequest): Promise<void> 
       return;
     }
     try {
-      child.send(message, (error) => {
-        if (error) {
-          if (root) owner?.markUnknown();
-          reject(error);
-        } else resolve();
-      });
+      const dispatch = () =>
+        child.send(message, (error) => {
+          if (error) {
+            if (root) owner?.markUnknown();
+            reject(error);
+          } else resolve();
+        });
+      if (root && owner) owner.runAdmitted(message, dispatch);
+      else dispatch();
     } catch (error) {
       if (root) owner?.markUnknown();
       reject(error);
@@ -421,6 +433,11 @@ export class PluginRuntime {
     try {
       owner.assertFresh();
       for (const loaded of this.plugins.values()) {
+        if (loaded.builtinInstance) {
+          assertQualifiedBuiltinInstance(loaded.child, owner, loaded.id);
+          if (loaded.termination?.closed) return false;
+          continue;
+        }
         if (
           !loaded.qualifiedChild ||
           !loaded.activationTicket?.authorization.passiveProfile ||
@@ -624,6 +641,11 @@ export class PluginRuntime {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (owner && isQualifiedDaemonOwner(owner)) {
+      await this.startRetainedBuiltin(input.id, directory, owner, initialization);
+      return;
+    }
     const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
     const bundles = await this.compileActivation(
       input.id,
@@ -667,6 +689,61 @@ export class PluginRuntime {
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
+  }
+
+  private async startRetainedBuiltin(
+    pluginId: string,
+    directory: string,
+    owner: QualifiedDaemonOwner,
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<void> {
+    if (!initialization) throw new Error("Retained builtin needs actual startup scope");
+    this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+    if (directory !== path.join(owner.root, "builtin-plugins", pluginId))
+      throw new Error("Builtin source differs from retained distribution");
+    const retained = await createQualifiedBuiltinInstance(owner, pluginId);
+    const observation = getQualifiedBuiltinObservation(retained.child, owner);
+    const inherited = this.maintenanceIdentity;
+    const barrier = inherited ?? { generation: 0, transactionId: `builtin-init:${randomUUID()}` };
+    if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+    const loaded = await this.launchPlugin({
+      builtinInstance: { child: retained.child, directory },
+      initializationBarrier: barrier,
+      pluginId,
+      pluginDirectory: directory,
+      requirements: retained.manifest.requirements,
+      child: retained.child,
+      bundle: retained.serverBundle,
+      clientBundle: "",
+      beforeInitialize: async (dispatch) => {
+        await owner.refresh();
+        this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+        const current = getQualifiedBuiltinObservation(retained.child, owner);
+        if (current.instanceId !== observation.instanceId)
+          throw new Error("Builtin initialization instance changed");
+        if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+        dispatch();
+      },
+    });
+    try {
+      if ((await this.childBarrier(loaded, barrier, "maintenance.begin")) !== "held")
+        throw new Error("Builtin initialization did not reach idle barrier");
+      await owner.refresh();
+      this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+      if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+      else if ((await this.childBarrier(loaded, barrier, "maintenance.end")) !== "ended")
+        throw new Error("Builtin initialization barrier release uncertain");
+      assertChildAlive(loaded);
+      this.observationEpoch++;
+      this.plugins.set(pluginId, loaded);
+      this.notifySessionOpenChange(loaded);
+      this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    } catch (error) {
+      this.maintenanceUncertain = true;
+      this.dependencies.nativeMaintenance?.holdForUnknownWork();
+      await this.stopPlugin(loaded);
+      throw error;
+    }
   }
 
   async validateActivation(
@@ -725,7 +802,66 @@ export class PluginRuntime {
     return { ticket, attempt };
   }
 
-  async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
+  /** Pure retained-instance observation; no helper, hook or provider work is dispatched. */
+  observeBuiltinCohort(): Map<
+    string,
+    Extract<ManagedPluginCohortV2Entry, { kind: "builtin-in-process" }>
+  > {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!owner || !isQualifiedDaemonOwner(owner)) throw new Error("Builtin observer unavailable");
+    owner.assertFresh();
+    const result = new Map<
+      string,
+      Extract<ManagedPluginCohortV2Entry, { kind: "builtin-in-process" }>
+    >();
+    for (const [pluginId, loaded] of this.plugins) {
+      if (!loaded.builtinInstance) continue;
+      if (loaded.child !== loaded.builtinInstance.child || loaded.termination?.closed)
+        throw new Error("Builtin observed identity closed or changed");
+      const actual = getQualifiedBuiltinObservation(loaded.child, owner);
+      if (actual.id !== pluginId || actual.instanceId !== loaded.instanceId)
+        throw new Error("Builtin observed identity mismatch");
+      const receipt = {
+        kind: "builtin-in-process" as const,
+        pluginId,
+        instanceId: actual.instanceId,
+        enclosingIncarnation: actual.enclosingIncarnation,
+        sourcePath: loaded.builtinInstance.directory,
+        sourceSha256: actual.sourceSha256,
+        serverBundleSha256: actual.serverBundleSha256,
+        moduleTableSha256: actual.moduleTableSha256,
+        profileSha256: actual.profileSha256,
+        closure: { ...actual.closure },
+      };
+      let execution: Extract<
+        ManagedPluginCohortV2Entry,
+        { kind: "builtin-in-process" }
+      >["execution"] = null;
+      try {
+        assertQualifiedBuiltinInstance(loaded.child, owner, pluginId);
+        if (actual.profileSha256)
+          execution = {
+            ...receipt,
+            profileSha256: actual.profileSha256,
+            contract: "builtin-in-process-v1",
+            distributionBuildId: actual.distributionBuildId,
+          };
+      } catch {
+        // Provenance is observable without a finite protected execution profile.
+      }
+      result.set(pluginId, {
+        kind: "builtin-in-process",
+        pluginId,
+        registration: { path: loaded.builtinInstance.directory },
+        enabled: true,
+        loaded: receipt,
+        execution,
+      });
+    }
+    return result;
+  }
+
+  async observeQualifiedDirectoryExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
     const owner = this.dependencies.qualifiedDaemonOwner;
     const policy = this.dependencies.activationPolicy;
     if (!owner || !isQualifiedDaemonOwner(owner) || !policy)
@@ -734,7 +870,27 @@ export class PluginRuntime {
     await owner.refresh();
     const result = new Map<string, ManagedPluginCohortExecution>();
     for (const [id, loaded] of this.plugins)
-      result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+      if (!loaded.builtinInstance)
+        result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    await owner.refresh();
+    if (epoch !== this.observationEpoch) throw new Error("Plugin cohort changed");
+    return result;
+  }
+
+  async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const policy = this.dependencies.activationPolicy;
+    if (!owner || !isQualifiedDaemonOwner(owner) || !policy)
+      throw new Error("Qualified runtime authority unavailable");
+    const epoch = this.observationEpoch;
+    await owner.refresh();
+    const result = new Map<string, ManagedPluginCohortExecution>();
+    for (const [id, loaded] of this.plugins) {
+      if (loaded.builtinInstance) {
+        assertQualifiedBuiltinInstance(loaded.child, owner, id);
+        if (loaded.termination?.closed) throw new Error("Builtin instance closed");
+      } else result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    }
     await owner.refresh();
     if (epoch !== this.observationEpoch) throw new Error("Plugin cohort changed");
     return result;
@@ -1276,13 +1432,16 @@ export class PluginRuntime {
   }
 
   async stopAll(): Promise<void> {
+    this.observationEpoch++;
     const loaded = [...this.plugins.values()];
     this.plugins.clear();
     for (const plugin of loaded) {
       this.notifySessionOpenChange(plugin);
       this.rejectPending(plugin, `Plugin stopped: ${plugin.id}`);
     }
-    await Promise.all(loaded.map((plugin) => this.stopPlugin(plugin)));
+    const results = await Promise.allSettled(loaded.map((plugin) => this.stopPlugin(plugin)));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   private async loadDirectoryPlugin(
@@ -1531,6 +1690,7 @@ export class PluginRuntime {
 
   private async launchPlugin(input: {
     qualifiedChild?: QualifiedOwnedChild;
+    builtinInstance?: { child: InternalPluginChild; directory: string };
     initializationBarrier?: PluginMaintenanceIdentity;
     activationTicket?: ActivationTicket;
     pluginId: string;
@@ -1545,7 +1705,12 @@ export class PluginRuntime {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
     this.observationEpoch++;
     const termination = observeChildTermination(child);
-    const instanceId = input.qualifiedChild?.incarnation ?? randomUUID();
+    const instanceId = input.builtinInstance
+      ? getQualifiedBuiltinObservation(
+          input.builtinInstance.child,
+          this.dependencies.qualifiedDaemonOwner,
+        ).instanceId
+      : (input.qualifiedChild?.incarnation ?? randomUUID());
     const executionOwner = new PluginExecutionOwner(
       instanceId,
       this.dependencies.nativeMaintenance,
@@ -1655,7 +1820,7 @@ export class PluginRuntime {
               pluginDirectory: input.pluginDirectory,
               managedSource: input.managedSource === true,
               hostInstanceId: instanceId,
-              ...(input.qualifiedChild && input.initializationBarrier
+              ...((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier
                 ? {
                     passiveInitialization: {
                       contract: "native-passive-contract-1" as const,
@@ -1684,6 +1849,7 @@ export class PluginRuntime {
       id: pluginId,
       instanceId,
       qualifiedChild: input.qualifiedChild,
+      builtinInstance: input.builtinInstance,
       activationTicket: input.activationTicket,
       executionOwner,
       clientBundle,
@@ -2148,6 +2314,19 @@ export class PluginRuntime {
       return;
     }
     const closed = termination.completion;
+    if (child instanceof InternalPluginChild) {
+      try {
+        await child.retire();
+        await closed;
+        sessionSocket.peerClosed();
+        await sessionClosed;
+        this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
+        return;
+      } catch (error) {
+        loaded.executionOwner?.markUnknown();
+        throw error;
+      }
+    }
     if (child.connected) {
       await send(child, { type: "shutdown" }).catch(() => undefined);
     }

@@ -72,7 +72,7 @@ export function createPluginWorker(
     | { contribute: PluginServerContribution }
     | { loadContribution: (source: string) => PluginServerContribution }
   ),
-): { shutdown(): Promise<void> } {
+): { shutdown(): Promise<void>; readonly activityOwner: PluginActivityOwner } {
   const { channel } = options;
   const activity = new PluginActivityOwner(() =>
     send({ type: "execution.unknown", instanceId: hostInstanceId }),
@@ -467,26 +467,37 @@ export function createPluginWorker(
     }
   }
 
-  async function shutdown(): Promise<void> {
-    if (stopping) return;
+  let shutdownCompletion: Promise<void> | undefined;
+  function shutdown(): Promise<void> {
+    if (shutdownCompletion) return shutdownCompletion;
     stopping = true;
-    const releaseApi = paseo
-      ?.dispose()
-      .catch((error) => console.error("Plugin API cleanup failed", error));
-    hooks.close();
-    agentTools.close();
-    subscriptions.releaseAll();
-    for (const pending of pendingProviderConnections.values()) pending.tombstoned = true;
-    const currentCleanup = cleanup;
-    cleanup = null;
+    shutdownCompletion = finishShutdown();
+    return shutdownCompletion;
+  }
+  async function finishShutdown(): Promise<void> {
+    const retirement = activity.retirementCleanup();
     try {
-      await currentCleanup?.();
+      await retirement.run(async () => {
+        const releaseApi = paseo?.dispose();
+        hooks.close();
+        agentTools.close();
+        subscriptions.releaseAll();
+        for (const pending of pendingProviderConnections.values()) pending.tombstoned = true;
+        const currentCleanup = cleanup;
+        cleanup = null;
+        // Actual cleanup failure leaves retirement unknown; it cannot become a close ACK.
+        await currentCleanup?.();
+        await Promise.all([...providerConnections.keys()].map(closeProviderConnection));
+        await releaseApi;
+        await daemonClient?.close();
+      });
     } catch (error) {
-      console.error("Plugin cleanup failed", error);
+      activity.markUnknown();
+      throw error;
+    } finally {
+      retirement.release();
     }
-    await Promise.all([...providerConnections.keys()].map(closeProviderConnection));
-    await releaseApi;
-    await daemonClient?.close().catch(() => undefined);
+    await activity.waitForRetirement();
     await sendAndWait({ type: "paseo_close" });
     daemonClient = null;
     paseo = null;
@@ -658,7 +669,10 @@ export function createPluginWorker(
       if (rejectInvalidProviderInput(rawMessage, parsed.error.message)) return;
       activity.markUnknown();
       send({ type: "fatal", error: `Invalid plugin process request: ${parsed.error.message}` });
-      void shutdown();
+      void shutdown().catch((error) => {
+        activity.markUnknown();
+        console.error("Plugin shutdown failed", error);
+      });
       return;
     }
     const message = parsed.data;
@@ -677,7 +691,10 @@ export function createPluginWorker(
         });
         return;
       case "shutdown":
-        void shutdown();
+        void shutdown().catch((error) => {
+          activity.markUnknown();
+          console.error("Plugin shutdown failed", error);
+        });
         return;
       case "maintenance.begin":
       case "maintenance.end":
@@ -705,7 +722,7 @@ export function createPluginWorker(
   }
   channel.onMessage(handleMessage);
 
-  return { shutdown };
+  return Object.freeze({ shutdown, activityOwner: activity });
 }
 
 /** Producer entry supplies its fixed evaluator after private host validation and helper admission. */

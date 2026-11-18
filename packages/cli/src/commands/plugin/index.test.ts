@@ -70,9 +70,15 @@ const getManagedPluginCohortStatus = vi.fn(async () => ({
   reason: "incomplete" as const,
 }));
 
+const getManagedPluginCohortV2Status = vi.fn(async () => ({
+  version: 2 as const,
+  consistency: "uncertain" as const,
+  reason: "incomplete" as const,
+}));
 const features: {
   managedPluginStatus?: boolean;
   managedPluginCohortStatus?: boolean;
+  managedPluginCohortV2?: boolean;
   managedPluginPromotions?: boolean;
   pluginManagement?: boolean;
   pluginLogs?: boolean;
@@ -88,6 +94,7 @@ vi.mock("../../utils/client.js", () => ({
     recoverPlugin,
     getManagedPluginStatus,
     getManagedPluginCohortStatus,
+    getManagedPluginCohortV2Status,
     getPluginLogs,
     installDirectoryPlugin,
     installPluginSource,
@@ -106,6 +113,7 @@ import {
   runPluginRecoverCommand,
   runManagedPluginStatusCommand,
   runManagedPluginCohortStatusCommand,
+  runManagedPluginCohortV2StatusCommand,
 } from "./index.js";
 
 describe("plugin management commands", () => {
@@ -128,10 +136,22 @@ describe("plugin management commands", () => {
     const result = await runManagedPluginCohortStatusCommand({ daemonTarget }, {} as never);
     expect(result.data).toEqual({ version: 1, consistency: "uncertain", reason: "incomplete" });
   });
+  it("requires the distinct V2 transport feature without falling back to V1", async () => {
+    features.managedPluginCohortStatus = true;
+    await expect(
+      runManagedPluginCohortV2StatusCommand({ daemonTarget }, {} as never),
+    ).rejects.toMatchObject({ code: "DAEMON_UPDATE_REQUIRED" });
+    expect(getManagedPluginCohortV2Status).not.toHaveBeenCalled();
+    expect(getManagedPluginCohortStatus).not.toHaveBeenCalled();
+    features.managedPluginCohortV2 = true;
+    const result = await runManagedPluginCohortV2StatusCommand({ daemonTarget }, {} as never);
+    expect(result.data).toEqual({ version: 2, consistency: "uncertain", reason: "incomplete" });
+  });
   beforeEach(() => {
     features.managedPluginPromotions = false;
     features.managedPluginStatus = false;
     features.managedPluginCohortStatus = false;
+    features.managedPluginCohortV2 = false;
     features.pluginManagement = false;
     features.pluginLogs = false;
     features.pluginGitManagement = false;

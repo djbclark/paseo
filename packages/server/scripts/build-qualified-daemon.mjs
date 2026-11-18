@@ -4,6 +4,8 @@ import { isBuiltin, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
+import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = path.resolve(packageRoot, "../..");
 const digest = (data) => createHash("sha256").update(data).digest("hex");
@@ -87,7 +89,11 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       external: externals,
       metafile: true,
       banner: { js: banner },
-      define: { __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId), ...define },
+      define: {
+        __PASEO_QUALIFIED_PLUGIN_ENTRY__: "true",
+        __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
+        ...define,
+      },
       plugins: [
         {
           name: "qualified-no-optional-native-accelerators",
@@ -123,7 +129,8 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     try {
       metadataPath = fromRequire.resolve(`${name}/package.json`);
     } catch {
-      const entry = fromRequire.resolve(name);
+      // Protocol deliberately exports only named entrypoints, never a root main.
+      const entry = fromRequire.resolve(name === "@getpaseo/protocol" ? `${name}/messages` : name);
       let current = path.dirname(entry);
       for (;;) {
         try {
@@ -177,7 +184,14 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     { recursive: true },
   );
   await cp(path.join(packageRoot, "package.json"), path.join(outDir, "package.json"));
-  const sourceInputs = [];
+  const retainedBuiltins = await retainBuiltinPlugins(repositoryRoot, outDir);
+  const compiledBuiltins = await precompileBuiltinPlugins(
+    repositoryRoot,
+    outDir,
+    retainedBuiltins.sourceInputs,
+    inputMetafile,
+  );
+  const sourceInputs = [...retainedBuiltins.sourceInputs, ...compiledBuiltins.sourceInputs];
   const inputNames = [
     ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
   ].sort();
@@ -192,6 +206,8 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     JSON.stringify({
       schemaVersion: 2,
       distributionBuildId,
+      builtinPlugins: retainedBuiltins.ids,
+      builtinArtifacts: compiledBuiltins.artifacts,
       metafiles: allInputs,
       sourceInputs,
       builtinDependencies: [

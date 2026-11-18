@@ -63,19 +63,29 @@ export function spawnProcess(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
-  const release = acquirePluginHelper();
+  const effectiveOptions = {
+    ...spawnOptions,
+    env: options?.env,
+    shell,
+    signal: options?.signal,
+    windowsHide: true,
+  };
+  const helper = acquirePluginHelper({
+    kind: "spawn",
+    command: resolvedCommand,
+    args: resolvedArgs,
+    options: effectiveOptions,
+  });
+  let child: ChildProcess | undefined;
   try {
-    const child = spawn(resolvedCommand, resolvedArgs, {
-      ...spawnOptions,
-      env: options?.env,
-      shell,
-      signal: options?.signal,
-      windowsHide: true,
-    });
-    child.once("close", release);
+    child = spawn(resolvedCommand, resolvedArgs, effectiveOptions);
+    child.once("close", helper.release);
+    child.once("error", helper.failed);
+    helper.bind(child);
     return child;
   } catch (error) {
-    release();
+    helper.failed(error);
+    if (!child) helper.release();
     throw error;
   }
 }
@@ -91,33 +101,38 @@ export async function execCommand(
   const resolvedCommand = shouldQuoteForShell ? quoteWindowsCommand(command) : command;
   const resolvedArgs = shouldQuoteForShell ? args.map(quoteWindowsArgument) : args;
 
-  const release = acquirePluginHelper();
+  const effectiveOptions = {
+    cwd: options?.cwd,
+    env: options?.env,
+    encoding: options?.encoding ?? "utf8",
+    signal: options?.signal,
+    killSignal: options?.killSignal,
+    timeout: options?.timeout,
+    maxBuffer: options?.maxBuffer,
+    shell,
+    windowsHide: true,
+  };
+  const helper = acquirePluginHelper({
+    kind: "execFile",
+    command: resolvedCommand,
+    args: resolvedArgs,
+    options: effectiveOptions,
+  });
   return new Promise<ExecCommandResult>((resolve, reject) => {
+    let child: ChildProcess | undefined;
     try {
-      const child = execFile(
-        resolvedCommand,
-        resolvedArgs,
-        {
-          cwd: options?.cwd,
-          env: options?.env,
-          encoding: options?.encoding ?? "utf8",
-          signal: options?.signal,
-          killSignal: options?.killSignal,
-          timeout: options?.timeout,
-          maxBuffer: options?.maxBuffer,
-          shell,
-          windowsHide: true,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            Object.assign(error, { stdout, stderr });
-            reject(error);
-          } else resolve({ stdout, stderr });
-        },
-      );
-      child.once("close", release);
+      child = execFile(resolvedCommand, resolvedArgs, effectiveOptions, (error, stdout, stderr) => {
+        if (error) {
+          Object.assign(error, { stdout, stderr });
+          reject(error);
+        } else resolve({ stdout, stderr });
+      });
+      child.once("close", helper.release);
+      child.once("error", helper.failed);
+      helper.bind(child);
     } catch (error) {
-      release();
+      helper.failed(error);
+      if (!child) helper.release();
       reject(error);
     }
   });

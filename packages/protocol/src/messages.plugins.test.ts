@@ -688,3 +688,100 @@ describe("maintenance known failed-held additive protocol", () => {
     ).toBe(false);
   });
 });
+
+describe("managed cohort V2 in-process identity", () => {
+  const closure = {
+    runtimeClosureSha256: "a".repeat(64),
+    helperClosureSha256: "b".repeat(64),
+    qualificationSha256: "c".repeat(64),
+  };
+  const loaded = {
+    kind: "builtin-in-process",
+    pluginId: "worktree-include",
+    instanceId: "actual-instance",
+    enclosingIncarnation: "daemon-birth",
+    sourcePath: "/retained/builtin-plugins/worktree-include",
+    sourceSha256: "d".repeat(64),
+    serverBundleSha256: "e".repeat(64),
+    moduleTableSha256: "f".repeat(64),
+    profileSha256: null,
+    closure,
+  };
+  const entry = {
+    kind: "builtin-in-process",
+    pluginId: "worktree-include",
+    registration: { path: loaded.sourcePath },
+    enabled: true,
+    loaded,
+    execution: null,
+  };
+  const response = {
+    type: "plugins.managed.cohort.v2.status.response",
+    payload: {
+      requestId: "v2",
+      status: {
+        version: 2,
+        consistency: "coherent",
+        observationEpoch: 4,
+        enclosing: {
+          serverId: "server",
+          incarnation: "daemon-birth",
+          distributionBuildId: "build",
+          closure,
+        },
+        entries: [entry],
+      },
+    },
+  };
+  it("keeps provenance without manufacturing a qualified execution", () => {
+    const request = { type: "plugins.managed.cohort.v2.status.request", requestId: "v2" };
+    expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+    const qualified = {
+      ...entry,
+      loaded: { ...loaded, profileSha256: "1".repeat(64) },
+      execution: {
+        ...loaded,
+        profileSha256: "1".repeat(64),
+        contract: "builtin-in-process-v1",
+        distributionBuildId: "build",
+      },
+    };
+    const message = {
+      ...response,
+      payload: {
+        ...response.payload,
+        status: { ...response.payload.status, entries: [qualified] },
+      },
+    };
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
+  it.each([
+    { ...entry, journal: { version: 1, generation: 0, phase: "ready" } },
+    { ...entry, loaded: { ...loaded, pid: 10 } },
+    { ...entry, loaded: { ...loaded, activationGeneration: 0 } },
+    {
+      ...entry,
+      execution: { ...loaded, contract: "builtin-in-process-v1", distributionBuildId: "build" },
+    },
+    { ...entry, ownerToken: "forbidden" },
+  ])("rejects invented process/journal authority and nullable execution profile", (invalid) => {
+    expect(
+      SessionOutboundMessageSchema.safeParse({
+        ...response,
+        payload: {
+          ...response.payload,
+          status: { ...response.payload.status, entries: [invalid] },
+        },
+      }).success,
+    ).toBe(false);
+  });
+  it("does not coerce the V2 union through V1", () => {
+    expect(
+      SessionOutboundMessageSchema.safeParse({
+        type: "plugins.managed.cohort.status.response",
+        payload: { ...response.payload, status: { ...response.payload.status, version: 1 } },
+      }).success,
+    ).toBe(false);
+  });
+});

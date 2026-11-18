@@ -1,3 +1,7 @@
+import { readBuiltinProfiles } from "./builtin-profile.js";
+import { canonicalBuiltinJson } from "./builtin-format.js";
+import builtinBindingsRecipe from "./builtin-bindings-recipe.json" with { type: "json" };
+import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
@@ -92,6 +96,7 @@ async function enrollment(root: string): Promise<{
   distributionBuildId: string;
   qualificationSha256: string;
   authorityIdentity: string;
+  builtinProfiles?: unknown;
 }> {
   const account = userInfo();
   const home = await realpath(account.homedir);
@@ -166,8 +171,71 @@ function assertManifestIdentity(
     manifest.esbuild.path !== "runtime/esbuild"
   )
     return unsupported();
+  if (JSON.stringify(manifest.builtinPlugins) !== JSON.stringify(builtinPlugins))
+    return unsupported();
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return unsupported();
+}
+function assertBuiltinModuleTable(manifest: DaemonManifest): void {
+  const expectedTable = {
+    schemaVersion: 1,
+    recipe: builtinBindingsRecipe,
+    runtimeSha256: manifest.runtime.sha256,
+    daemonSha256: manifest.files.find((file) => file.path === "daemon.mjs")?.sha256,
+    externalLibraries: manifest.externalLibraries,
+  };
+  if (
+    JSON.stringify(manifest.builtinModuleTable) !== JSON.stringify(expectedTable) ||
+    manifest.moduleTableSha256 !== digest(canonicalBuiltinJson(expectedTable))
+  )
+    return unsupported();
+}
+function assertBuiltinArtifacts(manifest: DaemonManifest): void {
+  assertBuiltinModuleTable(manifest);
+  if (
+    !Array.isArray(manifest.builtinArtifacts) ||
+    JSON.stringify(manifest.builtinArtifacts.map((row) => row.id)) !==
+      JSON.stringify(builtinPlugins)
+  )
+    return unsupported();
+  for (const row of manifest.builtinArtifacts) {
+    const prefix = `builtin-compiled/${row.id}`;
+    if (
+      row.factoryPath !== `${prefix}/server.factory.js` ||
+      row.manifestPath !== `${prefix}/manifest.json` ||
+      row.metafilePath !== `${prefix}/metafile.json` ||
+      row.sourceIdentityPath !== `${prefix}/source-identity.json` ||
+      row.moduleTableSha256 !== manifest.moduleTableSha256 ||
+      !/^[a-f0-9]{64}$/.test(row.sourceSha256) ||
+      !Array.isArray(row.moduleImports)
+    )
+      return unsupported();
+    const factory = manifest.files.find((file) => file.path === row.factoryPath);
+    const original = manifest.files.find((file) => file.path === `${prefix}/server-original.js`);
+    if (
+      !factory ||
+      factory.sha256 !== row.serverBundleSha256 ||
+      !original ||
+      original.sha256 !== row.originalServerBundleSha256 ||
+      !manifest.files.some((file) => file.path === row.manifestPath) ||
+      !manifest.files.some((file) => file.path === row.metafilePath) ||
+      !manifest.files.some(
+        (file) => file.path === row.sourceIdentityPath && file.sha256 === row.sourceSha256,
+      )
+    )
+      return unsupported();
+  }
+}
+async function assertBuiltinInventory(root: string, names: string[]): Promise<void> {
+  const builtinDirectories = (
+    await readdir(path.join(root, "builtin-plugins"), { withFileTypes: true })
+  )
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  if (JSON.stringify(builtinDirectories) !== JSON.stringify(builtinPlugins)) return unsupported();
+  for (const id of builtinPlugins)
+    if (!names.includes(`builtin-plugins/${id}/paseo-plugin.json`)) return unsupported();
 }
 export async function verifyEnclosingDistribution(root: string) {
   if (
@@ -186,6 +254,7 @@ export async function verifyEnclosingDistribution(root: string) {
   const manifestSha256 = digest(raw);
   const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
   assertManifestIdentity(manifest, expected, manifestSha256);
+  assertBuiltinArtifacts(manifest);
   const names: string[] = [];
   async function visit(directory: string): Promise<void> {
     for (const name of await readdir(directory)) {
@@ -199,6 +268,7 @@ export async function verifyEnclosingDistribution(root: string) {
     }
   }
   await visit(root);
+  await assertBuiltinInventory(root, names);
   if (
     JSON.stringify(names.sort()) !== JSON.stringify(manifest.files.map((file) => file.path).sort())
   )
@@ -241,6 +311,7 @@ export async function verifyEnclosingDistribution(root: string) {
     manifest,
     manifestSha256,
     authorityIdentity: expected.authorityIdentity,
+    builtinProfiles: readBuiltinProfiles(expected.builtinProfiles),
     closure: Object.freeze({
       runtimeClosureSha256: manifestSha256,
       helperClosureSha256,

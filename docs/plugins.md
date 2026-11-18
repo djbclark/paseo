@@ -26,22 +26,29 @@ select managed snapshot validation rules. It cannot bypass native policy gates.
 
 ## Complete cohort observation (fork)
 
-`plugin cohort-status --json` uses `plugins.managed.cohort.status.request` and the
-optional `managedPluginCohortStatus` feature. Its strict version 1 response is a
-bounded, serialized observation. `coherent` includes the enclosing daemon identity,
-complete configured/builtin/loaded/enrolled plugin union, current registrations,
-journals, actual loaded receipts, and privately bound passive execution closure
-triples. Journal generation is the mutation CAS; loaded generation identifies the
-launch. A coherent observation grants no future operation permission.
+Use `plugin cohort-v2-status --json` for a host with in-process builtins. It requires
+`managedPluginCohortV2` and calls `plugins.managed.cohort.v2.status.request`.
+The strict version 2 response observes the complete configured, retained builtin,
+loaded and enrolled union under lifecycle serialization. Directory entries keep
+journal CAS separate from their tagged child launch receipt. Builtin entries
+carry actual instance and enclosing incarnation, retained source, evaluated bundle,
+module table and protected profile digests. They have no child PID, activation
+ordinal or promotion journal. A null profile or execution is provenance only;
+maintenance requires every actual builtin's protected profile and private instance
+validation. The feature advertises the read interface, not qualification.
 
-Missing executing authority, incomplete or unqualified hosts, changed identities,
-and a busy read return explicit `uncertain`. Normal read authorization applies
-while maintenance is held. The protected producer's fixed measurement getter also
-checks the synchronous runtime/compiler epoch after its final awaited refresh.
-It cannot trigger compilation or select a candidate. Compiler observations exist
-only after native held-scope work and actual owned helper/Worker settlement; two
-cold runs require distinct actual Worker identities and matching bytes/snapshots.
-These observations do not enable maintenance support by themselves.
+`plugin cohort-status --json` retains its version 1 child-only shape and
+`managedPluginCohortStatus` feature. A cohort containing builtins returns explicit
+uncertainty through V1. Clients choosing V2 do not fall back to V1.
+
+A coherent response is one observation, not permission for a later operation.
+Missing authority, changed identities and busy reads return explicit uncertainty.
+Normal read authorization applies while maintenance is held. Protected measurement
+uses the fixed V2 getter explicitly and checks the synchronous runtime/compiler
+epoch after its final awaited refresh. It cannot select a candidate or trigger
+compilation. Compiler observations require native held-scope work and actual owned
+helper/Worker settlement; cold runs have distinct actual Worker identities and
+matching bytes and snapshots. These observations alone do not enable maintenance.
 
 ## Passive maintenance prototype (fork)
 
@@ -64,8 +71,11 @@ after its private execution validation. Contribution loading runs inside the
 already-created initialization activity owner. Its build defines
 `__PASEO_QUALIFIED_PLUGIN_ENTRY__` to suppress legacy direct-entry auto-wiring;
 this literal supplies no execution authority. The internal SDK's one-shot
-`installQualifiedHelperAdmission` hook runs before async activity lookup, so a
-sealed zero-helper profile rejects module-level helper launches too. Candidate
+`installQualifiedHelperAdmission` hook receives the current private activity root
+before helper launch or unscoped fallback. A sealed zero-helper profile rejects
+module-level helper launches too. Builtin admission uses the same live root and
+retains it through actual child close AND the producer's helper/descendant
+settlement; a callback, abort, timeout, or leader exit alone cannot release it. Candidate
 imports must not expose that internal namespace. These entry points alone supply
 no qualified binding or permission.
 

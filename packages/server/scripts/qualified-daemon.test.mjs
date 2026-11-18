@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 
 // Disposable Linux CI only. This fixture checks the real v2 acquisition gate;
 // native/plugin/controller A-B-A acceptance is owned by the coupled fixture.
@@ -75,6 +77,57 @@ test(
     await mkdir(path.dirname(policyPath), { recursive: true, mode: 0o700 });
     const raw = await readFile(`${staged}.manifest.json`);
     const manifest = JSON.parse(raw);
+    assert.deepEqual(manifest.builtinPlugins, builtinPlugins);
+    const inputs = JSON.parse(await readFile(path.join(staged, "inputs.json"), "utf8"));
+    assert.deepEqual(inputs.builtinPlugins, builtinPlugins);
+    assert.deepEqual(
+      manifest.builtinArtifacts.map((row) => row.id),
+      builtinPlugins,
+    );
+    assert.deepEqual(
+      manifest.builtinArtifacts,
+      inputs.builtinArtifacts.map((row) => ({
+        ...row,
+        moduleTableSha256: manifest.moduleTableSha256,
+      })),
+    );
+    assert.equal(
+      createHash("sha256").update(canonicalBuiltinJson(manifest.builtinModuleTable)).digest("hex"),
+      manifest.moduleTableSha256,
+    );
+    for (const id of builtinPlugins) {
+      const artifact = manifest.builtinArtifacts.find((row) => row.id === id);
+      assert.ok(artifact);
+      assert.equal(
+        createHash("sha256")
+          .update(await readFile(path.join(staged, artifact.sourceIdentityPath)))
+          .digest("hex"),
+        artifact.sourceSha256,
+      );
+      assert.equal(
+        createHash("sha256")
+          .update(await readFile(path.join(staged, artifact.factoryPath)))
+          .digest("hex"),
+        artifact.serverBundleSha256,
+      );
+      assert.ok(
+        (await readFile(path.join(staged, artifact.metafilePath), "utf8")).includes("inputs"),
+      );
+      const name = `builtin-plugins/${id}/paseo-plugin.json`;
+      const file = manifest.files.find((row) => row.path === name);
+      assert.ok(file, `Actual builtin source missing: ${id}`);
+      assert.equal(
+        file.sha256,
+        createHash("sha256")
+          .update(await readFile(path.join(staged, name)))
+          .digest("hex"),
+      );
+      assert.ok(
+        inputs.sourceInputs.some(
+          (row) => row.path === `plugins/${id}/paseo-plugin.json` && row.sha256 === file.sha256,
+        ),
+      );
+    }
     const enrollment = {
       immutableRoot: root,
       immutabilityAdapter: "linux-root-owned-retained-v1",

@@ -1432,13 +1432,16 @@ export class PluginRuntime {
   }
 
   async stopAll(): Promise<void> {
+    this.observationEpoch++;
     const loaded = [...this.plugins.values()];
     this.plugins.clear();
     for (const plugin of loaded) {
       this.notifySessionOpenChange(plugin);
       this.rejectPending(plugin, `Plugin stopped: ${plugin.id}`);
     }
-    await Promise.all(loaded.map((plugin) => this.stopPlugin(plugin)));
+    const results = await Promise.allSettled(loaded.map((plugin) => this.stopPlugin(plugin)));
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   private async loadDirectoryPlugin(
@@ -2311,6 +2314,19 @@ export class PluginRuntime {
       return;
     }
     const closed = termination.completion;
+    if (child instanceof InternalPluginChild) {
+      try {
+        await child.retire();
+        await closed;
+        sessionSocket.peerClosed();
+        await sessionClosed;
+        this.appendLog(loaded.id, "stdout", "[paseo] Plugin stopped");
+        return;
+      } catch (error) {
+        loaded.executionOwner?.markUnknown();
+        throw error;
+      }
+    }
     if (child.connected) {
       await send(child, { type: "shutdown" }).catch(() => undefined);
     }

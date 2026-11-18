@@ -1514,11 +1514,29 @@ export class PluginService {
 
   async stopAllPlugins(): Promise<void> {
     this.globalStartsBlocked = true;
-    const stopping = this.stopAll();
-    await this.enqueue(async () => {
-      await stopping;
-      await this.stopAll();
+    this.qualifiedEpoch++;
+    this.qualifiedMutations++;
+    // Shutdown's native cleanup lease already owns this fixed drain. Normal enqueue
+    // acquires NEW work and must continue to reject while admission is held.
+    const stopping = this.stopAll().then(
+      () => ({ ok: true as const }),
+      (error) => ({ ok: false as const, error }),
+    );
+    const drain = async () => {
+      const first = await stopping;
+      const final = await Promise.allSettled([this.stopAll()]);
+      if (!first.ok) throw first.error;
+      if (final[0]?.status === "rejected") throw final[0].reason;
+    };
+    const result = this.lifecycle.then(drain, drain).finally(() => {
+      this.qualifiedMutations--;
+      this.qualifiedEpoch++;
     });
+    this.lifecycle = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    await result;
   }
 
   private handleGlobalSwitch(enabled: boolean): void {

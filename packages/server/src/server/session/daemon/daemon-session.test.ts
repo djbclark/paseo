@@ -1427,8 +1427,8 @@ describe("native maintenance participant serialization", () => {
     const end = vi.fn(async () => {});
     const f = await fixture({ supportsV1: () => true, begin: async () => "known-busy", end });
     try {
-      const error = await f.reservation.begin(1, "busy").catch((error: unknown) => error);
-      expect(maintenanceBeginErrorCode(error)).toBe("MAINTENANCE_KNOWN_BUSY");
+      const refusal = await f.reservation.begin(1, "busy").catch((error: unknown) => error);
+      expect(maintenanceBeginErrorCode(refusal)).toBe("MAINTENANCE_KNOWN_BUSY");
       expect(f.reservation.status().state).toBe("idle");
       expect(end).toHaveBeenCalledWith({ generation: 1, transactionId: "busy" });
       f.reservation.enter()();
@@ -1554,11 +1554,11 @@ describe("native maintenance participant serialization", () => {
       },
     });
     try {
-      const error = await f.reservation
+      const refusal = await f.reservation
         .begin(1, "busy-rollback-failed")
         .catch((error: unknown) => error);
-      expect(maintenanceBeginErrorCode(error)).toBeUndefined();
-      expect(error).toBeInstanceOf(Error);
+      expect(maintenanceBeginErrorCode(refusal)).toBeUndefined();
+      expect(refusal).toBeInstanceOf(Error);
       expect(f.reservation.status().state).toBe("recovery-required");
       expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
         "recovery-required",

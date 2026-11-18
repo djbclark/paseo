@@ -261,7 +261,7 @@ import {
 } from "./hub/relationship-remote.js";
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
-import { BuiltinPluginLoader } from "./plugins/builtin/index.js";
+import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./plugins/builtin/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
@@ -533,6 +533,11 @@ export interface PaseoDaemonDependencies {
 }
 
 function resolveBuiltinPluginLoader(dependencies: PaseoDaemonDependencies): BuiltinPluginLoader {
+  if (dependencies.qualifiedDaemonOwner) {
+    if (dependencies.builtinPlugins)
+      throw new Error("Qualified daemon requires its complete retained builtin inventory");
+    return createQualifiedBuiltinPluginLoader(dependencies.qualifiedDaemonOwner);
+  }
   return dependencies.builtinPlugins ?? new BuiltinPluginLoader();
 }
 

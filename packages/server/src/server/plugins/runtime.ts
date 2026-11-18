@@ -10,7 +10,10 @@ import {
   getQualifiedBuiltinObservation,
 } from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
-import type { ManagedPluginCohortExecution } from "@getpaseo/protocol/messages";
+import type {
+  ManagedPluginCohortV2Entry,
+  ManagedPluginCohortExecution,
+} from "@getpaseo/protocol/messages";
 import { PluginExecutionOwner } from "./execution-owner.js";
 import { isPluginExecutionRoot } from "./execution-roots.js";
 import {
@@ -797,6 +800,81 @@ export class PluginRuntime {
       ticket,
     );
     return { ticket, attempt };
+  }
+
+  /** Pure retained-instance observation; no helper, hook or provider work is dispatched. */
+  observeBuiltinCohort(): Map<
+    string,
+    Extract<ManagedPluginCohortV2Entry, { kind: "builtin-in-process" }>
+  > {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!owner || !isQualifiedDaemonOwner(owner)) throw new Error("Builtin observer unavailable");
+    owner.assertFresh();
+    const result = new Map<
+      string,
+      Extract<ManagedPluginCohortV2Entry, { kind: "builtin-in-process" }>
+    >();
+    for (const [pluginId, loaded] of this.plugins) {
+      if (!loaded.builtinInstance) continue;
+      if (loaded.child !== loaded.builtinInstance.child || loaded.termination?.closed)
+        throw new Error("Builtin observed identity closed or changed");
+      const actual = getQualifiedBuiltinObservation(loaded.child, owner);
+      if (actual.id !== pluginId || actual.instanceId !== loaded.instanceId)
+        throw new Error("Builtin observed identity mismatch");
+      const receipt = {
+        kind: "builtin-in-process" as const,
+        pluginId,
+        instanceId: actual.instanceId,
+        enclosingIncarnation: actual.enclosingIncarnation,
+        sourcePath: loaded.builtinInstance.directory,
+        sourceSha256: actual.sourceSha256,
+        serverBundleSha256: actual.serverBundleSha256,
+        moduleTableSha256: actual.moduleTableSha256,
+        profileSha256: actual.profileSha256,
+        closure: { ...actual.closure },
+      };
+      let execution: Extract<
+        ManagedPluginCohortV2Entry,
+        { kind: "builtin-in-process" }
+      >["execution"] = null;
+      try {
+        assertQualifiedBuiltinInstance(loaded.child, owner, pluginId);
+        if (actual.profileSha256)
+          execution = {
+            ...receipt,
+            profileSha256: actual.profileSha256,
+            contract: "builtin-in-process-v1",
+            distributionBuildId: actual.distributionBuildId,
+          };
+      } catch {
+        // Provenance is observable without a finite protected execution profile.
+      }
+      result.set(pluginId, {
+        kind: "builtin-in-process",
+        pluginId,
+        registration: { path: loaded.builtinInstance.directory },
+        enabled: true,
+        loaded: receipt,
+        execution,
+      });
+    }
+    return result;
+  }
+
+  async observeQualifiedDirectoryExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const policy = this.dependencies.activationPolicy;
+    if (!owner || !isQualifiedDaemonOwner(owner) || !policy)
+      throw new Error("Qualified runtime authority unavailable");
+    const epoch = this.observationEpoch;
+    await owner.refresh();
+    const result = new Map<string, ManagedPluginCohortExecution>();
+    for (const [id, loaded] of this.plugins)
+      if (!loaded.builtinInstance)
+        result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    await owner.refresh();
+    if (epoch !== this.observationEpoch) throw new Error("Plugin cohort changed");
+    return result;
   }
 
   async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {

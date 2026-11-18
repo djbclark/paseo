@@ -141,6 +141,7 @@ import type {
   PluginListItem,
   ManagedPluginStatus,
   ManagedPluginCohortStatus,
+  ManagedPluginCohortV2Status,
   PluginLogEntry,
   PluginSourceStatusItem,
   PluginSourceUpdateItem,
@@ -6585,6 +6586,16 @@ export class DaemonClient {
       },
       responseType: "agent.skills.import_legacy_selection.response",
     });
+  }
+
+  async getManagedPluginCohortV2Status(): Promise<ManagedPluginCohortV2Status> {
+    const requestId = this.createRequestId();
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "plugins.managed.cohort.v2.status.request", requestId },
+      responseType: "plugins.managed.cohort.v2.status.response",
+    });
+    return payload.status;
   }
 
   async getManagedPluginCohortStatus(): Promise<ManagedPluginCohortStatus> {

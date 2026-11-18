@@ -7,6 +7,7 @@ type PluginFeature =
   | "managedPluginPromotions"
   | "managedPluginStatus"
   | "managedPluginCohortStatus"
+  | "managedPluginCohortV2"
   | "pluginManagement"
   | "pluginLogs"
   | "pluginSourceUpdates"
@@ -112,6 +113,18 @@ export async function withManagedPluginCohortClient<T>(
     target,
     "managedPluginCohortStatus",
     "Update the host to inspect the complete managed plugin cohort.",
+    run,
+  );
+}
+
+export async function withManagedPluginCohortV2Client<T>(
+  target: DaemonTarget,
+  run: (client: DaemonClient) => Promise<T>,
+): Promise<T> {
+  return withPluginClient(
+    target,
+    "managedPluginCohortV2",
+    "Update the host to inspect the complete in-process managed cohort.",
     run,
   );
 }

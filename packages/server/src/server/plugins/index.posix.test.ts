@@ -34,6 +34,7 @@ import {
   PluginService,
   getQualifiedRuntimeMeasurementEpoch,
   getQualifiedRuntimeMeasurement,
+  getQualifiedRuntimeMeasurementV2,
   readKnownFailedHeld,
 } from "./index.js";
 import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./builtin/index.js";
@@ -3110,6 +3111,12 @@ it("holds complete cohort observation and measurement without genuine executing 
   const forged = {} as import("../execution/daemon-types.js").QualifiedDaemonOwner;
   expect(getQualifiedRuntimeMeasurementEpoch(forged)).toBeNull();
   expect(await getQualifiedRuntimeMeasurement(forged)).toBeNull();
+  expect(await service.getManagedPluginCohortV2Status()).toEqual({
+    version: 2,
+    consistency: "uncertain",
+    reason: "authority-unavailable",
+  });
+  expect(await getQualifiedRuntimeMeasurementV2(forged)).toBeNull();
 });
 
 it("rejects a forged held plugin mutation scope before source preparation or lifecycle changes", async () => {

@@ -269,7 +269,9 @@ export class ElectronAppUpdateRuntime implements AppUpdateRuntime {
       this.authority.assertUnchanged();
       // MacUpdater 6 resolves [] with autoInstallOnAppQuit=false after emitting
       // the verified ZIP's downloadedFile. Never infer an archive from cache names.
-      const archive = files.length === 0 ? this.archive : files.length === 1 ? files[0] : null;
+      let archive: string | null | undefined = null;
+      if (files.length === 0) archive = this.archive;
+      else if (files.length === 1) archive = files[0];
       if (!archive) throw new Error("Managed desktop ZIP archive unavailable");
       this.authority.verifyArchive(archive);
       this.archive = archive;

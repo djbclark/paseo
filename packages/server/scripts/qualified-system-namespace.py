@@ -714,6 +714,16 @@ class Distribution:
         require(text(path) and path.startswith("/") and not path.startswith("//"), "invalid-loader-route")
         budget = {"steps": 0, "links": 0}
         bind_targets = set(self.external) | {"/etc/ld.so.cache"}
+        # realpath is an index hint only. Every associated declaration's parent
+        # is traversed below before the row can authorize the actual leaf inode.
+        physical_aliases = {}
+        for logical, row in self.aliases.items():
+            parent = os.path.realpath(os.path.dirname(logical))
+            physical = parent.rstrip("/") + "/" + os.path.basename(logical)
+            rows = physical_aliases.setdefault(physical, [])
+            require(all(previous["linkText"] == row["linkText"] and previous["target"] == row["target"]
+                        for previous in rows), "conflicting-physical-alias")
+            rows.append(row)
 
         def inspect(current):
             budget["steps"] += 1
@@ -748,8 +758,14 @@ class Distribution:
                 if stat.S_ISLNK(info.st_mode):
                     budget["links"] += 1
                     require(budget["links"] <= 40 and current not in active, "loader-link-cycle-or-bound")
-                    row = self.aliases.get(current)
-                    require(row is not None and os.readlink(current) == row["linkText"], "undeclared-path-alias")
+                    rows = physical_aliases.get(current)
+                    require(rows is not None, "undeclared-path-alias")
+                    for declaration in rows:
+                        parent = walk(os.path.dirname(declaration["path"]), {*active, current})
+                        require(parent == os.path.dirname(current), "alias-parent-mismatch")
+                        require(identity(inspect(declaration["path"])) == identity(info), "alias-inode-mismatch")
+                    row = rows[0]
+                    require(os.readlink(current) == row["linkText"], "undeclared-path-alias")
                     link = row["linkText"]
                     require(text(link) and link, "invalid-link-text")
                     # current's containing directory is already physically resolved.

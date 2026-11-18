@@ -1,3 +1,4 @@
+import * as qualifiedProducer from "./execution/qualified-host.js";
 import * as retainedTerminal from "../terminal/worker-terminal-manager.js";
 import type {
   HeldPluginOperationClaim,
@@ -79,23 +80,10 @@ export interface QualifiedDaemonAccess {
 export async function qualifiedDaemonExecutionAccess(
   owner: QualifiedDaemonOwner | undefined,
 ): Promise<QualifiedDaemonAccess> {
-  const producerModule = "./execution/qualified-host.js";
   let terminalManager: object | undefined;
-  let assertTerminal: ((manager: unknown, owner: unknown) => void) | undefined;
-  let isOwner: ((value: unknown) => boolean) | undefined;
-  let isBinding: ((value: unknown, role: string) => boolean) | undefined;
-  try {
-    const producer: Record<string, unknown> = await import(producerModule);
-    if (typeof producer.isQualifiedDaemonOwner === "function")
-      isOwner = producer.isQualifiedDaemonOwner as typeof isOwner;
-    if (typeof producer.isQualifiedExecutionBinding === "function")
-      isBinding = producer.isQualifiedExecutionBinding as typeof isBinding;
-  } catch {
-    /* Missing genuine enclosing daemon producer remains unsupported. */
-  }
-  const terminal: Record<string, unknown> = retainedTerminal;
-  if (typeof terminal.assertQualifiedWorkerTerminalManager === "function")
-    assertTerminal = terminal.assertQualifiedWorkerTerminalManager as typeof assertTerminal;
+  const isOwner = qualifiedProducer.isQualifiedDaemonOwner;
+  const isBinding = qualifiedProducer.isQualifiedExecutionBinding;
+  const assertTerminal = retainedTerminal.assertQualifiedWorkerTerminalManager;
   const assertQualified = () => {
     if (
       !owner ||

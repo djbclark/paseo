@@ -46,6 +46,7 @@ function policy(): ManagedDesktopPolicy {
         archiveSha256: hex,
         bundleSha256: hex,
         previousBundleSha256: hex,
+        runtimePlugins: [],
       },
     },
   };
@@ -164,5 +165,73 @@ describe("bundle hash v1", () => {
     const root = temporary();
     symlinkSync(os.tmpdir(), path.join(root, "outside"));
     expect(() => bundleSha256(root)).toThrow();
+  });
+});
+
+describe("runtime plugin cohort authority", () => {
+  const record = {
+    pluginId: "managed-plugin",
+    sourcePath: "/snapshots/qualified/plugins/managed-plugin",
+    snapshotRoot: "/snapshots/qualified",
+    snapshotSha256: hex,
+    serverBundleSha256: hex,
+    activationGeneration: 1,
+  };
+  function withCohort(runtimePlugins: unknown, operation: "activate" | "recover") {
+    const current = policy();
+    const grant = { ...current.operations.activate!, runtimePlugins };
+    return {
+      ...current,
+      operations: { download: current.operations.download, [operation]: grant },
+    } as ManagedDesktopPolicy;
+  }
+  it.each(["activate", "recover"] as const)("requires a cohort array on %s grants", (operation) => {
+    for (const value of [undefined, null, {}, "plugins"]) {
+      expect(() =>
+        new ManagedDesktopAuthority(() => withCohort(value, operation)).packageUrl(),
+      ).toThrow("policy unavailable");
+    }
+    for (const value of [[], [record]]) {
+      expect(() =>
+        new ManagedDesktopAuthority(() => withCohort(value, operation)).packageUrl(),
+      ).not.toThrow();
+    }
+  });
+  it.each([
+    { pluginId: "" },
+    { sourcePath: "relative/plugin" },
+    { snapshotRoot: "relative" },
+    { sourcePath: "/snapshots/qualified/../mutable/plugin" },
+    { snapshotRoot: "/snapshots//qualified" },
+    { sourcePath: "/mutable/plugin" },
+    { snapshotRoot: "/" },
+    { snapshotSha256: "A".repeat(64) },
+    { serverBundleSha256: "invalid" },
+    { activationGeneration: 0 },
+    { activationGeneration: 1.5 },
+    { activationGeneration: "1" },
+  ])("rejects invalid enrolled identity %j", (patch) => {
+    expect(() =>
+      new ManagedDesktopAuthority(() =>
+        withCohort([{ ...record, ...patch }], "activate"),
+      ).packageUrl(),
+    ).toThrow("policy unavailable");
+  });
+  it("rejects duplicate IDs and holds a changed cohort after acquisition", () => {
+    expect(() =>
+      new ManagedDesktopAuthority(() => withCohort([record, record], "recover")).packageUrl(),
+    ).toThrow("policy unavailable");
+    let current = withCohort([record], "activate");
+    const authority = new ManagedDesktopAuthority(() => current);
+    authority.downloadMetadata("1.2.4", metadata);
+    current = withCohort([{ ...record, activationGeneration: 2 }], "activate");
+    expect(() => authority.assertUnchanged()).toThrow("changed");
+  });
+  it("keeps download-only permission independent of activation cohort", () => {
+    const current = policy();
+    delete current.operations.activate;
+    expect(() =>
+      new ManagedDesktopAuthority(() => current).downloadMetadata("1.2.4", metadata),
+    ).not.toThrow();
   });
 });

@@ -19,6 +19,35 @@ const common = {
   receiptSha256: hex,
   version: z.string().min(1),
 };
+// These are controller-enrolled snapshot paths, not candidate-selected locations.
+// Filesystem immutability and loaded receipt matching belong to the installer.
+const snapshotPath = z
+  .string()
+  .refine(
+    (value) =>
+      !value.endsWith("/") &&
+      path.posix.isAbsolute(value) &&
+      path.posix.normalize(value) === value &&
+      !value.includes("\0") &&
+      Buffer.from(value, "utf8").toString("utf8") === value,
+  );
+const runtimePlugin = z
+  .object({
+    pluginId: z.string().min(1),
+    sourcePath: snapshotPath,
+    snapshotRoot: snapshotPath,
+    snapshotSha256: hex,
+    serverBundleSha256: hex,
+    activationGeneration: z.number().int().positive(),
+  })
+  .refine(
+    (value) =>
+      value.sourcePath === value.snapshotRoot ||
+      value.sourcePath.startsWith(`${value.snapshotRoot}/`),
+  );
+const runtimePlugins = z
+  .array(runtimePlugin)
+  .refine((entries) => new Set(entries.map((entry) => entry.pluginId)).size === entries.length);
 const schema = z.object({
   schemaVersion: z.literal(1),
   component: z.literal("paseo-desktop"),
@@ -29,9 +58,17 @@ const schema = z.object({
       .object({ ...common, archiveSha256: hex, archiveSha512: z.string(), packageUrl: z.string() })
       .optional(),
     activate: z
-      .object({ ...common, archiveSha256: hex, bundleSha256: hex, previousBundleSha256: hex })
+      .object({
+        ...common,
+        archiveSha256: hex,
+        bundleSha256: hex,
+        previousBundleSha256: hex,
+        runtimePlugins,
+      })
       .optional(),
-    recover: z.object({ ...common, bundleSha256: hex, previousBundleSha256: hex }).optional(),
+    recover: z
+      .object({ ...common, bundleSha256: hex, previousBundleSha256: hex, runtimePlugins })
+      .optional(),
   }),
 });
 function protectedPackageUrl(value: string): URL {

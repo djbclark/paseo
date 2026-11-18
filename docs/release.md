@@ -277,7 +277,14 @@ SHA512; the runtime verifies cached or downloaded archive SHA256 before installa
 Managed activation currently holds because the native maintenance reservation bridge
 is not wired into the desktop runtime. Keep this hold until the bridge verifies the
 reservation and extracted candidate bundle identity, then rechecks policy immediately
-before installation. A policy grant alone cannot authorize a daemon interruption.
+before installation. A policy grant alone cannot authorize a daemon interruption. Activate and recover grants require a
+`runtimePlugins` array from controller enrollment: unique plugin IDs, canonical absolute
+snapshot root and contained source paths, SHA256 snapshot and compiled-server digests,
+and positive activation generations. An empty array represents an enrolled empty cohort;
+candidate metadata cannot choose cohort membership. Schema validation does not prove
+filesystem immutability or loaded identity. The external installer checks immutable
+snapshots and matches the complete cohort against native loaded receipts. Download-only
+grants do not need a cohort and cannot authorize activation or runtime verification.
 `bundleSha256` identifies the entire artifact on disk; it does not attest loaded daemon
 or plugin code. The Python reference encoder in the desktop test utilities checks
 JSONL v1 parity, including Unicode code-point ordering, directories, modes and symlinks.

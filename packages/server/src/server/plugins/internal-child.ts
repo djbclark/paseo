@@ -61,11 +61,17 @@ export class InternalPluginChild extends EventEmitter {
     if (this.closing) return;
     this.closing = Promise.resolve()
       .then(() => this.worker.shutdown())
-      .finally(() => {
+      .then(() => {
         this.connected = false;
         this.stdout.end();
         this.stderr.end();
         this.emit("close", 0, null);
+        return undefined;
+      })
+      .catch((error) => {
+        // No close acknowledgement on failed/uncertain cleanup. The original owner remains held.
+        this.worker.activityOwner.markUnknown();
+        this.stderr.write(`Plugin shutdown failed: ${String(error)}\n`);
       });
   }
 }

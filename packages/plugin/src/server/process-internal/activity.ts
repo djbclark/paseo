@@ -59,6 +59,8 @@ export class PluginActivityOwner {
   private activity = 0;
   private uncertain = false;
   private passive = false;
+  private retired = false;
+  private readonly drainWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
   private readonly onUnknown: () => void;
   constructor(onUnknown: () => void = () => {}) {
     this.onUnknown = onUnknown;
@@ -91,10 +93,27 @@ export class PluginActivityOwner {
     if (this.uncertain) return;
     this.uncertain = true;
     this.onUnknown();
+    for (const waiter of this.drainWaiters)
+      waiter.reject(new Error("Plugin activity is uncertain"));
+    this.drainWaiters.clear();
   }
   acquire(onSettled: () => void = () => {}): PluginActivityLease {
-    if (this.barrier || this.uncertain) throw new Error("Plugin maintenance admission is closed");
+    if (this.barrier || this.uncertain || this.retired)
+      throw new Error("Plugin maintenance admission is closed");
     return this.makeLease(true, onSettled);
+  }
+  /** Lifecycle cleanup is admitted once by the actual worker, before closing new roots. */
+  retirementCleanup(): PluginActivityLease {
+    if (this.retired || this.uncertain) throw new Error("Plugin retirement is uncertain");
+    const lease = this.makeLease(true, () => {});
+    this.retired = true;
+    return lease;
+  }
+  waitForRetirement(): Promise<void> {
+    if (!this.retired || this.uncertain)
+      return Promise.reject(new Error("Plugin retirement is uncertain"));
+    if (this.activity === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => this.drainWaiters.add({ resolve, reject }));
   }
   initialization(): PluginActivityLease {
     if (this.uncertain) throw new Error("Plugin initialization activity is uncertain");
@@ -157,6 +176,10 @@ export class PluginActivityOwner {
     if (lease.references === 0) {
       lease.resource.emitDestroy();
       lease.onSettled();
+    }
+    if (this.retired && this.activity === 0 && !this.uncertain) {
+      for (const waiter of this.drainWaiters) waiter.resolve();
+      this.drainWaiters.clear();
     }
   }
 }

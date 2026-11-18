@@ -3,7 +3,12 @@ import {
   type QualifiedPluginInitialization,
 } from "./qualified-initialization.js";
 import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
-import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
+import {
+  isQualifiedDaemonOwner,
+  createQualifiedBuiltinInstance,
+  assertQualifiedBuiltinInstance,
+  getQualifiedBuiltinObservation,
+} from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
 import type { ManagedPluginCohortExecution } from "@getpaseo/protocol/messages";
 import { PluginExecutionOwner } from "./execution-owner.js";
@@ -130,6 +135,7 @@ interface ChildTermination {
 
 interface LoadedPlugin {
   qualifiedChild?: QualifiedOwnedChild;
+  builtinInstance?: { child: InternalPluginChild; directory: string };
   activationTicket?: ActivationTicket;
   executionOwner?: PluginExecutionOwner;
   termination?: ChildTermination;
@@ -424,6 +430,11 @@ export class PluginRuntime {
     try {
       owner.assertFresh();
       for (const loaded of this.plugins.values()) {
+        if (loaded.builtinInstance) {
+          assertQualifiedBuiltinInstance(loaded.child, owner, loaded.id);
+          if (loaded.termination?.closed) return false;
+          continue;
+        }
         if (
           !loaded.qualifiedChild ||
           !loaded.activationTicket?.authorization.passiveProfile ||
@@ -627,6 +638,11 @@ export class PluginRuntime {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (owner && isQualifiedDaemonOwner(owner)) {
+      await this.startRetainedBuiltin(input.id, directory, owner, initialization);
+      return;
+    }
     const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
     const bundles = await this.compileActivation(
       input.id,
@@ -670,6 +686,61 @@ export class PluginRuntime {
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
+  }
+
+  private async startRetainedBuiltin(
+    pluginId: string,
+    directory: string,
+    owner: QualifiedDaemonOwner,
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<void> {
+    if (!initialization) throw new Error("Retained builtin needs actual startup scope");
+    this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+    if (directory !== path.join(owner.root, "builtin-plugins", pluginId))
+      throw new Error("Builtin source differs from retained distribution");
+    const retained = await createQualifiedBuiltinInstance(owner, pluginId);
+    const observation = getQualifiedBuiltinObservation(retained.child, owner);
+    const inherited = this.maintenanceIdentity;
+    const barrier = inherited ?? { generation: 0, transactionId: `builtin-init:${randomUUID()}` };
+    if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+    const loaded = await this.launchPlugin({
+      builtinInstance: { child: retained.child, directory },
+      initializationBarrier: barrier,
+      pluginId,
+      pluginDirectory: directory,
+      requirements: retained.manifest.requirements,
+      child: retained.child,
+      bundle: retained.serverBundle,
+      clientBundle: "",
+      beforeInitialize: async (dispatch) => {
+        await owner.refresh();
+        this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+        const current = getQualifiedBuiltinObservation(retained.child, owner);
+        if (current.instanceId !== observation.instanceId)
+          throw new Error("Builtin initialization instance changed");
+        if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+        dispatch();
+      },
+    });
+    try {
+      if ((await this.childBarrier(loaded, barrier, "maintenance.begin")) !== "held")
+        throw new Error("Builtin initialization did not reach idle barrier");
+      await owner.refresh();
+      this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
+      if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
+      else if ((await this.childBarrier(loaded, barrier, "maintenance.end")) !== "ended")
+        throw new Error("Builtin initialization barrier release uncertain");
+      assertChildAlive(loaded);
+      this.observationEpoch++;
+      this.plugins.set(pluginId, loaded);
+      this.notifySessionOpenChange(loaded);
+      this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    } catch (error) {
+      this.maintenanceUncertain = true;
+      this.dependencies.nativeMaintenance?.holdForUnknownWork();
+      await this.stopPlugin(loaded);
+      throw error;
+    }
   }
 
   async validateActivation(
@@ -736,8 +807,12 @@ export class PluginRuntime {
     const epoch = this.observationEpoch;
     await owner.refresh();
     const result = new Map<string, ManagedPluginCohortExecution>();
-    for (const [id, loaded] of this.plugins)
-      result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    for (const [id, loaded] of this.plugins) {
+      if (loaded.builtinInstance) {
+        assertQualifiedBuiltinInstance(loaded.child, owner, id);
+        if (loaded.termination?.closed) throw new Error("Builtin instance closed");
+      } else result.set(id, await this.observeQualifiedExecution(id, loaded, owner, policy));
+    }
     await owner.refresh();
     if (epoch !== this.observationEpoch) throw new Error("Plugin cohort changed");
     return result;
@@ -1534,6 +1609,7 @@ export class PluginRuntime {
 
   private async launchPlugin(input: {
     qualifiedChild?: QualifiedOwnedChild;
+    builtinInstance?: { child: InternalPluginChild; directory: string };
     initializationBarrier?: PluginMaintenanceIdentity;
     activationTicket?: ActivationTicket;
     pluginId: string;
@@ -1548,7 +1624,12 @@ export class PluginRuntime {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
     this.observationEpoch++;
     const termination = observeChildTermination(child);
-    const instanceId = input.qualifiedChild?.incarnation ?? randomUUID();
+    const instanceId = input.builtinInstance
+      ? getQualifiedBuiltinObservation(
+          input.builtinInstance.child,
+          this.dependencies.qualifiedDaemonOwner,
+        ).instanceId
+      : (input.qualifiedChild?.incarnation ?? randomUUID());
     const executionOwner = new PluginExecutionOwner(
       instanceId,
       this.dependencies.nativeMaintenance,
@@ -1658,7 +1739,7 @@ export class PluginRuntime {
               pluginDirectory: input.pluginDirectory,
               managedSource: input.managedSource === true,
               hostInstanceId: instanceId,
-              ...(input.qualifiedChild && input.initializationBarrier
+              ...((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier
                 ? {
                     passiveInitialization: {
                       contract: "native-passive-contract-1" as const,
@@ -1687,6 +1768,7 @@ export class PluginRuntime {
       id: pluginId,
       instanceId,
       qualifiedChild: input.qualifiedChild,
+      builtinInstance: input.builtinInstance,
       activationTicket: input.activationTicket,
       executionOwner,
       clientBundle,

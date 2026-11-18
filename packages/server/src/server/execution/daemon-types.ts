@@ -36,6 +36,8 @@ export interface OwnedObservation {
 export interface QualifiedOwnedChild {
   readonly closure: Readonly<QualifiedClosure>;
   readonly child: ChildProcess;
+  /** Transport routing only: exact pending nonce replies privately validated on this handle. */
+  consumeObservation(raw: unknown): boolean;
   readonly incarnation: string;
   assertFresh(): void;
   challenge(): Promise<OwnedObservation>;

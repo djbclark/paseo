@@ -111,22 +111,11 @@ export async function observeLinuxProcess(pid: number) {
     await handle.close();
   }
 }
-export async function verifyEnclosingDistribution(root: string) {
-  if (
-    process.platform !== "linux" ||
-    !["x64", "arm64"].includes(process.arch) ||
-    process.getuid?.() === 0 ||
-    process.versions.electron ||
-    typeof __QUALIFIED_DISTRIBUTION_ID__ === "undefined"
-  )
-    return unsupported();
-  await protectedPath(root);
-  const expected = await enrollment(root);
-  const manifestPath = `${root}.manifest.json`;
-  await protectedPath(manifestPath);
-  const raw = await bytes(manifestPath, 4 * 1024 * 1024);
-  const manifestSha256 = digest(raw);
-  const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
+function assertManifestIdentity(
+  manifest: DaemonManifest,
+  expected: Awaited<ReturnType<typeof enrollment>>,
+  manifestSha256: string,
+): void {
   if (
     expected.manifestSha256 !== manifestSha256 ||
     expected.distributionBuildId !== __QUALIFIED_DISTRIBUTION_ID__ ||
@@ -146,6 +135,24 @@ export async function verifyEnclosingDistribution(root: string) {
     return unsupported();
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return unsupported();
+}
+export async function verifyEnclosingDistribution(root: string) {
+  if (
+    process.platform !== "linux" ||
+    !["x64", "arm64"].includes(process.arch) ||
+    process.getuid?.() === 0 ||
+    process.versions.electron ||
+    typeof __QUALIFIED_DISTRIBUTION_ID__ === "undefined"
+  )
+    return unsupported();
+  await protectedPath(root);
+  const expected = await enrollment(root);
+  const manifestPath = `${root}.manifest.json`;
+  await protectedPath(manifestPath);
+  const raw = await bytes(manifestPath, 4 * 1024 * 1024);
+  const manifestSha256 = digest(raw);
+  const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
+  assertManifestIdentity(manifest, expected, manifestSha256);
   const names: string[] = [];
   async function visit(directory: string): Promise<void> {
     for (const name of await readdir(directory)) {

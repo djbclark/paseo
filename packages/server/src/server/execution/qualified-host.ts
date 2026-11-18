@@ -236,7 +236,8 @@ export async function initializeQualifiedChildHost(): Promise<void> {
     if (
       now.manifestSha256 !== initial.manifestSha256 ||
       now.observed.birth !== initial.observed.birth ||
-      now.observed.image !== initial.observed.image
+      now.observed.image !== initial.observed.image ||
+      JSON.stringify(now.closure) !== JSON.stringify(initial.closure)
     )
       return unsupported();
     fresh = true;

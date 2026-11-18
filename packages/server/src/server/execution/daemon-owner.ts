@@ -39,7 +39,12 @@ function exchange(port: ObservationPort, challenge: string): Promise<OwnedObserv
     const receive = (raw: unknown) => {
       if (!raw || typeof raw !== "object" || Reflect.get(raw, "challenge") !== challenge) return;
       cleanup();
-      resolve(raw as OwnedObservation);
+      try {
+        acceptReply?.(raw as OwnedObservation);
+        resolve(raw as OwnedObservation);
+      } catch (error) {
+        reject(error);
+      }
     };
     function cleanup() {
       clearTimeout(timer);
@@ -52,7 +57,7 @@ function exchange(port: ObservationPort, challenge: string): Promise<OwnedObserv
 function childPort(child: ChildProcess): ObservationPort {
   return {
     on: (event, listener) => {
-      child.on(event, listener);
+      child.prependListener(event, listener);
     },
     off: (event, listener) => {
       child.off(event, listener);
@@ -197,6 +202,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
       );
       const port = childPort(child);
+      const consumedReplies = new WeakSet<object>();
       const challenge = randomUUID();
       try {
         const observed = await exchange(port, challenge);
@@ -213,9 +219,13 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         if (child.exitCode !== null || child.signalCode !== null || !child.connected)
           return unsupported();
         handles.set(child, record);
+        const verifyReply = (reply: OwnedObservation): void => {
+          accept(reply, reply.challenge, "plugin-child", actual, record.incarnation);
+          consumedReplies.add(reply);
+        };
         observers.set(child, async () => {
           const nonce = randomUUID();
-          const result = await exchange(port, nonce);
+          const result = await exchange(port, nonce, verifyReply);
           const now = await observeLinuxProcess(child.pid!);
           if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
           accept(result, nonce, "plugin-child", now, record.incarnation);
@@ -226,13 +236,18 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         });
         return Object.freeze({
           child,
+          consumeObservation(raw: unknown): boolean {
+            if (!raw || typeof raw !== "object" || !consumedReplies.has(raw)) return false;
+            consumedReplies.delete(raw);
+            return true;
+          },
           closure: initial.closure,
           incarnation: record.incarnation,
           assertFresh: () => assertOwnedExecutionHandle(child, "plugin-child", record.incarnation),
           async challenge() {
             assertOwnedExecutionHandle(child, "plugin-child", record.incarnation);
             const nonce = randomUUID();
-            const result = await exchange(port, nonce);
+            const result = await exchange(port, nonce, verifyReply);
             const now = await observeLinuxProcess(child.pid!);
             if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
             accept(result, nonce, "plugin-child", now, record.incarnation);
@@ -415,6 +430,12 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         throw error;
       }
     },
+  });
+  const activity = qualifiedBindings["@getpaseo/plugin/internal/activity"];
+  const install = activity ? Reflect.get(activity, "installQualifiedHelperAdmission") : undefined;
+  if (typeof install !== "function") return unsupported();
+  install(() => {
+    throw new Error("Qualified plugin external helper unsupported");
   });
   owners.add(owner);
   bindings.add(binding);

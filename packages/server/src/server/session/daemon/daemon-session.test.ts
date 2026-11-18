@@ -1,4 +1,8 @@
-import type { HeldPluginOperationClaim, HeldPluginOperationScope } from "../../maintenance-operation.js";
+import { assertHeldPluginOperationResult } from "../../maintenance-operation.js";
+import type {
+  HeldPluginOperationClaim,
+  HeldPluginOperationScope,
+} from "../../maintenance-operation.js";
 import {
   qualifiedMaintenanceParticipant,
   qualifiedDaemonExecutionAccess,
@@ -12,7 +16,11 @@ import * as maintenanceOs from "node:os";
 import { verifyOfflineMaintenance } from "../../maintenance-offline.js";
 import { WorkspaceSetupRuntime } from "../../workspace-setup-runtime.js";
 import { AgentManager } from "../../agent/agent-manager.js";
-import { MaintenanceReservation, guardMaintenanceMethod, assertHeldPluginOperation } from "../../maintenance-reservation.js";
+import {
+  MaintenanceReservation,
+  guardMaintenanceMethod,
+  assertHeldPluginOperation,
+} from "../../maintenance-reservation.js";
 import {
   mkdtempSync as makeMaintenanceHome,
   readFileSync as readMaintenanceFile,
@@ -41,6 +49,78 @@ import type { ProviderAvailability } from "../../agent/agent-manager.js";
 import type { HubRelationshipManagement } from "../../hub/relationship-controller.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type { DaemonConfigReloadResult } from "../../daemon-config-store.js";
+
+function assertScopeRefusals(
+  reservation: MaintenanceReservation,
+  scope: HeldPluginOperationScope,
+  claim: HeldPluginOperationClaim,
+): void {
+  assertHeldPluginOperation(scope, claim);
+  expect(() =>
+    assertHeldPluginOperation(scope, {
+      ...claim,
+      expectedGeneration: claim.expectedGeneration + 1,
+    }),
+  ).toThrow();
+  expect(() =>
+    assertHeldPluginOperation(scope, { ...claim, path: "/candidate/substitute" }),
+  ).toThrow();
+  expect(() => reservation.enter()).toThrow();
+}
+
+function installAwaitPause(
+  handle: import("node:fs/promises").FileHandle,
+  directory: boolean,
+  stage: string,
+  pause: (matches: boolean) => Promise<void>,
+): void {
+  const write = handle.writeFile.bind(handle);
+  const sync = handle.sync.bind(handle);
+  const close = handle.close.bind(handle);
+  vi.spyOn(handle, "writeFile").mockImplementation(async (...args) => {
+    await pause(stage === "write");
+    return write(...args);
+  });
+  vi.spyOn(handle, "sync").mockImplementation(async () => {
+    await pause(
+      (stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory),
+    );
+    return sync();
+  });
+  vi.spyOn(handle, "close").mockImplementation(async () => {
+    await close();
+    await pause(
+      (stage === "file-close" && !directory) || (stage === "directory-close" && directory),
+    );
+  });
+}
+function installWrongOwner(handle: import("node:fs/promises").FileHandle, uid: number): void {
+  const stat = handle.stat.bind(handle);
+  vi.spyOn(handle, "stat").mockImplementationOnce(async () => Object.assign(await stat(), { uid }));
+}
+function installReadMutation(
+  handle: import("node:fs/promises").FileHandle,
+  fixture: { home: string; directory: string; path: string; record: object },
+  target: "record" | "ancestor",
+): void {
+  const read = handle.read.bind(handle);
+  vi.spyOn(handle, "read").mockImplementation(async (...args: Parameters<typeof read>) => {
+    const result = await read(...args);
+    if (target === "record") {
+      maintenanceFs.unlinkSync(fixture.path);
+      maintenanceFs.writeFileSync(fixture.path, JSON.stringify(fixture.record), { mode: 0o600 });
+    } else {
+      const previous = maintenanceJoin(fixture.home, "previous");
+      maintenanceFs.renameSync(fixture.directory, previous);
+      maintenanceFs.mkdirSync(fixture.directory, { mode: 0o700 });
+      maintenanceFs.renameSync(
+        maintenanceJoin(previous, "maintenance-reservation.json"),
+        fixture.path,
+      );
+    }
+    return result;
+  });
+}
 
 const tempDirs: string[] = [];
 
@@ -828,27 +908,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
         );
         const handle = await unmockedMaintenanceIo.open(...args);
         if (args[1] === "wx" || args[1] === "r") {
-          const directory = args[1] === "r";
-          const write = handle.writeFile.bind(handle);
-          const sync = handle.sync.bind(handle);
-          const close = handle.close.bind(handle);
-          vi.spyOn(handle, "writeFile").mockImplementation(async (...writeArgs) => {
-            await pause(stage === "write");
-            return write(...writeArgs);
-          });
-          vi.spyOn(handle, "sync").mockImplementation(async () => {
-            await pause(
-              (stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory),
-            );
-            return sync();
-          });
-          vi.spyOn(handle, "close").mockImplementation(async () => {
-            // Pause after actual close: file-close is immediately before the atomic commit section.
-            await close();
-            await pause(
-              (stage === "file-close" && !directory) || (stage === "directory-close" && directory),
-            );
-          });
+          installAwaitPause(handle, args[1] === "r", stage, pause);
         }
         return handle;
       });
@@ -1004,10 +1064,7 @@ describe("protected offline maintenance authority", () => {
     try {
       vi.mocked(maintenanceIo.open).mockImplementationOnce(async (...args) => {
         const handle = await unmockedMaintenanceIo.open(...args);
-        const stat = handle.stat.bind(handle);
-        vi.spyOn(handle, "stat").mockImplementationOnce(async () =>
-          Object.assign(await stat(), { uid: account.uid + 1 }),
-        );
+        installWrongOwner(handle, account.uid + 1);
         return handle;
       });
       await expect(f.verify()).rejects.toThrow();
@@ -1087,25 +1144,7 @@ describe("protected offline maintenance authority", () => {
         vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
           const handle = await unmockedMaintenanceIo.open(...args);
           if (args[0] === f.path) {
-            const read = handle.read.bind(handle);
-            vi.spyOn(handle, "read").mockImplementation(
-              async (...readArgs: Parameters<typeof read>) => {
-                const result = await read(...readArgs);
-                if (target === "record") {
-                  maintenanceFs.unlinkSync(f.path);
-                  maintenanceFs.writeFileSync(f.path, JSON.stringify(f.record), { mode: 0o600 });
-                } else {
-                  const previous = maintenanceJoin(f.home, "previous");
-                  maintenanceFs.renameSync(f.directory, previous);
-                  maintenanceFs.mkdirSync(f.directory, { mode: 0o700 });
-                  maintenanceFs.renameSync(
-                    maintenanceJoin(previous, "maintenance-reservation.json"),
-                    f.path,
-                  );
-                }
-                return result;
-              },
-            );
+            installReadMutation(handle, f, target);
           }
           return handle;
         });
@@ -1141,11 +1180,10 @@ describe("shared workspace setup maintenance admission", () => {
       await setup.stop("workspace");
       await reservation.begin(1, "setup-finished");
       let ran = false;
-      expect(() =>
-        setup.start("new-workspace", async () => {
-          ran = true;
-        }),
-      ).toThrow("maintenance");
+      const rejectedSetup = async () => {
+        ran = true;
+      };
+      expect(() => setup.start("new-workspace", rejectedSetup)).toThrow("maintenance");
       expect(ran).toBe(false);
     } finally {
       complete?.();
@@ -1422,9 +1460,10 @@ describe("native maintenance participant serialization", () => {
       const restored = await MaintenanceReservation.create(f.home, async () => true, port);
       restored.setReady(false);
       await restored.restoreParticipantBeforeStart();
+      const refused = () => restored.enter();
       await restored.runQualifiedInitialization(async () => {
         calls.push("init");
-        expect(() => restored.enter()).toThrow();
+        expect(refused).toThrow();
       });
       await restored.recheckRestoredParticipant();
       expect(calls).toEqual(["barrier", "init", "barrier"]);
@@ -1435,26 +1474,89 @@ describe("native maintenance participant serialization", () => {
       f.close();
     }
   });
+  test("native held result binds loaded target digests and native CAS independently of activationGeneration", () => {
+    const claim: HeldPluginOperationClaim = {
+      generation: 1,
+      transactionId: "unit",
+      operation: "verify",
+      pluginId: "unit",
+      path: "/retained/B",
+      expectedPath: "/retained/B",
+      expectedGeneration: 5,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    };
+    const result = {
+      nativeGeneration: 7,
+      plugin: {
+        id: "unit",
+        path: claim.path,
+        enabled: true,
+        status: "running" as const,
+        promotionState: { generation: 7, phase: "ready" },
+        loaded: {
+          pluginId: "unit",
+          sourcePath: claim.path,
+          snapshotSha256: claim.snapshotSha256,
+          serverBundleSha256: claim.serverBundleSha256,
+          processStartToken: "fresh-incarnation",
+          activationGeneration: 123,
+          startedAt: "fixture",
+        },
+      },
+    };
+    assertHeldPluginOperationResult(claim, result);
+    expect(() =>
+      assertHeldPluginOperationResult(claim, { ...result, nativeGeneration: 123 }),
+    ).toThrow("CAS");
+    expect(() =>
+      assertHeldPluginOperationResult(claim, {
+        ...result,
+        plugin: {
+          ...result.plugin,
+          loaded: { ...result.plugin.loaded, snapshotSha256: "c".repeat(64) },
+        },
+      }),
+    ).toThrow("receipt");
+  });
   test("private held operation authenticates exact scope and blocks END until actual settlement", async () => {
-    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "held",
+      end: async () => {},
+    });
     let finish!: () => void;
     let entered!: () => void;
-    const started = new Promise<void>((resolve) => { entered = resolve; });
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const waitForGate = () => gate;
     let retained!: HeldPluginOperationScope;
-    const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "held-operation", operation: "replace", pluginId: "unit-plugin", path: "/retained/B", expectedPath: "/retained/A", expectedGeneration: 4, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+    const claim: HeldPluginOperationClaim = {
+      generation: 1,
+      transactionId: "held-operation",
+      operation: "replace",
+      pluginId: "unit-plugin",
+      path: "/retained/B",
+      expectedPath: "/retained/A",
+      expectedGeneration: 4,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    };
     try {
       const held = await f.reservation.begin(1, claim.transactionId);
-      await expect(f.reservation.ownerPluginOperation(claim, "wrong", async () => {})).rejects.toThrow("ownership");
+      await expect(
+        f.reservation.ownerPluginOperation(claim, "wrong", async () => {}),
+      ).rejects.toThrow("ownership");
       expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
       const pending = f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
         retained = scope;
-        assertHeldPluginOperation(scope, claim);
-        expect(() => assertHeldPluginOperation(scope, { ...claim, expectedGeneration: 5 })).toThrow();
-        expect(() => assertHeldPluginOperation(scope, { ...claim, path: "/candidate/substitute" })).toThrow();
-        expect(() => f.reservation.enter()).toThrow();
+        assertScopeRefusals(f.reservation, scope, claim);
         entered();
-        await f.reservation.runHeldOperation(scope, claim, () => gate);
+        await f.reservation.runHeldOperation(scope, claim, waitForGate);
         // Actual plugin CAS may advance inside the operation; native authority keeps the original claim.
         return { nativeGeneration: 6 };
       });
@@ -1464,7 +1566,10 @@ describe("native maintenance participant serialization", () => {
       expect(await pending).toEqual({ nativeGeneration: 6 });
       expect(() => assertHeldPluginOperation(retained, claim)).toThrow();
       await f.reservation.end(1, held.ownerToken);
-    } finally { finish?.(); f.close(); }
+    } finally {
+      finish?.();
+      f.close();
+    }
   });
   test("missing/fake parent capability is unsupported while raw restore barrier still installs", async () => {
     const rawBegin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValue("held");
@@ -1485,7 +1590,9 @@ describe("native maintenance participant serialization", () => {
       const authority = await qualifiedDaemonExecutionAccess(chain);
       const participant = qualifiedMaintenanceParticipant(raw, authority);
       expect(participant.supportsV1()).toBe(false);
-      expect(await participant.restoreBeforeStart!({ generation: 1, transactionId: "restore" })).toBe("unknown");
+      expect(
+        await participant.restoreBeforeStart!({ generation: 1, transactionId: "restore" }),
+      ).toBe("unknown");
       await expect(participant.end({ generation: 1, transactionId: "restore" })).rejects.toThrow();
     }
     expect(rawBegin).toHaveBeenCalledTimes(2);

@@ -736,17 +736,29 @@ privately; status never returns it. End with `paseo daemon maintenance end --gen
 Never put the token in argv or diagnostic logs. A lost begin response requires operator recovery;
 there is no second token read or automatic expiry.
 
-Production capability also requires the trusted plugin maintenance port and genuine executing
-supervisor, daemon and compiler qualifications, plus each plugin host's reviewed passive closure.
-Source/dev launches and the initial plugin-host-only producer remain unsupported. Parsed receipts,
-disk hashes and caller-supplied callbacks cannot grant qualification. The persistent plugin transport
-is not foreground work: its participant closes admission, accounts actual execution and helpers,
-and acknowledges the child barrier. Unknown or unqualified activity keeps admission held.
+Production capability requires the trusted plugin maintenance port and a producer-private binding
+for the actual enclosing retained daemon, its owned compiler worker and plugin children. External
+Electron/supervisor relaunch remains outside this Linux profile. Source/dev launches and the initial
+plugin-host-only producer remain unsupported. Parsed receipts, disk hashes and caller callbacks
+cannot grant qualification. Bulk qualification refresh is asynchronous; private ownership checks use
+retained in-memory identity. The persistent plugin transport is not foreground work: its participant
+accounts actual execution and helpers and acknowledges the child barrier. Unknown activity stays held.
 
-A restored hold closes the participant barrier before plugin startup. Only independently qualified
-passive initialization may obtain fresh loaded evidence; settlement and a fresh child acknowledgment
-precede owner-authorized release. There is no automatic end or forced plugin shutdown during recovery.
-The native source slice does not qualify Cafe or other unreviewed background plugins.
+A restored hold closes the raw participant barrier before startup or qualification refresh. Only
+qualified passive initialization may obtain fresh evidence; settlement and a fresh child acknowledgment
+precede owner-authorized release. There is no automatic end or forced shutdown to obtain quiet.
+Cafe and other unreviewed background plugins remain unsupported.
+
+Held replacement/recovery/verification uses `daemon maintenance plugin-operation` and its separate
+`maintenancePluginOperationV1` feature. Supply the matching reservation generation/transaction,
+retained server identity/incarnation, exact plugin target paths/digests and native journal CAS;
+`--owner-token-fd 0` reads only a bounded token from a private pipe. The native owner grants an opaque
+in-process scope only for that operation and retains its execution lease, so END cannot overtake it.
+Normal work stays closed. Neither the token nor scope enters child IPC. The plugin validates current
+protected consent and each authorized CAS transition; a successor needs its own receipt/barrier.
+A timeout or lost operation response stays held and requires recovery, without automatic END/replay.
+CLI JSON is bare result data. Native status authority describes only the enclosing daemon; it does
+not substitute for the separately required coherent full-cohort qualification.
 
 Begin closes admission before observing work. It refuses in-flight operations, open terminals,
 and all live provider sessions (including idle sessions whose autonomous work cannot be proved

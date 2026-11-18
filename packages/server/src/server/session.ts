@@ -3264,7 +3264,8 @@ export class Session {
         type:
           | "daemon.maintenance.begin.request"
           | "daemon.maintenance.status.request"
-          | "daemon.maintenance.end.request";
+          | "daemon.maintenance.end.request"
+          | "daemon.maintenance.plugin.operation.request";
       }
     >,
   ): Promise<void> {
@@ -3272,11 +3273,23 @@ export class Session {
     try {
       if (!maintenance || process.platform === "win32")
         throw new Error("Maintenance reservation unsupported");
-      if (msg.type === "daemon.maintenance.begin.request") {
+      if (msg.type !== "daemon.maintenance.status.request")
+        maintenance.assertTransport(msg, msg.type === "daemon.maintenance.end.request");
+      if (msg.type === "daemon.maintenance.plugin.operation.request") {
+        const result = await maintenance.executePluginOperation(msg);
+        this.emit({
+          type: "daemon.maintenance.plugin.operation.response",
+          payload: { requestId: msg.requestId, result, error: null },
+        });
+      } else if (msg.type === "daemon.maintenance.begin.request") {
         const result = await maintenance.begin(msg.generation, msg.transactionId);
         this.emit({
           type: "daemon.maintenance.begin.response",
-          payload: { requestId: msg.requestId, result, error: null },
+          payload: {
+            requestId: msg.requestId,
+            result: { ...result, authority: maintenance.transportAuthority() },
+            error: null,
+          },
         });
       } else {
         const result =
@@ -3288,7 +3301,11 @@ export class Session {
             msg.type === "daemon.maintenance.end.request"
               ? "daemon.maintenance.end.response"
               : "daemon.maintenance.status.response",
-          payload: { requestId: msg.requestId, result, error: null },
+          payload: {
+            requestId: msg.requestId,
+            result: { ...result, authority: maintenance.transportAuthority() },
+            error: null,
+          },
         });
       }
     } catch {
@@ -3297,7 +3314,8 @@ export class Session {
         type: msg.type.replace(".request", ".response") as
           | "daemon.maintenance.begin.response"
           | "daemon.maintenance.status.response"
-          | "daemon.maintenance.end.response",
+          | "daemon.maintenance.end.response"
+          | "daemon.maintenance.plugin.operation.response",
         payload: {
           requestId: msg.requestId,
           result: null,
@@ -3307,7 +3325,21 @@ export class Session {
     }
   }
 
+  private dispatchMaintenanceMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "daemon.maintenance.begin.request":
+      case "daemon.maintenance.status.request":
+      case "daemon.maintenance.end.request":
+      case "daemon.maintenance.plugin.operation.request":
+        return this.handleMaintenanceRequest(msg);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchAgentConfigMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    const maintenance = this.dispatchMaintenanceMessage(msg);
+    if (maintenance) return maintenance;
     switch (msg.type) {
       case "set_agent_mode_request":
         return this.agentConfigSession.handleSetAgentModeRequest(msg);
@@ -3328,10 +3360,7 @@ export class Session {
           },
         });
         return undefined;
-      case "daemon.maintenance.begin.request":
-      case "daemon.maintenance.status.request":
-      case "daemon.maintenance.end.request":
-        return this.handleMaintenanceRequest(msg);
+
       case "daemon.get_status.request":
         return this.daemonSession.handleGetStatusRequest(msg);
       case "daemon.get_pairing_offer.request":

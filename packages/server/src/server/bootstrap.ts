@@ -1,3 +1,4 @@
+import { heldPluginOperationDriver } from "./maintenance-operation.js";
 import {
   pluginMaintenancePort,
   qualifiedMaintenanceParticipant,
@@ -721,7 +722,8 @@ async function createPaseoDaemonInExecutionContext(
   let pluginBootstrapWindow = false;
   const nativeMaintenance: NativePluginAdmission = {
     enterWork: () => maintenance.enter(),
-    runHeldOperation: (scope, expected, operation) => maintenance.runHeldOperation(scope, expected, operation),
+    runHeldOperation: (scope, expected, operation) =>
+      maintenance.runHeldOperation(scope, expected, operation),
     holdForUnknownWork: () => maintenance.holdForUnknownWork(),
     async runQualifiedInitialization(operation) {
       qualifiedDaemon.assertQualified();
@@ -771,6 +773,7 @@ async function createPaseoDaemonInExecutionContext(
   );
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
+  maintenance.bindTransport(serverId, qualifiedDaemon, heldPluginOperationDriver(pluginRuntime));
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
   const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
   // Reconcile the helper-process ledger in the background so it never blocks the
@@ -808,12 +811,15 @@ async function createPaseoDaemonInExecutionContext(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  const terminalManager = await startWorkerTerminalManager({
+  const terminalOptions = {
     paseoHome: config.paseoHome,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
-  });
+    qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
+  };
+  const terminalManager = await startWorkerTerminalManager(terminalOptions);
+  qualifiedDaemon.bindTerminalManager(terminalManager);
   guardMaintenanceMethod(terminalManager, "createTerminal", maintenance);
   applyTerminalAgentHookSetting({ store: daemonConfigStore, logger });
 

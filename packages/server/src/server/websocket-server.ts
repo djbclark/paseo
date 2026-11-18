@@ -662,6 +662,11 @@ export class VoiceAssistantWebSocketServer {
     }
   }
 
+  private installCreationAdmission(): void {
+    const reservation = this.agentManager.maintenanceReservation;
+    if (reservation) guardMaintenanceMethod(this.creationService, "create", reservation);
+  }
+
   constructor(
     server: HTTPServer,
     logger: pino.Logger,
@@ -760,9 +765,7 @@ export class VoiceAssistantWebSocketServer {
       (snapshot) => this.validateCompletedCreation(snapshot),
       join(paseoHome, "agent-requests"),
     );
-    if (agentManager.maintenanceReservation) {
-      guardMaintenanceMethod(this.creationService, "create", agentManager.maintenanceReservation);
-    }
+    this.installCreationAdmission();
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
@@ -2084,6 +2087,9 @@ export class VoiceAssistantWebSocketServer {
         ...(this.advertiseDaemonStatusRpc ? { daemonStatusRpc: true } : {}),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: true,
+        maintenancePluginOperationV1:
+          process.platform !== "win32" &&
+          this.agentManager.maintenanceReservation?.supportsPluginOperations() === true,
         maintenanceReservationV1:
           process.platform !== "win32" &&
           this.agentManager.maintenanceReservation?.isReady() === true,

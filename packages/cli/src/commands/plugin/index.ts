@@ -13,7 +13,13 @@ import {
   parsePluginSourceReference,
   formatPluginIdentity,
 } from "@getpaseo/protocol/plugin-source-reference";
-import type { CommandOptions, ListResult, OutputSchema, SingleResult } from "../../output/index.js";
+import type {
+  AnyCommandResult,
+  CommandOptions,
+  ListResult,
+  OutputSchema,
+  SingleResult,
+} from "../../output/index.js";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
 import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
@@ -267,41 +273,39 @@ export async function runManagedPluginStatusCommand(
   pluginId: string,
   options: PluginOptions,
   _command: Command,
-): Promise<SingleResult<ManagedPluginStatus>> {
+): Promise<AnyCommandResult<ManagedPluginStatus>> {
   const data = await withManagedPluginStatusClient(options.daemonTarget, (client) =>
     client.getManagedPluginStatus(pluginId),
   );
-  return {
-    type: "single",
-    data,
-    schema: {
-      idField: "pluginId",
-      columns: [
-        { header: "PLUGIN", field: "pluginId", width: 20 },
-        { header: "CONSISTENCY", field: "consistency", width: 16 },
-        {
-          header: "PHASE",
-          field: (status) =>
-            status.consistency === "coherent" ? status.journal.phase : status.reason,
-          width: 22,
-        },
-        {
-          header: "JOURNAL_GENERATION",
-          field: (status) =>
-            status.consistency === "coherent" ? String(status.journal.generation) : "-",
-          width: 20,
-        },
-        {
-          header: "LOADED_GENERATION",
-          field: (status) =>
-            status.consistency === "coherent"
-              ? String(status.loaded?.activationGeneration ?? "-")
-              : "-",
-          width: 20,
-        },
-      ],
-    },
+  const schema: OutputSchema<ManagedPluginStatus> = {
+    idField: "pluginId",
+    columns: [
+      { header: "PLUGIN", field: "pluginId", width: 20 },
+      { header: "CONSISTENCY", field: "consistency", width: 16 },
+      {
+        header: "PHASE",
+        field: (status) =>
+          status.consistency === "coherent" ? status.journal.phase : status.reason,
+        width: 22,
+      },
+      {
+        header: "JOURNAL_GENERATION",
+        field: (status) =>
+          status.consistency === "coherent" ? String(status.journal.generation) : "-",
+        width: 20,
+      },
+      {
+        header: "LOADED_GENERATION",
+        field: (status) =>
+          status.consistency === "coherent"
+            ? String(status.loaded?.activationGeneration ?? "-")
+            : "-",
+        width: 20,
+      },
+    ],
   };
+  if (data.consistency === "coherent") return { type: "single", data, schema };
+  return { type: "single", data, schema };
 }
 
 export function createPluginCommand(): Command {
@@ -311,7 +315,7 @@ export function createPluginCommand(): Command {
       .command("managed-status")
       .description("Read a bounded coherent managed journal/runtime snapshot")
       .argument("<id>"),
-  ).action(withOutput(runManagedPluginStatusCommand));
+  ).action(withOutput<ManagedPluginStatus, [string]>(runManagedPluginStatusCommand));
   addJsonAndDaemonHostOptions(
     plugin
       .command("recover")

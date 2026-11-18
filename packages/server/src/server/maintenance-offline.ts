@@ -14,33 +14,33 @@ export interface MaintenanceRecord {
 }
 
 function validateProtectedRecord(before: Stats, beforePath: Stats, uid: number): void {
-    if (
-      !before.isFile() ||
-      before.uid !== uid ||
-      before.mode & 0o077 ||
-      before.nlink !== 1 ||
-      before.size > 4096 ||
-      before.dev !== beforePath.dev ||
-      before.ino !== beforePath.ino
-    )
-      throw new Error("Unprotected maintenance record");
+  if (
+    !before.isFile() ||
+    before.uid !== uid ||
+    before.mode & 0o077 ||
+    before.nlink !== 1 ||
+    before.size > 4096 ||
+    before.dev !== beforePath.dev ||
+    before.ino !== beforePath.ino
+  )
+    throw new Error("Unprotected maintenance record");
 }
 
 function assertStableRecord(before: Stats, after: Stats, afterPath: Stats): void {
-    if (
-      before.dev !== afterPath.dev ||
-      before.ino !== afterPath.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs ||
-      after.mode !== before.mode ||
-      before.uid !== after.uid ||
-      before.nlink !== after.nlink ||
-      afterPath.mode !== after.mode ||
-      afterPath.uid !== after.uid ||
-      afterPath.nlink !== after.nlink
-    )
-      throw new Error("Maintenance authority changed");
+  if (
+    before.dev !== afterPath.dev ||
+    before.ino !== afterPath.ino ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs ||
+    before.ctimeMs !== after.ctimeMs ||
+    after.mode !== before.mode ||
+    before.uid !== after.uid ||
+    before.nlink !== after.nlink ||
+    afterPath.mode !== after.mode ||
+    afterPath.uid !== after.uid ||
+    afterPath.nlink !== after.nlink
+  )
+    throw new Error("Maintenance authority changed");
 }
 
 /** The caller chooses only a trusted daemon configuration home, never a candidate path. */
@@ -148,11 +148,15 @@ export function validateMaintenanceEnrollment(value: unknown): void {
 /** Fixed real-account authority; HOME, CLI flags and artifacts cannot select this home. */
 export async function verifyOfflineMaintenance(generation: number, transactionId: string) {
   const home = join(userInfo().homedir, ".paseo");
-  validateMaintenanceEnrollment(await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
+  validateMaintenanceEnrollment(
+    await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"),
+  );
   const record = parseMaintenanceRecord(
     await readProtectedMaintenanceJson(home, "maintenance-reservation.json"),
   );
-  validateMaintenanceEnrollment(await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
+  validateMaintenanceEnrollment(
+    await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"),
+  );
   if (
     !Number.isSafeInteger(generation) ||
     generation <= 0 ||

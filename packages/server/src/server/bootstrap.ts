@@ -641,7 +641,7 @@ export async function createPaseoDaemon(
   let observe: () => Promise<boolean> = async () => {
     throw new Error("Maintenance startup incomplete");
   };
-  const maintenance = (await MaintenanceReservation.create(config.paseoHome, () => observe()));
+  const maintenance = await MaintenanceReservation.create(config.paseoHome, () => observe());
   maintenance.setReady(false);
   return maintenance.execute(() =>
     createPaseoDaemonInExecutionContext(config, rootLogger, dependencies, maintenance, (next) => {
@@ -2164,9 +2164,14 @@ async function createPaseoDaemonInExecutionContext(
     scriptRuntimeStore,
     browserToolsBroker,
     start: () => maintenance.execute(start),
-    stop: (options) => maintenance.runCleanup(async () => {
-      try { await stop(options); } finally { await maintenance.flushStorage(); }
-    }),
+    stop: (options) =>
+      maintenance.runCleanup(async () => {
+        try {
+          await stop(options);
+        } finally {
+          await maintenance.flushStorage();
+        }
+      }),
     getListenTarget: () => boundListenTarget,
     getServerId: () => serverId,
   };

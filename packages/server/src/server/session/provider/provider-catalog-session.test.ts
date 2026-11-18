@@ -763,7 +763,9 @@ it("ordinary unavailable/unsupported discovery with confirmed cleanup does not m
     return session;
   };
   const manager = new AgentManager({ clients, logger: pino({ level: "silent" }) });
-  const reservation = (await MaintenanceReservation.create(home, async () => manager.isMaintenanceQuiet()));
+  const reservation = await MaintenanceReservation.create(home, async () =>
+    manager.isMaintenanceQuiet(),
+  );
   manager.installMaintenanceReservation(reservation);
   const { subsystem, emitted } = makeSubsystem({
     host: { listDraftControls: (config) => manager.listDraftControls(config) },

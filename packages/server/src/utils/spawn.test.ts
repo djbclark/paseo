@@ -222,7 +222,7 @@ describe("execCommand", () => {
 describe("maintenance process execution boundary", () => {
   test("actual child keeps admission leased after caller completes and held spawn/exec refuse before launch", async () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "spawn-maintenance-")));
-    const reservation = (await MaintenanceReservation.create(home, async () => true));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
     const child = await reservation.run(async () => {
       const launched = spawnProcess(
         process.execPath,
@@ -262,7 +262,7 @@ describe("maintenance process execution boundary", () => {
 describe("admitted execution continuations", () => {
   test("already-admitted helper can finish after uncertainty while every new root is closed", async () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "continuation-maintenance-")));
-    const reservation = (await MaintenanceReservation.create(home, async () => true));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => {
       finish = resolve;
@@ -285,7 +285,7 @@ describe("admitted execution continuations", () => {
   });
   test("expired async scope cannot revive helper authority after reservation is held", async () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "expired-maintenance-")));
-    const reservation = (await MaintenanceReservation.create(home, async () => true));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
     let finish!: () => void;
     const gate = new Promise<void>((resolve) => {
       finish = resolve;

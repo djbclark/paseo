@@ -58,7 +58,11 @@ export class MaintenanceReservation {
     this.path = join(home, "maintenance-reservation.json");
   }
 
-  static async create(home: string, isQuiet: () => Promise<boolean>, participant: PluginMaintenancePort = emptyMaintenanceParticipant): Promise<MaintenanceReservation> {
+  static async create(
+    home: string,
+    isQuiet: () => Promise<boolean>,
+    participant: PluginMaintenancePort = emptyMaintenanceParticipant,
+  ): Promise<MaintenanceReservation> {
     const reservation = new MaintenanceReservation(home, isQuiet, participant);
     await reservation.load();
     reservation.ready = true;
@@ -92,8 +96,14 @@ export class MaintenanceReservation {
     this.failed = true;
     this.recovery = true;
     this.revision++;
-    let authority = this.record ?? { schemaVersion: 1 as const, generation: 0, transactionId: null, tokenDigest: null };
-    if (this.attempt && !this.record?.tokenDigest) authority = { schemaVersion: 1, ...this.attempt, tokenDigest: null };
+    let authority = this.record ?? {
+      schemaVersion: 1 as const,
+      generation: 0,
+      transactionId: null,
+      tokenDigest: null,
+    };
+    if (this.attempt && !this.record?.tokenDigest)
+      authority = { schemaVersion: 1, ...this.attempt, tokenDigest: null };
     this.record = { ...authority, uncertain: true };
     // The synchronous latch closes admission immediately. The queued write is not
     // crash proof until its actual rename; callers awaiting an operation drain it.
@@ -103,19 +113,32 @@ export class MaintenanceReservation {
     }).catch(() => {});
   }
 
-  async flushStorage(): Promise<void> { await this.storageTail; }
+  async flushStorage(): Promise<void> {
+    await this.storageTail;
+  }
 
   private storage<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.storageTail.then(operation);
-    this.storageTail = result.then(() => {}, () => {});
+    this.storageTail = result.then(
+      () => {},
+      () => {},
+    );
     return result;
   }
 
   private async enroll(uncertain = false): Promise<void> {
     if (this.enrolled) return;
-    await this.writeAtomically(join(this.home, "maintenance-enrollment.json"), { schemaVersion: 1, component: "paseo-maintenance" }, undefined, uncertain);
+    await this.writeAtomically(
+      join(this.home, "maintenance-enrollment.json"),
+      { schemaVersion: 1, component: "paseo-maintenance" },
+      undefined,
+      uncertain,
+    );
     this.enrolled = true;
-    await this.persist(this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null }, uncertain);
+    await this.persist(
+      this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null },
+      uncertain,
+    );
   }
 
   isReady(): boolean {
@@ -266,35 +289,35 @@ export class MaintenanceReservation {
   }
 
   private async prepareParticipant(identity: MaintenanceIdentity): Promise<boolean> {
-      const initial = await this.participant.begin(identity);
+    const initial = await this.participant.begin(identity);
+    this.assertNoUnknownWork();
+    if (initial === "known-busy") {
+      // Only a confirmed qualified rollback can discard an unpublished attempt.
+      await this.participant.end(identity);
       this.assertNoUnknownWork();
-      if (initial === "known-busy") {
-        // Only a confirmed qualified rollback can discard an unpublished attempt.
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        return false;
-      }
-      if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
-      const quiet = await this.isQuiet();
+      return false;
+    }
+    if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
+    const quiet = await this.isQuiet();
+    this.assertNoUnknownWork();
+    if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
+    if (!quiet || this.inFlight) {
+      await this.participant.end(identity);
       this.assertNoUnknownWork();
-      if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
-      if (!quiet || this.inFlight) {
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        return false;
-      }
-      // Recheck current policy, cohort and incarnation after authoritative awaits.
-      const rechecked = await this.participant.begin(identity);
+      return false;
+    }
+    // Recheck current policy, cohort and incarnation after authoritative awaits.
+    const rechecked = await this.participant.begin(identity);
+    this.assertNoUnknownWork();
+    if (rechecked === "known-busy") {
+      await this.participant.end(identity);
       this.assertNoUnknownWork();
-      if (rechecked === "known-busy") {
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        return false;
-      }
-      if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
-        throw new Error("Plugin maintenance cohort changed or unknown");
-      this.assertNoUnknownWork();
-      return true;
+      return false;
+    }
+    if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
+      throw new Error("Plugin maintenance cohort changed or unknown");
+    this.assertNoUnknownWork();
+    return true;
   }
 
   async begin(
@@ -329,7 +352,14 @@ export class MaintenanceReservation {
       if (knownBusy) throw new Error("Maintenance known busy");
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
-      await this.storage(() => this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) }));
+      await this.storage(() =>
+        this.persist({
+          schemaVersion: 1,
+          generation,
+          transactionId,
+          tokenDigest: digest(ownerToken),
+        }),
+      );
       this.assertNoUnknownWork();
       this.recovery = false;
       this.pending = false;
@@ -398,10 +428,22 @@ export class MaintenanceReservation {
   }
 
   private persist(record: RecordV1, uncertain = false): Promise<void> {
-    return this.writeAtomically(this.path, record, () => { this.record = record; }, uncertain);
+    return this.writeAtomically(
+      this.path,
+      record,
+      () => {
+        this.record = record;
+      },
+      uncertain,
+    );
   }
 
-  private async writeAtomically(path: string, value: unknown, committed?: () => void, uncertain = false): Promise<void> {
+  private async writeAtomically(
+    path: string,
+    value: unknown,
+    committed?: () => void,
+    uncertain = false,
+  ): Promise<void> {
     const temporary = `${path}.${randomBytes(12).toString("hex")}.tmp`;
     const revision = this.revision;
     let file: FileHandle | undefined;
@@ -414,7 +456,8 @@ export class MaintenanceReservation {
       file = undefined;
       // The only synchronous IO: accepted actual-rename commit point. No yield
       // between final revision/latch check, rename and committed-state update.
-      if (revision !== this.revision || (!uncertain && this.failed)) throw new Error("Maintenance activity became unknown before commit");
+      if (revision !== this.revision || (!uncertain && this.failed))
+        throw new Error("Maintenance activity became unknown before commit");
       renameSync(temporary, path);
       committed?.();
       directory = await open(this.home, "r");
@@ -431,7 +474,6 @@ export class MaintenanceReservation {
       throw error;
     }
   }
-
 }
 
 /** Install on the shared owner, before handing it to any internal or transport caller. */

@@ -1367,7 +1367,11 @@ export class AgentManager {
         }
         return await session.listCommands();
       } finally {
-        await this.closeDiscoverySession(session, normalizedConfig.provider, "draft command listing");
+        await this.closeDiscoverySession(
+          session,
+          normalizedConfig.provider,
+          "draft command listing",
+        );
       }
     });
   }
@@ -1403,12 +1407,20 @@ export class AgentManager {
           options: this.openedEffectiveOptions({ session, launchedOptions: options }),
         };
       } finally {
-        await this.closeDiscoverySession(session, normalizedConfig.provider, "draft feature listing");
+        await this.closeDiscoverySession(
+          session,
+          normalizedConfig.provider,
+          "draft feature listing",
+        );
       }
     });
   }
 
-  private async closeDiscoverySession(session: AgentSession, provider: AgentSessionConfig["provider"], operation: string): Promise<void> {
+  private async closeDiscoverySession(
+    session: AgentSession,
+    provider: AgentSessionConfig["provider"],
+    operation: string,
+  ): Promise<void> {
     try {
       await session.close();
     } catch (error) {

@@ -58,7 +58,14 @@ export class InternalPluginChild extends EventEmitter {
   }
 
   disconnect(): void {
-    if (this.closing) return;
+    void this.retire().catch((error) => {
+      this.worker.activityOwner.markUnknown();
+      this.stderr.write(`Plugin shutdown failed: ${String(error)}\n`);
+    });
+  }
+  /** Actual cleanup/drain completion. Rejection never emits a successful close. */
+  retire(): Promise<void> {
+    if (this.closing) return this.closing;
     this.closing = Promise.resolve()
       .then(() => this.worker.shutdown())
       .then(() => {
@@ -67,12 +74,8 @@ export class InternalPluginChild extends EventEmitter {
         this.stderr.end();
         this.emit("close", 0, null);
         return undefined;
-      })
-      .catch((error) => {
-        // No close acknowledgement on failed/uncertain cleanup. The original owner remains held.
-        this.worker.activityOwner.markUnknown();
-        this.stderr.write(`Plugin shutdown failed: ${String(error)}\n`);
       });
+    return this.closing;
   }
 }
 

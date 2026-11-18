@@ -2110,6 +2110,7 @@ export class VoiceAssistantWebSocketServer {
         managedPluginPromotions: process.env.PASEO_MANAGED_PLUGIN_POLICY !== undefined,
         managedPluginStatus: true,
         managedPluginCohortStatus: true,
+        managedPluginCohortV2: true,
         pluginSourceUpdates: true,
         pluginLogs: true,
         // COMPAT(pluginThemes): added in v0.5.0, remove gate after 2027-08-20.

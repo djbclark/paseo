@@ -260,3 +260,69 @@ it("uncertain cleanup never becomes a successful retirement", async () => {
   await expect(retirement).rejects.toThrow("uncertain");
   await expect(owner.waitForRetirement()).rejects.toThrow("uncertain");
 });
+
+it("preserves actual Git execFile stdin, NUL output and exit-1 errors through a once-only private launch", async () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import {execFileSync,spawn} from 'node:child_process';
+    import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+    import {tmpdir} from 'node:os';
+    import path from 'node:path';
+    import {promisify} from 'node:util';
+    import {PluginActivityOwner,installQualifiedHelperAdmission} from '@getpaseo/plugin/internal/activity';
+    import {execQualifiedBuiltinFile} from '@getpaseo/plugin/internal/builtin-helper';
+    const home=await mkdtemp(path.join(tmpdir(),'sdk-git-exec-'));
+    const owner=new PluginActivityOwner();
+    const root=owner.acquire();
+    let launches=0;
+    installQualifiedHelperAdmission(request => {
+      assert.equal(request.activityOwner,owner);
+      owner.assertLiveRoot(request.root);
+      let actual;
+      return {
+        // This is an output-adapter unit, not a qualified producer/descendant proof.
+        // No actual helper is declared settled from leader close.
+        settled:new Promise(()=>{}),
+        builtinExecFile:{start(){
+          assert.equal(actual,undefined);
+          launches++;
+          actual=spawn(request.operation.command,[...request.operation.args],{cwd:request.operation.options.cwd,stdio:'pipe'});
+          return actual;
+        }},
+        bind(child){assert.equal(child,actual)},failed(error){throw error},
+      };
+    });
+    try {
+      execFileSync('git',['init','-q',home]);
+      await writeFile(path.join(home,'.gitignore'),'*.local\n');
+      await writeFile(path.join(home,'.worktreeinclude'),'*.local\n');
+      await writeFile(path.join(home,'retained.local'),'content');
+      const exec=promisify(execQualifiedBuiltinFile);
+      const listed=await root.run(()=>exec('git',['ls-files','--others','--ignored','--exclude-from=.worktreeinclude','-z'],{cwd:home,maxBuffer:64*1024*1024}));
+      assert.equal(listed.stdout,'retained.local\0');
+      const checked=root.run(()=>exec('git',['check-ignore','--stdin','-z'],{cwd:home,maxBuffer:64*1024*1024}));
+      assert.ok(checked.child.stdin);
+      checked.child.stdin.end('not-ignored\0');
+      await assert.rejects(checked,error=>error.code===1 && error.stdout==='' && error.stderr==='');
+      await root.run(()=>new Promise((resolve,reject)=>{
+        const child=execQualifiedBuiltinFile('git',['check-ignore','--stdin','-z'],{cwd:home,maxBuffer:64*1024*1024},(error,stdout,stderr)=>{
+          try {assert.equal(error,null);assert.equal(stdout,'retained.local\0');assert.equal(stderr,'');resolve()}catch(error){reject(error)}
+        });
+        child.stdin.end('retained.local\0');
+      }));
+      assert.equal(launches,3);
+      root.release();
+      assert.equal(owner.begin({generation:1,transactionId:'no-proof',instanceId:'actual'}),'known-busy');
+      process.stdout.write('actual-git-output-without-qualification');
+    } finally {await rm(home,{recursive:true,force:true})}
+  `;
+  const { stdout } = await promisify(nativeExecFile)(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    {
+      cwd: new URL("../../../", import.meta.url),
+      env: { PATH: process.env.PATH },
+    },
+  );
+  expect(stdout).toBe("actual-git-output-without-qualification");
+});

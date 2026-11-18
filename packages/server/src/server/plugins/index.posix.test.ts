@@ -34,6 +34,7 @@ import {
   PluginService,
   getQualifiedRuntimeMeasurementEpoch,
   getQualifiedRuntimeMeasurement,
+  getQualifiedRuntimeMeasurementV2,
   readKnownFailedHeld,
 } from "./index.js";
 import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./builtin/index.js";
@@ -3110,6 +3111,12 @@ it("holds complete cohort observation and measurement without genuine executing 
   const forged = {} as import("../execution/daemon-types.js").QualifiedDaemonOwner;
   expect(getQualifiedRuntimeMeasurementEpoch(forged)).toBeNull();
   expect(await getQualifiedRuntimeMeasurement(forged)).toBeNull();
+  expect(await service.getManagedPluginCohortV2Status()).toEqual({
+    version: 2,
+    consistency: "uncertain",
+    reason: "authority-unavailable",
+  });
+  expect(await getQualifiedRuntimeMeasurementV2(forged)).toBeNull();
 });
 
 it("rejects a forged held plugin mutation scope before source preparation or lifecycle changes", async () => {
@@ -3186,4 +3193,39 @@ it("rejects a JSON known-failed-held tag without actual private driver settlemen
   expect(
     readKnownFailedHeld({ plugin: { id: "probe" }, nativeGeneration: 1 }, scope, claim),
   ).toBeUndefined();
+});
+
+it("shutdown drains actual plugin children while native normal admission remains held", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "paseo-shutdown-held-"));
+  roots.push(home);
+  const directory = await createPlugin(
+    "cleanup-held",
+    "export default function contribute(){return()=>{};}",
+  );
+  let held = false;
+  const enterWork = vi.fn(() => {
+    if (held) throw new Error("native normal admission held");
+    return () => {};
+  });
+  const service = createService(
+    home,
+    { "cleanup-held": { source: "directory", path: directory } },
+    {
+      nativeMaintenance: {
+        enterWork,
+        holdForUnknownWork: () => {},
+        runQualifiedInitialization: async (operation) => operation(),
+      },
+    },
+  );
+  await service.start();
+  expect((await service.listPlugins())[0]?.status).toBe("running");
+  held = true;
+  enterWork.mockClear();
+  await service.stopAllPlugins();
+  expect(enterWork).not.toHaveBeenCalled();
+  await expect(service.reloadPlugin("cleanup-held")).rejects.toThrow(
+    "native normal admission held",
+  );
+  expect((await service.listPlugins())[0]?.status).not.toBe("running");
 });

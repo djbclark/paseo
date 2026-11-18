@@ -114,3 +114,17 @@ it("exposes only the original internal worker/activity association before any co
   child.disconnect();
   await closed;
 });
+
+it("does not acknowledge internal child closure after uncertain actual worker retirement", async () => {
+  const child = new InternalPluginChild(() => () => () => {});
+  const execution = readInternalPluginExecution(child);
+  if (!execution) throw new Error("Missing original execution binding");
+  let closed = false;
+  child.once("close", () => {
+    closed = true;
+  });
+  execution.activityOwner.markUnknown();
+  await expect(child.retire()).rejects.toThrow("retirement is uncertain");
+  expect(closed).toBe(false);
+  expect(child.connected).toBe(true);
+});

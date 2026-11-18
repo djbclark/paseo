@@ -1,3 +1,4 @@
+import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { cloneBoundedObservation, parseQualifiedMeasurementRequest } from "./measurement-format.js";
 export { parseQualifiedMeasurementRequest } from "./measurement-format.js";
 import { createHash } from "node:crypto";
@@ -56,7 +57,7 @@ const Run = z
   .strict();
 const Runtime = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     observationEpoch: z.number().int().nonnegative(),
     compiler: z
       .object({
@@ -77,7 +78,7 @@ interface TerminalObservation {
 }
 interface MeasurementResponse {
   type: "qualified.measurement.response";
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   nonce: string;
   parentPid: number;
   status: "observed" | "hold";
@@ -171,8 +172,12 @@ function parseCohort(
   raw: unknown,
   daemon: QualifiedDaemonObservation,
   serverId: string,
+  version: 1 | 2,
 ): unknown | null {
-  const schema: unknown = Reflect.get(protocol, "ManagedPluginCohortStatusSchema");
+  const schema: unknown = Reflect.get(
+    protocol,
+    version === 2 ? "ManagedPluginCohortV2StatusSchema" : "ManagedPluginCohortStatusSchema",
+  );
   if (!schema || typeof schema !== "object") return null;
   const parse: unknown = Reflect.get(schema, "safeParse");
   if (typeof parse !== "function") return null;
@@ -191,37 +196,67 @@ function parseCohort(
     Reflect.get(enclosing, "distributionBuildId") !== daemon.distributionBuildId
   )
     return null;
+  if (version === 2 && !completeBuiltinCohort(entries)) return null;
   const closure = Closure.safeParse(Reflect.get(enclosing, "closure"));
   if (!closure.success || !sameClosure(closure.data, daemon.closure)) return null;
   return cohort;
+}
+function completeBuiltinCohort(entries: unknown[]): boolean {
+  const rows = entries.filter(
+    (row) => row && typeof row === "object" && Reflect.get(row, "kind") === "builtin-in-process",
+  ) as object[];
+  if (
+    JSON.stringify(rows.map((row) => Reflect.get(row, "pluginId")).sort()) !==
+    JSON.stringify(builtinPlugins)
+  )
+    return false;
+  return rows.every(
+    (row) =>
+      Reflect.get(row, "enabled") === true &&
+      Reflect.get(row, "loaded") !== null &&
+      Reflect.get(row, "execution") !== null,
+  );
 }
 async function collect(
   owner: QualifiedDaemonOwner,
   daemon: PaseoDaemon,
   nonce: string,
+  version: 1 | 2,
 ): Promise<MeasurementResponse> {
   await owner.refresh();
   const before = getQualifiedDaemonObservation(owner);
-  const getter: unknown = Reflect.get(pluginService, "getQualifiedRuntimeMeasurement");
+  const getter: unknown = Reflect.get(
+    pluginService,
+    version === 2 ? "getQualifiedRuntimeMeasurementV2" : "getQualifiedRuntimeMeasurement",
+  );
   const epochGetter: unknown = Reflect.get(pluginService, "getQualifiedRuntimeMeasurementEpoch");
   if (typeof getter !== "function" || typeof epochGetter !== "function")
-    return hold(nonce, "runtime-observer-unavailable", before);
+    return { ...hold(nonce, "runtime-observer-unavailable", before), schemaVersion: version };
   const parsed = Runtime.safeParse(await getter(owner));
+  const held = (
+    reason: string,
+    observed: QualifiedDaemonObservation | null = null,
+    terminal: TerminalObservation | null = null,
+  ) => ({ ...hold(nonce, reason, observed, terminal), schemaVersion: version });
   await owner.refresh();
   const after = getQualifiedDaemonObservation(owner);
-  if (JSON.stringify(before) !== JSON.stringify(after)) return hold(nonce, "owned-cohort-changed");
+  if (JSON.stringify(before) !== JSON.stringify(after)) return held("owned-cohort-changed");
   assertQualifiedWorkerTerminalManager(daemon.terminalManager, owner);
   const terminals = after.ownedHandles.filter((row) => row.kind === "terminal-worker");
-  if (terminals.length !== 1) return hold(nonce, "terminal-observation-unavailable", after);
+  if (terminals.length !== 1) return held("terminal-observation-unavailable", after);
   const terminal = { pid: terminals[0]!.pid, incarnation: terminals[0]!.incarnation };
-  if (!parsed.success || epochGetter(owner) !== parsed.data.observationEpoch)
-    return hold(nonce, "runtime-observation-changed", after, terminal);
-  const cohort = parseCohort(parsed.data.plugins, after, daemon.getServerId());
+  if (
+    !parsed.success ||
+    parsed.data.version !== version ||
+    epochGetter(owner) !== parsed.data.observationEpoch
+  )
+    return held("runtime-observation-changed", after, terminal);
+  const cohort = parseCohort(parsed.data.plugins, after, daemon.getServerId(), version);
   if (!cohort || !parsed.data.compiler || !verifyColdPair(parsed.data.compiler, after.closure))
-    return hold(nonce, "runtime-facts-incomplete", after, terminal);
+    return held("runtime-facts-incomplete", after, terminal);
   return boundedData({
     type: "qualified.measurement.response",
-    schemaVersion: 1,
+    schemaVersion: version,
     nonce,
     parentPid,
     status: "observed",
@@ -253,21 +288,24 @@ export function attachQualifiedDaemonMeasurement(owner: QualifiedDaemonOwner) {
     const request = parseQualifiedMeasurementRequest(raw);
     if (!request || !connected()) return;
     if (!daemon) {
-      send(hold(request.nonce, "starting"));
+      send({ ...hold(request.nonce, "starting"), schemaVersion: request.schemaVersion });
       return;
     }
     if (busy) {
-      send(hold(request.nonce, "busy"));
+      send({ ...hold(request.nonce, "busy"), schemaVersion: request.schemaVersion });
       return;
     }
     busy = true;
-    void collect(owner, daemon, request.nonce)
+    void collect(owner, daemon, request.nonce, request.schemaVersion)
       .then((response) => {
         send(response);
         return undefined;
       })
       .catch(() => {
-        send(hold(request.nonce, "observation-unavailable"));
+        send({
+          ...hold(request.nonce, "observation-unavailable"),
+          schemaVersion: request.schemaVersion,
+        });
       })
       .finally(() => {
         busy = false;

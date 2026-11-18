@@ -96,3 +96,22 @@ test("descriptive builtin data and wrong role cannot mint an original instance",
     producer.createQualifiedBuiltinInstance(fakeOwner, "worktree-include"),
   );
 });
+
+test("measurement explicitly requests V2 without adding selectors or coercing V1", () => {
+  assert.deepEqual(
+    parseQualifiedMeasurementRequest({
+      type: "qualified.measurement.request",
+      schemaVersion: 2,
+      nonce: "abcdefghijklmnop",
+    }),
+    { type: "qualified.measurement.request", schemaVersion: 2, nonce: "abcdefghijklmnop" },
+  );
+  assert.equal(
+    parseQualifiedMeasurementRequest({
+      type: "qualified.measurement.request",
+      schemaVersion: 3,
+      nonce: "abcdefghijklmnop",
+    }),
+    null,
+  );
+});

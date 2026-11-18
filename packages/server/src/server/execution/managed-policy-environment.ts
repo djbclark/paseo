@@ -85,7 +85,11 @@ export async function readFixedManagedPluginPolicy(): Promise<{ path: string; do
 }
 export async function qualifiedManagedEnvironment() {
   const policy = await readFixedManagedPluginPolicy();
-  return { PATH: "/usr/bin:/bin", PASEO_MANAGED_PLUGIN_POLICY: policy.path };
+  return {
+    PATH: "/usr/bin:/bin",
+    HOME: userInfo().homedir,
+    PASEO_MANAGED_PLUGIN_POLICY: policy.path,
+  };
 }
 /** CLI wrapper binds the same input, never an ambient policy path. */
 export async function bindFixedManagedPluginPolicyEnvironment(): Promise<void> {

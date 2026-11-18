@@ -261,3 +261,9 @@ export async function refreshQualifiedChildHost(): Promise<void> {
   if (!childRefresh) return unsupported();
   await childRefresh();
 }
+
+export {
+  createQualifiedBuiltinInstance,
+  assertQualifiedBuiltinInstance,
+  getQualifiedBuiltinObservation,
+} from "./builtin-instance.js";

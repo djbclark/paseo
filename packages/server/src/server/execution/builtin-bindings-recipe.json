@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "contract": "builtin-in-process-v1",
+  "sdkKeys": [
+    "@getpaseo/plugin",
+    "@getpaseo/plugin/server",
+    "@getpaseo/plugin/server/provider",
+    "@getpaseo/plugin/server/acp",
+    "@getpaseo/plugin/server/usage",
+    "zod"
+  ],
+  "privateBindings": [
+    "@getpaseo/plugin/internal/activity",
+    "@getpaseo/plugin/internal/builtin-helper"
+  ],
+  "nodeKeys": [
+    "node:fs",
+    "node:fs/promises",
+    "node:os",
+    "node:path",
+    "node:crypto",
+    "node:readline",
+    "node:util",
+    "node:timers/promises",
+    "node:sqlite",
+    "node:child_process"
+  ],
+  "globals": {
+    "process": "captured-node-process-finite-getBuiltinModule-v1",
+    "fetch": "captured-node-fetch-v1",
+    "timers": "captured-node-timers-v1",
+    "dynamicImport": "finite-table-promise-v1",
+    "childProcess": "scoped-execFile-only-v1"
+  }
+}

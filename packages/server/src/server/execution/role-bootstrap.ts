@@ -37,6 +37,7 @@ process.on("message", (raw: unknown) => {
     rejectedSdkHelperOutsideOwner: observation.supported ? helperAdmissionProbe() : true,
     rejectedPrivateImports: [
       "@getpaseo/plugin/internal/activity",
+      "@getpaseo/plugin/internal/builtin-helper",
       "@getpaseo/client/internal/daemon-client",
       "@getpaseo/protocol/binary-frames/index",
       "node:child_process",

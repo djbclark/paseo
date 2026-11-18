@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
 import {
   chmod,
   cp,
@@ -13,6 +14,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
+import builtinBindingsRecipe from "../src/server/execution/builtin-bindings-recipe.json" with { type: "json" };
 import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 async function identity(file, name = file) {
@@ -114,10 +116,21 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     if (a.path > b.path) return 1;
     return 0;
   });
+  const builtinModuleTable = {
+    schemaVersion: 1,
+    recipe: builtinBindingsRecipe,
+    runtimeSha256: files.find((file) => file.path === "runtime/node").sha256,
+    daemonSha256: files.find((file) => file.path === "daemon.mjs").sha256,
+    externalLibraries,
+  };
+  const moduleTableSha256 = digest(canonicalBuiltinJson(builtinModuleTable));
   const manifest = {
     schemaVersion: 2,
     profile: "enclosing-daemon-v2",
     builtinPlugins,
+    builtinModuleTable,
+    moduleTableSha256,
+    builtinArtifacts: inputs.builtinArtifacts.map((row) => ({ ...row, moduleTableSha256 })),
     distributionBuildId: inputs.distributionBuildId,
     files,
     runtime: files.find((file) => file.path === "runtime/node"),
@@ -133,6 +146,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     },
     bindingKeys: [
       "@getpaseo/plugin/internal/activity",
+      "@getpaseo/plugin/internal/builtin-helper",
       "@getpaseo/plugin",
       "@getpaseo/plugin/server",
       "@getpaseo/plugin/server/provider",

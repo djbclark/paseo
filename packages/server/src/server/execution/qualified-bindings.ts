@@ -1,3 +1,4 @@
+import * as builtinHelper from "@getpaseo/plugin/internal/builtin-helper";
 import * as activity from "@getpaseo/plugin/internal/activity";
 import * as shared from "@getpaseo/plugin";
 import * as server from "@getpaseo/plugin/server";
@@ -12,6 +13,7 @@ import * as zod from "zod";
 /** The sealed bundle's actual evaluated objects; never a package.json reconstruction. */
 export const qualifiedBindings: Readonly<Record<string, object>> = Object.freeze({
   "@getpaseo/plugin/internal/activity": activity,
+  "@getpaseo/plugin/internal/builtin-helper": builtinHelper,
   "@getpaseo/plugin": shared,
   "@getpaseo/plugin/server": server,
   "@getpaseo/plugin/server/provider": provider,

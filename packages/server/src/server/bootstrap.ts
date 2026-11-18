@@ -784,7 +784,12 @@ async function createPaseoDaemonInExecutionContext(
     ),
   );
 
-  maintenance.bindTransport(serverId, qualifiedDaemon, heldPluginOperationDriver(pluginRuntime));
+  maintenance.bindTransport(
+    serverId,
+    qualifiedDaemon,
+    heldPluginOperationDriver(pluginRuntime),
+    typeof pluginRuntime.getManagedPluginCohortV2Status === "function",
+  );
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
   const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
   // Reconcile the helper-process ledger in the background so it never blocks the

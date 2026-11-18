@@ -9,6 +9,7 @@ import {
   type CommandOptions,
   type OutputSchema,
   type CommandError,
+  type SingleResult,
 } from "../../output/index.js";
 
 type Status =
@@ -117,6 +118,15 @@ export function maintenancePluginOutput(payload: MaintenanceOperationPayload, su
   return payload.result;
 }
 
+function operationOutput<T>(data: T): SingleResult<T> {
+  return {
+    type: "single",
+    data,
+    schema: { idField: () => "maintenance-operation", columns: [],
+      renderHuman: () => "Maintenance operation completed" },
+  };
+}
+
 export function daemonMaintenanceCommand(): Command {
   const command = new Command("maintenance").description(
     "Reserve daemon admission for maintenance",
@@ -192,7 +202,7 @@ export function daemonMaintenanceCommand(): Command {
       .requiredOption("--server-bundle-sha256 <sha256>", "Exact target bundle digest")
       .requiredOption("--owner-token-fd <fd>", "Private input FD (0 for stdin)"),
   ).action(
-    withOutput(async (options: CommandOptions, _command: Command) => {
+    withOutput<ReturnType<typeof maintenancePluginOutput>, []>(async (options: CommandOptions, _command: Command) => {
       const ownerToken = readMaintenanceOwnerToken(Number(options.ownerTokenFd));
       const operation = String(options.operation);
       if (operation !== "replace" && operation !== "recover" && operation !== "verify")
@@ -221,12 +231,9 @@ export function daemonMaintenanceCommand(): Command {
           options.json === true &&
             client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true,
         );
-        const output: OutputSchema<typeof result> = {
-          idField: () => "maintenance-operation",
-          columns: [],
-          renderHuman: () => "Maintenance operation completed",
-        };
-        return { type: "single" as const, data: result, schema: output };
+        // AnyCommandResult distributes its union: retain each result's schema correlation.
+        if ("outcome" in result) return operationOutput(result);
+        return operationOutput(result);
       } finally {
         await client.close();
       }

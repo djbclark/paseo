@@ -238,6 +238,7 @@ describe("maintenance confirmed failed-held serialization (wire unit)", () => {
     const payload = { requestId: "operation", result: null, error: null, knownFailedHeld: known };
     const result = maintenancePluginOutput(payload, true);
     expect(result).toEqual(known);
+    if (!("outcome" in result)) throw new Error("Expected confirmed held alternative");
     expect(
       render(
         { type: "single", data: result, schema: { columns: [], idField: () => "held" } },

@@ -318,7 +318,12 @@ describe("PluginService", () => {
       "held",
       `import { z } from "zod"; export default function contribute(context) { context.handle({ name: "probe", input: z.unknown(), output: z.string() }, () => "running"); return () => {}; }`,
     );
-    const service = createService(home, { held: { source: "directory", path: directory } });
+    const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0");
+    const service = createService(
+      home,
+      { held: { source: "directory", path: directory } },
+      { runtime },
+    );
     try {
       await service.start();
       expect(await service.invokePluginRpc("held", "probe", null)).toBe("running");
@@ -334,7 +339,7 @@ describe("PluginService", () => {
       expect(after?.loaded).toEqual(before?.loaded);
       expect(after?.enabled).toBe(before?.enabled);
     } finally {
-      await service.stopAllPlugins();
+      await runtime.stopAll();
     }
   });
 

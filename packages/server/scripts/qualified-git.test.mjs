@@ -139,6 +139,7 @@ int main(void) {
                 if (behavior === "resume") child.stdio[4].end(`resume ${nonce}\n`);
                 else if (behavior === "stale") child.stdio[4].end(`resume ${"0".repeat(64)}\n`);
                 else child.stdio[4].end();
+                return undefined;
               });
               checks.push(identity);
             }

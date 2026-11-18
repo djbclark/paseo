@@ -1,6 +1,8 @@
+import { parseRecoveryOnly, type RecoveryOnlyRestriction } from "./maintenance-recovery.js";
+export { parseRecoveryOnly } from "./maintenance-recovery.js";
+export type { RecoveryOnlyRestriction } from "./maintenance-recovery.js";
 import * as heldPluginOperation from "./plugins/held-operation.js";
 import type { PluginLoadedReceipt } from "@getpaseo/protocol/messages";
-import { isAbsolute, resolve } from "node:path";
 import type { PluginListItem } from "./messages.js";
 /** Native-only immutable claim. No bearer or private scope crosses plugin IPC. */
 export interface HeldPluginOperationClaim {
@@ -24,17 +26,6 @@ export interface HeldPluginOperationResult {
   plugin: PluginListItem;
   nativeGeneration: number;
 }
-export interface RecoveryOnlyRestriction {
-  readonly pluginId: string;
-  /** Current plugin journal CAS, separate from the native reservation generation. */
-  readonly nativeGeneration: number;
-  readonly baseline: {
-    readonly path: string;
-    readonly snapshotSha256: string;
-    readonly serverBundleSha256: string;
-  };
-  readonly phase: "recover-required" | "verify-required";
-}
 export interface KnownFailedHeldObservation {
   readonly outcome: "known_failed_held";
   readonly reason: "compiler_error" | "initialization_rejected";
@@ -45,33 +36,6 @@ export interface KnownFailedHeldObservation {
     readonly loaded: PluginLoadedReceipt | null;
   };
   readonly baseline: RecoveryOnlyRestriction["baseline"];
-}
-
-/** Descriptive persisted state only; parsing cannot certify an execution outcome. */
-export function parseRecoveryOnly(value: unknown): RecoveryOnlyRestriction {
-  if (!value || typeof value !== "object") throw new Error("Invalid recovery restriction");
-  const restriction = value as Record<string, unknown>;
-  if (Object.keys(restriction).sort().join(",") !== "baseline,nativeGeneration,phase,pluginId" ||
-    typeof restriction.pluginId !== "string" || !restriction.pluginId || restriction.pluginId.length > 256 ||
-    !Number.isSafeInteger(restriction.nativeGeneration) || (restriction.nativeGeneration as number) < 0 ||
-    !["recover-required", "verify-required"].includes(String(restriction.phase)))
-    throw new Error("Invalid recovery restriction");
-  return {
-    pluginId: restriction.pluginId,
-    nativeGeneration: restriction.nativeGeneration as number,
-    phase: restriction.phase as RecoveryOnlyRestriction["phase"],
-    baseline: parseRecoveryBaseline(restriction.baseline),
-  };
-}
-function parseRecoveryBaseline(baseline: unknown): RecoveryOnlyRestriction["baseline"] {
-  if (!baseline || typeof baseline !== "object") throw new Error("Invalid recovery baseline");
-  const fields = baseline as Record<string, unknown>;
-  if (Object.keys(fields).sort().join(",") !== "path,serverBundleSha256,snapshotSha256" ||
-    typeof fields.path !== "string" || fields.path.length > 1024 || !isAbsolute(fields.path) || resolve(fields.path) !== fields.path ||
-    typeof fields.snapshotSha256 !== "string" || !/^[a-f0-9]{64}$/.test(fields.snapshotSha256) ||
-    typeof fields.serverBundleSha256 !== "string" || !/^[a-f0-9]{64}$/.test(fields.serverBundleSha256))
-    throw new Error("Invalid recovery baseline");
-  return { path: fields.path, snapshotSha256: fields.snapshotSha256, serverBundleSha256: fields.serverBundleSha256 };
 }
 
 export type HeldPluginOperationDriver = (
@@ -117,17 +81,22 @@ export function assertHeldPluginOperationResult(
     throw new Error("Held plugin operation CAS mismatch");
 }
 
-
 /** Fixed bundled module only; absent committed private validator means unsupported. */
 export function supportsKnownFailedHeld(): boolean {
-  return "readKnownFailedHeld" in heldPluginOperation && typeof heldPluginOperation.readKnownFailedHeld === "function";
+  return (
+    "readKnownFailedHeld" in heldPluginOperation &&
+    typeof heldPluginOperation.readKnownFailedHeld === "function"
+  );
 }
 export function readPrivateKnownFailedHeld(
   result: unknown,
   scope: HeldPluginOperationScope,
   claim: HeldPluginOperationClaim,
 ): KnownFailedHeldObservation | undefined {
-  if (!("readKnownFailedHeld" in heldPluginOperation) || typeof heldPluginOperation.readKnownFailedHeld !== "function") {
+  if (
+    !("readKnownFailedHeld" in heldPluginOperation) ||
+    typeof heldPluginOperation.readKnownFailedHeld !== "function"
+  ) {
     if (result && typeof result === "object" && "outcome" in result)
       throw new Error("Known held outcome unsupported");
     return undefined;
@@ -135,12 +104,21 @@ export function readPrivateKnownFailedHeld(
   // The fixed plugin module owns the private provenance table. No caller callback is accepted.
   const observation = heldPluginOperation.readKnownFailedHeld(result, scope, claim);
   if (observation === undefined) return undefined;
-  if (!observation || observation.outcome !== "known_failed_held" ||
+  if (
+    !observation ||
+    observation.outcome !== "known_failed_held" ||
     !["compiler_error", "initialization_rejected"].includes(observation.reason) ||
-    observation.pluginId !== claim.pluginId || claim.operation === "verify" ||
-    !Number.isSafeInteger(observation.nativeGeneration) || observation.nativeGeneration < claim.expectedGeneration)
+    observation.pluginId !== claim.pluginId ||
+    claim.operation === "verify" ||
+    !Number.isSafeInteger(observation.nativeGeneration) ||
+    observation.nativeGeneration < claim.expectedGeneration
+  )
     throw new Error("Invalid known held outcome");
-  parseRecoveryOnly({ pluginId: observation.pluginId, nativeGeneration: observation.nativeGeneration,
-    baseline: observation.baseline, phase: "recover-required" });
+  parseRecoveryOnly({
+    pluginId: observation.pluginId,
+    nativeGeneration: observation.nativeGeneration,
+    baseline: observation.baseline,
+    phase: "recover-required",
+  });
   return observation;
 }

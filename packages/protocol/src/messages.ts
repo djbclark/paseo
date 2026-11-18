@@ -1545,17 +1545,21 @@ export const MaintenanceTransportAuthoritySchema = z.object({
     maintenanceKnownFailedHeldV1: z.boolean().optional(),
   }),
 });
-export const MaintenanceRecoveryBaselineSchema = z.object({
-  path: z.string().min(1).max(1024),
-  snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  serverBundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
-}).strict();
-export const MaintenanceRecoveryOnlySchema = z.object({
-  pluginId: z.string().min(1).max(256),
-  nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  phase: z.enum(["recover-required", "verify-required"]),
-  baseline: MaintenanceRecoveryBaselineSchema,
-}).strict();
+export const MaintenanceRecoveryBaselineSchema = z
+  .object({
+    path: z.string().min(1).max(1024),
+    snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    serverBundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export const MaintenanceRecoveryOnlySchema = z
+  .object({
+    pluginId: z.string().min(1).max(256),
+    nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    phase: z.enum(["recover-required", "verify-required"]),
+    baseline: MaintenanceRecoveryBaselineSchema,
+  })
+  .strict();
 export const MaintenanceStatusSchema = z.object({
   schemaVersion: z.literal(1),
   state: z.enum(["idle", "held", "recovery-required"]),
@@ -7456,20 +7460,24 @@ export const PluginListItemSchema = z.object({
 });
 export type PluginListItem = z.infer<typeof PluginListItemSchema>;
 
-export const MaintenanceKnownFailedHeldSchema = z.object({
-  outcome: z.literal("known_failed_held"),
-  reason: z.enum(["compiler_error", "initialization_rejected"]),
-  pluginId: z.string().min(1).max(256),
-  nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  current: z.object({
-    registration: z.object({ path: z.string(), enabled: z.boolean() }).strict().nullable(),
-    loaded: PluginLoadedReceiptSchema.nullable(),
-  }).strict(),
-  baseline: MaintenanceRecoveryBaselineSchema,
-  maintenance: MaintenanceStatusSchema,
-  serverId: z.string(),
-  daemonIncarnation: z.string(),
-}).strict();
+export const MaintenanceKnownFailedHeldSchema = z
+  .object({
+    outcome: z.literal("known_failed_held"),
+    reason: z.enum(["compiler_error", "initialization_rejected"]),
+    pluginId: z.string().min(1).max(256),
+    nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    current: z
+      .object({
+        registration: z.object({ path: z.string(), enabled: z.boolean() }).strict().nullable(),
+        loaded: PluginLoadedReceiptSchema.nullable(),
+      })
+      .strict(),
+    baseline: MaintenanceRecoveryBaselineSchema,
+    maintenance: MaintenanceStatusSchema,
+    serverId: z.string(),
+    daemonIncarnation: z.string(),
+  })
+  .strict();
 export const MaintenancePluginOperationResponseSchema = z.object({
   type: z.literal("daemon.maintenance.plugin.operation.response"),
   payload: z.object({

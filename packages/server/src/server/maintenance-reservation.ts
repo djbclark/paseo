@@ -1,5 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
-import { assertHeldPluginOperationResult, parseRecoveryOnly, readPrivateKnownFailedHeld, supportsKnownFailedHeld } from "./maintenance-operation.js";
+import {
+  assertHeldPluginOperationResult,
+  parseRecoveryOnly,
+  readPrivateKnownFailedHeld,
+  supportsKnownFailedHeld,
+} from "./maintenance-operation.js";
 import type {
   HeldPluginOperationClaim,
   HeldPluginOperationScope,
@@ -228,7 +233,8 @@ export class MaintenanceReservation {
       features: {
         maintenanceReservationV1: supported,
         maintenancePluginOperationV1: supported && this.pluginOperation !== undefined,
-        maintenanceKnownFailedHeldV1: supported && this.pluginOperation !== undefined && supportsKnownFailedHeld(),
+        maintenanceKnownFailedHeldV1:
+          supported && this.pluginOperation !== undefined && supportsKnownFailedHeld(),
       },
     };
   }
@@ -265,17 +271,7 @@ export class MaintenanceReservation {
       throw new Error("Maintenance transaction mismatch");
   }
 
-  async executePluginOperation(
-    input: HeldPluginOperationClaim & {
-      ownerToken: string;
-      expectedServerId: string;
-      expectedDaemonIncarnation: string;
-    },
-  ) {
-    this.assertTransport(input);
-    const driver = this.pluginOperation;
-    if (!driver || !this.supportsPluginOperations())
-      throw new Error("Held plugin operation unsupported");
+  private assertPluginTarget(input: HeldPluginOperationClaim): void {
     if (
       !isAbsolute(input.path) ||
       resolve(input.path) !== input.path ||
@@ -287,6 +283,20 @@ export class MaintenanceReservation {
       !/^[a-f0-9]{64}$/.test(input.serverBundleSha256)
     )
       throw new Error("Invalid held plugin operation target");
+  }
+
+  async executePluginOperation(
+    input: HeldPluginOperationClaim & {
+      ownerToken: string;
+      expectedServerId: string;
+      expectedDaemonIncarnation: string;
+    },
+  ) {
+    this.assertTransport(input);
+    const driver = this.pluginOperation;
+    if (!driver || !this.supportsPluginOperations())
+      throw new Error("Held plugin operation unsupported");
+    this.assertPluginTarget(input);
     // Copy only public claim fields; bearer and transport metadata never reach the driver.
     const claim: HeldPluginOperationClaim = {
       generation: input.generation,
@@ -304,23 +314,42 @@ export class MaintenanceReservation {
       this.assertTransport(input);
       assertHeldPluginOperation(scope, claim);
       if (!readPrivateKnownFailedHeld(result, scope, claim))
-        assertHeldPluginOperationResult(claim, result as import("./maintenance-operation.js").HeldPluginOperationResult);
+        assertHeldPluginOperationResult(
+          claim,
+          result as import("./maintenance-operation.js").HeldPluginOperationResult,
+        );
       return result;
     });
-    this.assertNoUnknownWork();
-    this.assertTransport(input);
-    const authority = this.transportAuthority();
-    if (!authority.qualified || !authority.daemonIncarnation)
-      throw new Error("Maintenance owner unavailable");
-    const metadata = {
-      maintenance: { ...this.status(), authority },
-      serverId: authority.serverId,
-      daemonIncarnation: authority.daemonIncarnation,
-    };
-    const known = acceptedKnownFailures.get(result);
-    if (known) return { ...known, ...metadata };
-    if ("outcome" in result) throw new Error("Unaccepted held outcome");
-    return { ...result, ...metadata };
+    try {
+      this.assertNoUnknownWork();
+      this.assertTransport(input);
+      const authority = this.transportAuthority();
+      if (
+        !authority.qualified ||
+        !authority.daemonIncarnation ||
+        !authority.features.maintenancePluginOperationV1
+      )
+        throw new Error("Maintenance owner unavailable");
+      const metadata = {
+        maintenance: { ...this.status(), authority },
+        serverId: authority.serverId,
+        daemonIncarnation: authority.daemonIncarnation,
+      };
+      const known = acceptedKnownFailures.get(result);
+      if (known) {
+        if (!authority.features.maintenanceKnownFailedHeldV1)
+          throw new Error("Known held capability unavailable");
+        this.assertNoUnknownWork();
+        return { ...known, ...metadata };
+      }
+      if ("outcome" in result) throw new Error("Unaccepted held outcome");
+      this.assertNoUnknownWork();
+      return { ...result, ...metadata };
+    } catch (error) {
+      if (!this.failed) this.holdForUnknownWork();
+      await this.storageTail;
+      throw error;
+    }
   }
 
   isReady(): boolean {
@@ -468,7 +497,9 @@ export class MaintenanceReservation {
       generation: this.attempt?.generation ?? (this.record?.generation || null),
       transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
       recoveryRequired,
-      ...(this.record?.recoveryOnly ? { recoveryOnly: structuredClone(this.record.recoveryOnly) } : {}),
+      ...(this.record?.recoveryOnly
+        ? { recoveryOnly: structuredClone(this.record.recoveryOnly) }
+        : {}),
     };
   }
 
@@ -762,13 +793,21 @@ export class MaintenanceReservation {
       if (successor !== "held" || !this.isReady())
         throw new Error("Maintenance successor not safely held");
       const known = readPrivateKnownFailedHeld(result, scope, claim);
-      await this.commitHeldOutcome(scope, claim, result, known, activityRevision, readinessRevision);
-      assertHeldPluginOperation(scope, claim);
+      await this.commitHeldOutcome(
+        scope,
+        claim,
+        result,
+        known,
+        activityRevision,
+        readinessRevision,
+      );
+      this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
       if (known) {
         const fresh = readPrivateKnownFailedHeld(result, scope, claim);
         if (!fresh || !isDeepStrictEqual(fresh, known))
           throw new Error("Known held observation changed");
         if (!result || typeof result !== "object") throw new Error("Invalid held outcome");
+        this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
         acceptedKnownFailures.set(result, structuredClone(fresh));
       }
       return result;
@@ -782,15 +821,35 @@ export class MaintenanceReservation {
     }
   }
 
+  private assertHeldActivity(
+    scope: HeldPluginOperationScope,
+    claim: HeldPluginOperationClaim,
+    activityRevision: number,
+    readinessRevision: number,
+  ): void {
+    assertHeldPluginOperation(scope, claim);
+    if (
+      this.inFlight !== 1 ||
+      this.activityRevision !== activityRevision ||
+      this.readinessRevision !== readinessRevision ||
+      !this.ready
+    )
+      throw new Error("Held outcome work or readiness changed");
+    this.assertNoUnknownWork();
+  }
+
   private assertRecoveryClaim(claim: HeldPluginOperationClaim): void {
     const restriction = this.record?.recoveryOnly;
     if (!restriction) return;
-    if (claim.operation === "replace" || claim.pluginId !== restriction.pluginId ||
+    if (
+      claim.operation === "replace" ||
+      claim.pluginId !== restriction.pluginId ||
       claim.path !== restriction.baseline.path ||
       claim.snapshotSha256 !== restriction.baseline.snapshotSha256 ||
       claim.serverBundleSha256 !== restriction.baseline.serverBundleSha256 ||
       claim.expectedGeneration !== restriction.nativeGeneration ||
-      (claim.operation === "verify" && restriction.phase !== "verify-required"))
+      (claim.operation === "verify" && restriction.phase !== "verify-required")
+    )
       throw new Error("Maintenance requires exact baseline recovery and separate verification");
   }
 
@@ -805,24 +864,38 @@ export class MaintenanceReservation {
     const previous = this.record!;
     const next: RecordV1 = { ...previous };
     if (known) {
-      const restriction = parseRecoveryOnly({ pluginId: known.pluginId,
-        nativeGeneration: known.nativeGeneration, baseline: known.baseline, phase: "recover-required" });
-      if (previous.recoveryOnly && !isDeepStrictEqual(restriction.baseline, previous.recoveryOnly.baseline))
+      const restriction = parseRecoveryOnly({
+        pluginId: known.pluginId,
+        nativeGeneration: known.nativeGeneration,
+        baseline: known.baseline,
+        phase: "recover-required",
+      });
+      if (
+        previous.recoveryOnly &&
+        !isDeepStrictEqual(restriction.baseline, previous.recoveryOnly.baseline)
+      )
         throw new Error("Recovery baseline changed");
       next.recoveryOnly = restriction;
     } else if (previous.recoveryOnly) {
-      assertHeldPluginOperationResult(claim, result as import("./maintenance-operation.js").HeldPluginOperationResult);
-      if (claim.operation === "recover") next.recoveryOnly = { ...previous.recoveryOnly,
-        nativeGeneration: (result as import("./maintenance-operation.js").HeldPluginOperationResult).nativeGeneration,
-        phase: "verify-required" };
+      assertHeldPluginOperationResult(
+        claim,
+        result as import("./maintenance-operation.js").HeldPluginOperationResult,
+      );
+      if (claim.operation === "recover")
+        next.recoveryOnly = {
+          ...previous.recoveryOnly,
+          nativeGeneration: (
+            result as import("./maintenance-operation.js").HeldPluginOperationResult
+          ).nativeGeneration,
+          phase: "verify-required",
+        };
       else if (claim.operation === "verify") delete next.recoveryOnly;
       else throw new Error("Restricted replacement forbidden");
     } else return;
     const validate = (committed: boolean) => {
-      assertHeldPluginOperation(scope, claim);
-      if (this.record !== (committed ? next : previous) || this.inFlight !== 1 ||
-        this.activityRevision !== activityRevision || this.readinessRevision !== readinessRevision || !this.ready)
-        throw new Error("Held outcome authority or activity changed");
+      this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
+      if (this.record !== (committed ? next : previous))
+        throw new Error("Held outcome authority changed");
       if (known) {
         const fresh = readPrivateKnownFailedHeld(result, scope, claim);
         if (!fresh || !isDeepStrictEqual(fresh, known))
@@ -832,7 +905,10 @@ export class MaintenanceReservation {
     };
     await this.storage(() => this.persist(next, false, validate));
     validate(true);
-    const fresh = await this.participant.begin({ generation: claim.generation, transactionId: claim.transactionId });
+    const fresh = await this.participant.begin({
+      generation: claim.generation,
+      transactionId: claim.transactionId,
+    });
     validate(true);
     if (fresh !== "held") throw new Error("Held outcome cohort unavailable");
   }

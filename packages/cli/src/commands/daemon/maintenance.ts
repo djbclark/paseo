@@ -9,6 +9,7 @@ import {
   type CommandOptions,
   type OutputSchema,
   type CommandError,
+  type SingleResult,
 } from "../../output/index.js";
 
 type Status =
@@ -77,31 +78,53 @@ function identity(options: CommandOptions) {
   };
 }
 
-type MaintenanceOperationPayload = Awaited<ReturnType<Awaited<ReturnType<typeof connectToDaemon>>["maintenancePluginOperation"]>>;
-function knownFailureIdentityValid(known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>): boolean {
+type MaintenanceOperationPayload = Awaited<
+  ReturnType<Awaited<ReturnType<typeof connectToDaemon>>["maintenancePluginOperation"]>
+>;
+function knownFailureIdentityValid(
+  known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>,
+): boolean {
   const authority = known.maintenance.authority;
-  return authority?.qualified === true && authority.serverId === known.serverId &&
+  return (
+    authority?.qualified === true &&
+    authority.serverId === known.serverId &&
     authority.daemonIncarnation === known.daemonIncarnation &&
-    known.maintenance.generation !== null && known.maintenance.transactionId !== null &&
+    known.maintenance.generation !== null &&
+    known.maintenance.transactionId !== null &&
     known.maintenance.reservationGeneration === known.maintenance.generation &&
-    known.maintenance.recoveryRequired === true;
+    known.maintenance.recoveryRequired === true
+  );
 }
 export function maintenancePluginOutput(payload: MaintenanceOperationPayload, supported: boolean) {
   if (payload.error) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
   if (payload.knownFailedHeld) {
     const known = payload.knownFailedHeld;
-    if (payload.result || !supported || !knownFailureIdentityValid(known) ||
+    if (
+      payload.result ||
+      !supported ||
+      !knownFailureIdentityValid(known) ||
       known.maintenance.authority?.features.maintenanceKnownFailedHeldV1 !== true ||
-      !known.maintenance.recoveryOnly || known.maintenance.state === "idle" ||
+      !known.maintenance.recoveryOnly ||
+      known.maintenance.state === "idle" ||
       known.maintenance.recoveryOnly.phase !== "recover-required" ||
       known.pluginId !== known.maintenance.recoveryOnly.pluginId ||
       known.nativeGeneration !== known.maintenance.recoveryOnly.nativeGeneration ||
-      !isDeepStrictEqual(known.baseline, known.maintenance.recoveryOnly.baseline))
+      !isDeepStrictEqual(known.baseline, known.maintenance.recoveryOnly.baseline)
+    )
       throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
     return known;
   }
   if (!payload.result) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
   return payload.result;
+}
+
+function operationOutput<T>(data: T): SingleResult<T> {
+  return {
+    type: "single",
+    data,
+    schema: { idField: () => "maintenance-operation", columns: [],
+      renderHuman: () => "Maintenance operation completed" },
+  };
 }
 
 export function daemonMaintenanceCommand(): Command {
@@ -179,7 +202,7 @@ export function daemonMaintenanceCommand(): Command {
       .requiredOption("--server-bundle-sha256 <sha256>", "Exact target bundle digest")
       .requiredOption("--owner-token-fd <fd>", "Private input FD (0 for stdin)"),
   ).action(
-    withOutput(async (options: CommandOptions, _command: Command) => {
+    withOutput<ReturnType<typeof maintenancePluginOutput>, []>(async (options: CommandOptions, _command: Command) => {
       const ownerToken = readMaintenanceOwnerToken(Number(options.ownerTokenFd));
       const operation = String(options.operation);
       if (operation !== "replace" && operation !== "recover" && operation !== "verify")
@@ -203,14 +226,14 @@ export function daemonMaintenanceCommand(): Command {
           snapshotSha256: String(options.snapshotSha256),
           serverBundleSha256: String(options.serverBundleSha256),
         });
-        const result = maintenancePluginOutput(payload, options.json === true &&
-          client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true);
-        const output: OutputSchema<typeof result> = {
-          idField: () => "maintenance-operation",
-          columns: [],
-          renderHuman: () => "Maintenance operation completed",
-        };
-        return { type: "single" as const, data: result, schema: output };
+        const result = maintenancePluginOutput(
+          payload,
+          options.json === true &&
+            client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true,
+        );
+        // AnyCommandResult distributes its union: retain each result's schema correlation.
+        if ("outcome" in result) return operationOutput(result);
+        return operationOutput(result);
       } finally {
         await client.close();
       }

@@ -458,3 +458,59 @@ describe("managed acquisition integration", () => {
     }
   });
 });
+
+describe("Mac manual-download completion", () => {
+  it("accepts an empty download result only after a verified downloaded-file event", async () => {
+    const { ManagedDesktopAuthority } = await import("./managed-desktop-policy");
+    const directory = await mkdtemp(path.join(os.tmpdir(), "managed-mac-"));
+    try {
+      const archive = path.join(directory, "app.zip");
+      await writeFile(archive, "qualified");
+      const sha512 = Buffer.alloc(64, 1).toString("base64");
+      const authority = new ManagedDesktopAuthority(() => ({
+        schemaVersion: 1,
+        component: "paseo-desktop",
+        generation: 1,
+        stateCompatibility: "binary-only",
+        operations: {
+          download: {
+            allowed: true,
+            transactionId: "tx",
+            receiptSha256: "a".repeat(64),
+            version: "1.2.4",
+            archiveSha256: createHash("sha256").update("qualified").digest("hex"),
+            archiveSha512: sha512,
+            packageUrl: "https://example.com/app.zip",
+          },
+        },
+      }));
+      const runtime = new ElectronAppUpdateRuntime(authority);
+      runtime.configure({
+        releaseChannel: "stable",
+        shouldAdmitUpdate: async () => true,
+        onUpdateAvailable: vi.fn(),
+        onUpdateDownloaded: vi.fn(),
+        onError: vi.fn(),
+      });
+      const info = {
+        version: "1.2.4",
+        files: [{ url: "app.zip", sha512 }],
+        downloadedFile: archive,
+      };
+      autoUpdaterMock.checkForUpdates.mockResolvedValueOnce({
+        isUpdateAvailable: true,
+        updateInfo: info,
+      });
+      await runtime.checkForUpdates();
+      autoUpdaterMock.downloadUpdate.mockResolvedValueOnce([]);
+      await expect(runtime.downloadUpdate("1.2.4")).rejects.toThrow("archive unavailable");
+      autoUpdaterMock.downloadUpdate.mockImplementationOnce(async () => {
+        autoUpdaterMock.handlers.get("update-downloaded")?.(info);
+        return [];
+      });
+      await expect(runtime.downloadUpdate("1.2.4")).resolves.toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

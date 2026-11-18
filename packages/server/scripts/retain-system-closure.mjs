@@ -61,6 +61,12 @@ async function protectedSource(file) {
     if (current === path.dirname(current)) break;
   }
 }
+function buildOwnedPath(retained, current, root) {
+  return (
+    retained &&
+    (current === root || current.startsWith(`${root}/`) || root.startsWith(`${current}/`))
+  );
+}
 export async function retainSystemClosure(root) {
   if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch))
     throw new Error("Linux system closure only");
@@ -97,9 +103,7 @@ export async function retainSystemClosure(root) {
       current = path.join(current, component);
       const stat = await lstat(current);
       if (!stat.isSymbolicLink()) {
-        const buildOwned =
-          retained &&
-          (current === root || current.startsWith(`${root}/`) || root.startsWith(`${current}/`));
+        const buildOwned = buildOwnedPath(retained, current, root);
         if (!buildOwned && (stat.uid !== 0 || stat.mode & 0o022))
           throw new Error("Mutable loader traversal");
         continue;
@@ -253,29 +257,32 @@ export async function retainSystemClosure(root) {
       if (cacheRows.size > 2048) throw new Error("Relevant cache entry bound");
     }
   }
-  const defaults =
-    process.arch === "x64"
-      ? ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib", "/usr/lib"]
-      : ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"];
-  for (const value of defaults) {
-    await links(value);
-    if (await absent(value)) throw new Error("Missing default search directory");
-    directory("system", await realpath(value));
-  }
-  // Every reachable lookup for a known needed name must select an inventoried object.
-  for (const row of directories.values()) {
-    const base = row.kind === "system" ? row.path : path.resolve(root, row.path);
-    for (const name of needed) {
-      const candidate = path.join(base, name);
-      if (await absent(candidate)) continue;
-      const target = await realpath(candidate);
-      if (!external.has(target) && !elfs.has(path.relative(root, target)))
-        throw new Error(`Unretained search selection: ${candidate}`);
-      if (row.kind === "system") await links(candidate);
+  async function completeSearchInventory() {
+    const defaults =
+      process.arch === "x64"
+        ? ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib", "/usr/lib"]
+        : ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"];
+    for (const value of defaults) {
+      await links(value);
+      if (await absent(value)) throw new Error("Missing default search directory");
+      directory("system", await realpath(value));
     }
-    await selectionTree(path.join(base, "glibc-hwcaps"));
-    await selectionTree(path.join(base, "tls"));
+    // Every reachable lookup for a known needed name must select an inventoried object.
+    for (const row of directories.values()) {
+      const base = row.kind === "system" ? row.path : path.resolve(root, row.path);
+      for (const name of needed) {
+        const candidate = path.join(base, name);
+        if (await absent(candidate)) continue;
+        const target = await realpath(candidate);
+        if (!external.has(target) && !elfs.has(path.relative(root, target)))
+          throw new Error(`Unretained search selection: ${candidate}`);
+        if (row.kind === "system") await links(candidate);
+      }
+      await selectionTree(path.join(base, "glibc-hwcaps"));
+      await selectionTree(path.join(base, "tls"));
+    }
   }
+  await completeSearchInventory();
   const finalCacheEntries = [];
   for (const row of cacheEntries.filter((entry) => needed.has(entry.soname))) {
     finalCacheEntries.push({ ...row, target: await realpath(row.path) });

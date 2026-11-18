@@ -54,10 +54,10 @@ function probe(root, race, ambient = {}) {
   assert.ok(bootstrap, "Actual packaged namespace helper missing");
   assert.equal(
     bootstrap.sha256,
-    "f49c0c8a2498dc5b4f0fd6aaab4ffdef83095d5ec3104c408d5c5747ef680192",
+    "9c09a3d4b499ada76efdf72de9de068e27fb8eb470614d3961d64c45185b6949",
     "Administrative helper must match independently reviewed tracked source",
   );
-  assert.equal(bootstrap.size, 45127);
+  assert.equal(bootstrap.size, 48790);
   const script = `${root}.probe.mjs`,
     recipe = `${root}.launch-recipe.json`;
   const temporary = mkdtempSync(path.join(tmpdir(), "paseo-system-probe-"));

@@ -423,20 +423,8 @@ async function verifySearchDirectories(root: string, manifest: ClosureManifest):
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    const caps = path.join(directory, "glibc-hwcaps");
-    try {
-      for (const sub of await readdir(caps))
-        for (const name of needed) {
-          try {
-            await lstat(path.join(caps, sub, name));
-            return fail();
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-        }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    // lookupInputs already checks the entire protected hwcaps/tls selection tree,
+    // including empty writable subdirectories and recursive alias routes.
   }
 }
 function deviceMatches(value: bigint, major: bigint, minor: bigint): boolean {

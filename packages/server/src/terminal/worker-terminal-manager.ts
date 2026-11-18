@@ -1,3 +1,4 @@
+import { isQualifiedDaemonOwner } from "../server/execution/daemon-owner.js";
 import type { TerminalReplaySink, TerminalReplayMetadata } from "./terminal-replay.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
@@ -997,6 +998,7 @@ export interface StartWorkerTerminalManagerOptions {
   logger: Logger;
   getTerminalActivityUrl?: () => string | null;
   requestTimeoutMs?: number;
+  qualifiedDaemonOwner?: unknown;
 }
 
 // The current worker plus one draining a previous protocol. Every live worker counts,
@@ -1024,12 +1026,19 @@ interface LiveWorkerRecord {
 export async function startWorkerTerminalManager(
   options: StartWorkerTerminalManagerOptions,
 ): Promise<DaemonTerminalManager> {
+  const qualifiedOwner = options.qualifiedDaemonOwner;
+  if (qualifiedOwner !== undefined && !isQualifiedDaemonOwner(qualifiedOwner))
+    throw new Error("Qualified terminal owner unavailable");
   const logger = options.logger.child({ module: "terminal-worker" });
   const inspector = createTerminalWorkerProcessInspector();
   const log = (message: string, fields?: Record<string, unknown>) => logger.info(fields, message);
   const live: LiveWorkerRecord[] = [];
   const toReap: string[] = [];
   for (const file of await listTerminalWorkerRecords(options.paseoHome)) {
+    if (qualifiedOwner !== undefined) {
+      if ("error" in file) throw new Error("Unqualified terminal record");
+      qualifiedOwner.assertOwnedTerminalWorker(file.record);
+    }
     if ("error" in file) {
       logger.warn({ recordPath: file.path, err: file.error }, "Unreadable terminal worker record");
       continue;
@@ -1256,7 +1265,10 @@ export async function startWorkerTerminalManager(
     const launched = await launchTerminalWorker({
       paseoHome: options.paseoHome,
       paseoVersion: options.paseoVersion,
+      ...(qualifiedOwner === undefined ? {} : { qualifiedDaemonOwner: qualifiedOwner }),
     });
+    if (qualifiedOwner !== undefined)
+      qualifiedTerminalRecords.set(launched.record.pid, launched.record);
     const connection = await connectTerminalWorker({
       socketPath: launched.record.socketPath,
       secret: launched.record.secret,
@@ -1287,7 +1299,7 @@ export async function startWorkerTerminalManager(
     }
   }
 
-  return createTerminalWorkerPool({
+  const pool = createTerminalWorkerPool({
     current,
     draining,
     incompatible: null,
@@ -1298,6 +1310,19 @@ export async function startWorkerTerminalManager(
       void pruneAfterExit(member.workerPid);
     },
   });
+  if (qualifiedOwner !== undefined) {
+    if (!current || draining.length) throw new Error("Qualified terminal worker unavailable");
+    const record = (await listTerminalWorkerRecords(options.paseoHome)).find(
+      (entry) => !("error" in entry) && entry.record.pid === current!.workerPid,
+    );
+    if (!record || "error" in record) throw new Error("Qualified terminal record unavailable");
+    // The private producer requires its original record object, not parsed JSON.
+    const original = qualifiedTerminalRecords.get(current.workerPid);
+    if (!original) throw new Error("Qualified terminal launch proof unavailable");
+    qualifiedOwner.assertOwnedTerminalWorker(original);
+    qualifiedManagers.set(pool, { owner: qualifiedOwner, record: original });
+  }
+  return pool;
 }
 
 // Every worker that may still run in this home, one per record: a worker and its cleanup record
@@ -1336,4 +1361,15 @@ async function waitForWorkerRecordRemoval(paseoHome: string, workerPid: number):
     await delay(100);
   }
   return true;
+}
+
+const qualifiedTerminalRecords = new Map<number, object>();
+const qualifiedManagers = new WeakMap<object, { owner: unknown; record: object }>();
+export function assertQualifiedWorkerTerminalManager(manager: unknown, owner: unknown): void {
+  if (!manager || typeof manager !== "object" || !isQualifiedDaemonOwner(owner))
+    throw new Error("Qualified terminal manager unavailable");
+  const record = qualifiedManagers.get(manager);
+  if (!record || record.owner !== owner) throw new Error("Unbound qualified terminal manager");
+  owner.assertFresh();
+  owner.assertOwnedTerminalWorker(record.record);
 }

@@ -1,9 +1,17 @@
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import { verifyEnclosingProcess, unsupported } from "./daemon-verifier.js";
+import { assertQualifiedDaemonEvaluation, isQualifiedDaemonBinding } from "./daemon-owner.js";
+export { getQualifiedDaemonOwner, isQualifiedDaemonOwner } from "./daemon-owner.js";
+export type { QualifiedDaemonOwner } from "./daemon-types.js";
 import { createHash, randomUUID } from "node:crypto";
 import { qualifiedBindings } from "./qualified-bindings.js";
 import { verifyQualifiedLaunch } from "./launch-verifier.js";
 import type { HostEvidence, QualifiedExecutionBinding, QualifiedRole } from "./types.js";
 export type { HostEvidence, QualifiedExecutionBinding, QualifiedRole } from "./types.js";
 
+declare const __QUALIFIED_CHILD_ENTRY__: boolean;
+let childRefresh: (() => Promise<void>) | null = null;
 const branded = new WeakMap<object, { role: QualifiedRole; binding: QualifiedExecutionBinding }>();
 const identities = new WeakMap<object, string>();
 let current: ReturnType<typeof produce> | null = null;
@@ -87,6 +95,7 @@ export function isQualifiedExecutionBinding(
   value: unknown,
   expectedRole: QualifiedRole,
 ): value is QualifiedExecutionBinding {
+  if (expectedRole === "daemon") return isQualifiedDaemonBinding(value);
   if (!value || typeof value !== "object") return false;
   const record = branded.get(value);
   if (!record || record.role !== expectedRole) return false;
@@ -100,15 +109,36 @@ export function isQualifiedExecutionBinding(
     return false;
   }
 }
+function assertQualifiedEvaluation(): void {
+  if (current) {
+    getQualifiedHost();
+    return;
+  }
+  if (typeof __QUALIFIED_DAEMON_ENTRY__ !== "undefined" && __QUALIFIED_DAEMON_ENTRY__) {
+    assertQualifiedDaemonEvaluation();
+    return;
+  }
+  getQualifiedHost();
+}
+declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
 /** Finite SDK map; no dynamic package or builtin fallback in this profile. */
 export function qualifiedRuntimeRequire(name: string): object {
-  getQualifiedHost();
+  assertQualifiedEvaluation();
+  const publicSdk = new Set([
+    "@getpaseo/plugin",
+    "@getpaseo/plugin/server",
+    "@getpaseo/plugin/server/provider",
+    "@getpaseo/plugin/server/acp",
+    "@getpaseo/plugin/server/usage",
+    "zod",
+  ]);
+  if (!publicSdk.has(name)) throw new Error("Private qualified host dependency");
   const namespace = Object.hasOwn(qualifiedBindings, name) ? qualifiedBindings[name] : undefined;
   if (!namespace) throw new Error("Unknown qualified host dependency");
   return namespace;
 }
 export function evaluateQualifiedBundle(source: string): unknown {
-  getQualifiedHost();
+  assertQualifiedEvaluation();
   const factory = (0, eval)(source) as unknown;
   if (typeof factory !== "function") throw new Error("Invalid qualified bundle factory");
   return factory(qualifiedRuntimeRequire);
@@ -127,4 +157,100 @@ export function inspectQualifiedHost(): { evidence: HostEvidence; supported: boo
 export function assertQualifiedHelper(_helperId: string): never {
   getQualifiedHost();
   throw new Error("Qualified helper unsupported");
+}
+
+/** Fixed sealed child startup; no caller-provided observation or namespace factory. */
+export async function initializeQualifiedChildHost(): Promise<void> {
+  if (current || typeof __QUALIFIED_CHILD_ENTRY__ === "undefined" || !__QUALIFIED_CHILD_ENTRY__)
+    return unsupported();
+  const file = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
+  const root = path.dirname(file);
+  const initial = await verifyEnclosingProcess(root);
+  if (process.argv[1] !== path.join(root, "plugin-child-entry.mjs")) return unsupported();
+  const incarnation = randomUUID();
+  let fresh = true;
+  const artifact = initial.manifest.files.find((entry) => entry.path === "plugin-worker-code.mjs");
+  if (
+    !artifact ||
+    JSON.stringify(Object.keys(qualifiedBindings).sort()) !==
+      JSON.stringify([...initial.manifest.bindingKeys].sort())
+  )
+    return unsupported();
+  const evidence: HostEvidence = {
+    schemaVersion: 1,
+    role: "plugin-host",
+    distributionBuildId: initial.manifest.distributionBuildId,
+    roleBuildId: `${initial.manifest.distributionBuildId}:plugin-child`,
+    qualificationManifestSha256: initial.manifestSha256,
+    launchId: randomUUID(),
+    parentLaunchId: null,
+    process: {
+      pid: process.pid,
+      bootId: initial.observed.bootId,
+      osBirthIdentity: initial.observed.birth,
+      processStartToken: incarnation,
+    },
+    runtime: {
+      artifactId: initial.manifest.runtime.sha256,
+      platform: process.platform,
+      arch: process.arch,
+      observedExecutableIdentity: initial.observed.image,
+    },
+    bindings: Object.keys(qualifiedBindings)
+      .sort()
+      .map((bindingKey) => ({
+        bindingKey,
+        moduleBuildId: `${initial.manifest.distributionBuildId}:plugin-child`,
+        artifactId: artifact.sha256,
+        qualifiedOrigin: `${root}/plugin-worker-code.mjs#${bindingKey}`,
+      })),
+    helpers: [],
+  };
+  for (const [key, namespace] of Object.entries(qualifiedBindings)) identities.set(namespace, key);
+  Object.freeze(evidence.process);
+  Object.freeze(evidence.runtime);
+  for (const row of evidence.bindings) Object.freeze(row);
+  Object.freeze(evidence.bindings);
+  Object.freeze(evidence.helpers);
+  Object.freeze(evidence);
+  const binding = Object.freeze({
+    expectedClosure: initial.manifestSha256,
+    expectedIncarnation: incarnation,
+    capability: Object.freeze({
+      evidenceDigest: createHash("sha256").update(JSON.stringify(evidence)).digest("hex"),
+      assertQualifiedExecution(expectedClosure: unknown, expectedIncarnation: unknown): void {
+        if (
+          !fresh ||
+          expectedClosure !== initial.manifestSha256 ||
+          expectedIncarnation !== incarnation
+        )
+          return unsupported();
+        for (const [key, namespace] of Object.entries(qualifiedBindings))
+          if (identities.get(namespace) !== key) return unsupported();
+      },
+    }),
+  });
+  childRefresh = async () => {
+    fresh = false;
+    const now = await verifyEnclosingProcess(root);
+    if (
+      now.manifestSha256 !== initial.manifestSha256 ||
+      now.observed.birth !== initial.observed.birth ||
+      now.observed.image !== initial.observed.image
+    )
+      return unsupported();
+    fresh = true;
+  };
+  const activity = qualifiedBindings["@getpaseo/plugin/internal/activity"];
+  const install = activity ? Reflect.get(activity, "installQualifiedHelperAdmission") : undefined;
+  if (typeof install !== "function") return unsupported();
+  install(() => {
+    throw new Error("Qualified plugin external helper unsupported");
+  });
+  branded.set(binding, { role: "plugin-host", binding });
+  current = Object.freeze({ binding, evidence, bindings: qualifiedBindings });
+}
+export async function refreshQualifiedChildHost(): Promise<void> {
+  if (!childRefresh) return unsupported();
+  await childRefresh();
 }

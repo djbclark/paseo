@@ -89,6 +89,7 @@ export async function finalizeQualifiedHost(root, runtimePath) {
     externalLibraries,
     helpers: [],
     bindingKeys: [
+      "@getpaseo/plugin/internal/activity",
       "@getpaseo/plugin",
       "@getpaseo/plugin/server",
       "@getpaseo/plugin/server/provider",

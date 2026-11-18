@@ -532,11 +532,6 @@ const OWNER_SESSION_ADMISSION: SessionAdmission = {
 };
 
 export class MissingDaemonVersionError extends Error {
-  private installCreationAdmission(): void {
-    const reservation = this.agentManager.maintenanceReservation;
-    if (reservation) guardMaintenanceMethod(this.creationService, "create", reservation);
-  }
-
   constructor() {
     super("VoiceAssistantWebSocketServer requires a non-empty daemonVersion.");
     this.name = "MissingDaemonVersionError";
@@ -665,6 +660,11 @@ export class VoiceAssistantWebSocketServer {
     ) {
       throw new Error("Previously created agent no longer exists");
     }
+  }
+
+  private installCreationAdmission(): void {
+    const reservation = this.agentManager.maintenanceReservation;
+    if (reservation) guardMaintenanceMethod(this.creationService, "create", reservation);
   }
 
   constructor(

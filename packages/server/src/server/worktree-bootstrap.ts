@@ -1,3 +1,4 @@
+import { maintenanceFor } from "./maintenance-reservation.js";
 import type { Logger } from "pino";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
@@ -515,7 +516,7 @@ async function acquireWorkspaceScriptTerminal(params: {
   return { terminal, reusableTerminal };
 }
 
-export async function spawnWorkspaceScript(
+async function spawnWorkspaceScriptUnreserved(
   options: SpawnWorkspaceScriptOptions,
 ): Promise<WorktreeScriptResult> {
   const {
@@ -710,4 +711,13 @@ export function teardownWorktreeScripts(options: {
   for (const hostname of hostnames) {
     logger.info({ hostname }, "Removed script proxy route");
   }
+}
+
+export function spawnWorkspaceScript(
+  ...args: Parameters<typeof spawnWorkspaceScriptUnreserved>
+): ReturnType<typeof spawnWorkspaceScriptUnreserved> {
+  const reservation = maintenanceFor(args[0].terminalManager);
+  return reservation
+    ? reservation.run(() => spawnWorkspaceScriptUnreserved(...args))
+    : spawnWorkspaceScriptUnreserved(...args);
 }

@@ -1,3 +1,9 @@
+import { guardProviderClient } from "../provider-maintenance.js";
+import {
+  type MaintenanceReservation,
+  guardMaintenanceMethod,
+  guardMaintenanceStream,
+} from "../maintenance-reservation.js";
 import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
 import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
@@ -922,7 +928,7 @@ export class AgentManager {
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
-    this.clients.set(provider, client);
+    this.clients.set(provider, guardProviderClient(client, this.maintenanceReservation));
   }
 
   updateProviderRegistry(input: {
@@ -942,7 +948,7 @@ export class AgentManager {
     this.clients.clear();
     for (const [provider, client] of Object.entries(input.clients)) {
       if (client) {
-        this.clients.set(provider, client);
+        this.clients.set(provider, guardProviderClient(client, this.maintenanceReservation));
       }
     }
 
@@ -1111,6 +1117,45 @@ export class AgentManager {
     const nowMs = Date.now();
     const nextMs = nowMs > previousMs ? nowMs : previousMs + 1;
     return new Date(nextMs).toISOString();
+  }
+
+  maintenanceReservation?: MaintenanceReservation;
+
+  installMaintenanceReservation(reservation: MaintenanceReservation): void {
+    if (this.maintenanceReservation) throw new Error("Maintenance already installed");
+    this.maintenanceReservation = reservation;
+    for (const client of this.clients.values()) guardProviderClient(client, reservation);
+    for (const key of [
+      "createAgent",
+      "createAgentFromRecord",
+      "resumeAgentFromPersistence",
+      "importProviderSession",
+      "reloadAgentSession",
+      "runAgent",
+      "tryRunOutOfBand",
+      "replaceAgentRun",
+      "steerAgentRun",
+      "steerOrReplaceActiveTurn",
+      "reloadStalePluginSession",
+      "respondToPermission",
+      "rewind",
+      "executePluginTool",
+    ] as const) {
+      guardMaintenanceMethod(this, key, reservation);
+    }
+    guardMaintenanceStream(this, "streamAgent", reservation);
+  }
+
+  isMaintenanceQuiet(): boolean {
+    // An idle provider session may launch autonomous background work. Until every provider
+    // has an authoritative drain contract, live sessions are unknown, not proof of quiet.
+    return (
+      this.backgroundTasks.size === 0 &&
+      this.collectingRuntimes.size === 0 &&
+      this.lifecycleMutationTails.size === 0 &&
+      this.foregroundMutationTails.size === 0 &&
+      this.agents.size === 0
+    );
   }
 
   hasInFlightRun(agentId: string): boolean {
@@ -1289,41 +1334,46 @@ export class AgentManager {
     }
   }
 
+  private withDiscoveryAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    const reservation = this.maintenanceReservation;
+    if (!reservation) return operation();
+    return reservation.run(operation);
+  }
+
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
     const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
     const client = this.requireClient(normalizedConfig.provider);
     if (!normalizedConfig.model) {
       return [];
     }
-    const available = await client.isAvailable();
-    if (!available) {
-      throw new Error(
-        `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
-      );
-    }
-
-    if (client.listCommands) {
-      return await client.listCommands(normalizedConfig);
-    }
-
-    const session = await client.createSession(normalizedConfig);
-    try {
-      if (!session.listCommands) {
+    return this.withDiscoveryAdmission(async () => {
+      const available = await client.isAvailable();
+      if (!available) {
         throw new Error(
-          `Provider '${normalizedConfig.provider}' does not support listing commands`,
+          `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
         );
       }
-      return await session.listCommands();
-    } finally {
+
+      if (client.listCommands) {
+        return await client.listCommands(normalizedConfig);
+      }
+
+      const session = await client.createSession(normalizedConfig);
       try {
-        await session.close();
-      } catch (error) {
-        this.logger.warn(
-          { err: error, provider: normalizedConfig.provider },
-          "Failed to close draft command listing session",
+        if (!session.listCommands) {
+          throw new Error(
+            `Provider '${normalizedConfig.provider}' does not support listing commands`,
+          );
+        }
+        return await session.listCommands();
+      } finally {
+        await this.closeDiscoverySession(
+          session,
+          normalizedConfig.provider,
+          "draft command listing",
         );
       }
-    }
+    });
   }
 
   async listDraftControls(config: AgentSessionConfig): Promise<AgentDraftControls> {
@@ -1336,34 +1386,46 @@ export class AgentManager {
     if (!normalizedConfig.model && !client.listControls) {
       return { controls: [], options };
     }
-    const available = await client.isAvailable();
-    if (!available) {
-      throw new Error(
-        `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
-      );
-    }
-
-    if (client.listControls) {
-      return await client.listControls(normalizedConfig);
-    }
-
-    const session = await client.createSession(normalizedConfig);
-    try {
-      // The options a session opens with, as create would report them, so the controls'
-      // selection matches what the first turn runs with.
-      return {
-        controls: session.controls ?? [],
-        options: this.openedEffectiveOptions({ session, launchedOptions: options }),
-      };
-    } finally {
-      try {
-        await session.close();
-      } catch (error) {
-        this.logger.warn(
-          { err: error, provider: normalizedConfig.provider },
-          "Failed to close draft feature listing session",
+    return this.withDiscoveryAdmission(async () => {
+      const available = await client.isAvailable();
+      if (!available) {
+        throw new Error(
+          `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
         );
       }
+
+      if (client.listControls) {
+        return await client.listControls(normalizedConfig);
+      }
+
+      const session = await client.createSession(normalizedConfig);
+      try {
+        // The options a session opens with, as create would report them, so the controls'
+        // selection matches what the first turn runs with.
+        return {
+          controls: session.controls ?? [],
+          options: this.openedEffectiveOptions({ session, launchedOptions: options }),
+        };
+      } finally {
+        await this.closeDiscoverySession(
+          session,
+          normalizedConfig.provider,
+          "draft feature listing",
+        );
+      }
+    });
+  }
+
+  private async closeDiscoverySession(
+    session: AgentSession,
+    provider: AgentSessionConfig["provider"],
+    operation: string,
+  ): Promise<void> {
+    try {
+      await session.close();
+    } catch (error) {
+      this.logger.warn({ err: error, provider }, `Failed to close ${operation} session`);
+      if (this.maintenanceReservation) throw error;
     }
   }
 
@@ -2123,10 +2185,14 @@ export class AgentManager {
       return existing;
     }
 
-    const close = this.runLifecycleMutation(agentId, async () => {
-      // A preceding reload or archive may already have closed the durable agent.
-      if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
-    });
+    const close = this.runLifecycleMutation(
+      agentId,
+      async () => {
+        // A preceding reload or archive may already have closed the durable agent.
+        if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
+      },
+      true,
+    );
     this.inFlightAgentCloses.set(agentId, close);
     const clearClose = () => {
       if (this.inFlightAgentCloses.get(agentId) === close) {
@@ -2953,7 +3019,21 @@ export class AgentManager {
     await this.writeStoredMetadata(agentId, updates);
   }
 
-  private async runLifecycleMutation<T>(agentId: string, mutation: () => Promise<T>): Promise<T> {
+  private runLifecycleMutation<T>(
+    agentId: string,
+    mutation: () => Promise<T>,
+    cleanup = false,
+  ): Promise<T> {
+    const run = () => this.runLifecycleMutationAdmitted(agentId, mutation);
+    if (!this.maintenanceReservation) return run();
+    if (cleanup) return this.maintenanceReservation.runCleanup(run);
+    return this.maintenanceReservation.run(run);
+  }
+
+  private async runLifecycleMutationAdmitted<T>(
+    agentId: string,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
     // Parent cascade classifies a child inside the same lane used by open-tab
     // label writes, so a received ownership update cannot be overtaken.
     const previous = this.lifecycleMutationTails.get(agentId) ?? Promise.resolve();

@@ -94,6 +94,8 @@
           "error",
           {
             "allow": {
+              // Native reservation: final revision/latch check + actual rename commit must not yield; preparation and durability are async.
+              "server/maintenance-reservation.ts": ["renameSync"],
               // TODO: literal executableExists is a synchronous public capability; move its callers and Windows existence predicates to async together.
               "executable-resolution/executable-resolution.ts": ["existsSync"],
               // TODO: winget enumeration shares synchronous existence predicates with literal lookup; convert the executable-resolution boundary together.

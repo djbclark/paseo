@@ -1,3 +1,4 @@
+import { daemonMaintenanceCommand } from "./maintenance.js";
 import { describe, expect, test } from "vitest";
 import { render } from "../../output/render.js";
 import { daemonReloadSchema, type DaemonReloadResult } from "./reload.js";
@@ -58,5 +59,18 @@ describe("daemon reload output", () => {
     expect(render(result(data), { format: "yaml" })).toContain(
       "appliedPaths:\n  - daemon.browserTools.enabled",
     );
+  });
+});
+
+describe("maintenance CLI contract", () => {
+  test("end accepts a private FD and has no token argv option", () => {
+    const maintenance = daemonMaintenanceCommand();
+    const end = maintenance.commands.find((command) => command.name() === "end")!;
+    expect(end.options.some((option) => option.long === "--owner-token-fd")).toBe(true);
+    expect(end.options.some((option) => option.long === "--owner-token")).toBe(false);
+    const offline = maintenance.commands.find((command) => command.name() === "verify-offline")!;
+    expect(
+      offline.options.some((option) => ["--home", "--host", "--state"].includes(option.long ?? "")),
+    ).toBe(false);
   });
 });

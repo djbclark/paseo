@@ -1,3 +1,5 @@
+import { MaintenanceReservation } from "../server/maintenance-reservation.js";
+import { once } from "node:events";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -214,5 +216,95 @@ describe("execCommand", () => {
       PASEO_NODE_ENV: null,
       PASEO_SUPERVISED: null,
     });
+  });
+});
+
+describe("maintenance process execution boundary", () => {
+  test("actual child keeps admission leased after caller completes and held spawn/exec refuse before launch", async () => {
+    const home = realpathSync(mkdtempSync(path.join(tmpdir(), "spawn-maintenance-")));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
+    const child = await reservation.run(async () => {
+      const launched = spawnProcess(
+        process.execPath,
+        [
+          "-e",
+          "process.send('ready'); process.on('message',()=>process.exit(0)); setTimeout(()=>process.exit(0),10000)",
+        ],
+        { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+      );
+      await once(launched, "message");
+      return launched;
+    });
+    try {
+      await expect(reservation.begin(1, "caller-done-child-alive")).rejects.toThrow();
+      const closed = once(child, "close");
+      child.send!("finish");
+      await closed;
+      const held = await reservation.begin(1, "child-closed");
+      expect(() =>
+        reservation.execute(() => spawnProcess(process.execPath, ["-e", "process.exit(99)"])),
+      ).toThrow("maintenance");
+      await expect(
+        reservation.execute(() => execCommand(process.execPath, ["-e", "process.exit(99)"])),
+      ).rejects.toThrow("maintenance");
+      await reservation.end(1, held.ownerToken);
+    } finally {
+      if (child.exitCode === null && child.connected) {
+        const closed = once(child, "close");
+        child.send!("finish");
+        await closed;
+      }
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 20000);
+});
+
+describe("admitted execution continuations", () => {
+  test("already-admitted helper can finish after uncertainty while every new root is closed", async () => {
+    const home = realpathSync(mkdtempSync(path.join(tmpdir(), "continuation-maintenance-")));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const admitted = reservation.run(async () => {
+      await gate;
+      return execCommand(process.execPath, ["-e", "process.stdout.write('continued')"]);
+    });
+    try {
+      reservation.holdForUnknownWork();
+      expect(() => reservation.enter()).toThrow();
+      finish();
+      expect((await admitted).stdout).toBe("continued");
+      expect(reservation.status().state).toBe("recovery-required");
+    } finally {
+      finish();
+      await admitted;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+  test("expired async scope cannot revive helper authority after reservation is held", async () => {
+    const home = realpathSync(mkdtempSync(path.join(tmpdir(), "expired-maintenance-")));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const release = reservation.enter();
+    const detached = reservation.executeAdmitted(release, async () => {
+      await gate;
+      return execCommand(process.execPath, ["-e", "process.exit(99)"]);
+    });
+    try {
+      release();
+      const held = await reservation.begin(1, "late-callback");
+      finish();
+      await expect(detached).rejects.toThrow("maintenance");
+      await reservation.end(1, held.ownerToken);
+    } finally {
+      finish();
+      await detached.catch(() => undefined);
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

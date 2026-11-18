@@ -1,3 +1,12 @@
+import {
+  pluginMaintenancePort,
+  qualifiedMaintenanceParticipant,
+  qualifiedDaemonExecutionAccess,
+  unsupportedMaintenanceParticipant,
+  type NativePluginAdmission,
+  type QualifiedDaemonOwner,
+} from "./maintenance-participant.js";
+import { MaintenanceReservation, guardMaintenanceMethod } from "./maintenance-reservation.js";
 import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
 import { unarchiveWorkspaceAgents } from "./workspace-archive-service.js";
 import { createRestartRecovery } from "./agent/restart-recovery/index.js";
@@ -14,7 +23,7 @@ import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
-import { open, rm, stat } from "fs/promises";
+import { mkdir, open, rm, stat } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
@@ -509,6 +518,8 @@ export interface PaseoDaemon {
 }
 
 export interface PaseoDaemonDependencies {
+  /** Trusted qualified role-wrapper injection only; never loaded from daemon config or JSON. */
+  qualifiedDaemonOwner?: QualifiedDaemonOwner;
   builtinPlugins?: BuiltinPluginLoader;
   hubRelationshipRemote?: HubRelationshipRemote;
   hubRelationshipClock?: HubRelationshipClock;
@@ -626,8 +637,39 @@ export async function createPaseoDaemon(
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  await mkdir(config.paseoHome, { recursive: true, mode: 0o700 });
+  let observe: () => Promise<boolean> = async () => {
+    throw new Error("Maintenance startup incomplete");
+  };
+  const maintenance = await MaintenanceReservation.create(config.paseoHome, () => observe());
+  maintenance.setReady(false);
+  return maintenance.execute(() =>
+    createPaseoDaemonInExecutionContext(config, rootLogger, dependencies, maintenance, (next) => {
+      observe = next;
+    }),
+  );
+}
+
+async function createPaseoDaemonInExecutionContext(
+  config: PaseoDaemonConfig,
+  rootLogger: Logger,
+  dependencies: PaseoDaemonDependencies,
+  maintenance: MaintenanceReservation,
+  setQuiescenceObserver: (observe: () => Promise<boolean>) => void,
+): Promise<PaseoDaemon> {
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
+  setQuiescenceObserver(async () => {
+    const unavailable = terminalManager.getUnavailableError?.();
+    if (unavailable) throw unavailable;
+    if (!agentManager.isMaintenanceQuiet()) return false;
+    // Open terminals can accept input and run arbitrary commands: treat every one as busy.
+    const terminals = await terminalManager.adoptTerminals();
+    if (!Number.isSafeInteger(terminals) || terminals < 0)
+      throw new Error("Unknown terminal observation");
+    const providerProcesses = await managedProcesses.list();
+    return terminals === 0 && providerProcesses.length === 0 && agentManager.isMaintenanceQuiet();
+  });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
   await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
     logger.warn(
@@ -668,12 +710,37 @@ export async function createPaseoDaemon(
     },
   });
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
-  void orchestrationSkills.autoUpdate().catch((error) => {
-    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
-  });
+  void maintenance
+    .run(() => orchestrationSkills.autoUpdate())
+    .catch((error) => {
+      logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+    });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
-  const pluginRuntime: PluginService = new PluginService(logger, daemonConfigStore, daemonVersion, {
+  const qualifiedDaemon = await qualifiedDaemonExecutionAccess(dependencies.qualifiedDaemonOwner);
+  let pluginBootstrapWindow = false;
+  const nativeMaintenance: NativePluginAdmission = {
+    enterWork: () => maintenance.enter(),
+    runHeldOperation: (scope, expected, operation) => maintenance.runHeldOperation(scope, expected, operation),
+    holdForUnknownWork: () => maintenance.holdForUnknownWork(),
+    async runQualifiedInitialization(operation) {
+      qualifiedDaemon.assertQualified();
+      if (pluginBootstrapWindow) return maintenance.runQualifiedInitialization(operation);
+      // A normal reload is a new admission, never a bootstrap/recovery bypass.
+      const release = maintenance.enter();
+      try {
+        return await maintenance.runQualifiedInitialization(operation);
+      } finally {
+        release();
+      }
+    },
+  };
+  const pluginDependencies: NonNullable<ConstructorParameters<typeof PluginService>[3]> & {
+    nativeMaintenance: NativePluginAdmission;
+    qualifiedDaemonOwner?: QualifiedDaemonOwner;
+  } = {
+    nativeMaintenance,
+    qualifiedDaemonOwner: dependencies.qualifiedDaemonOwner,
     activationPolicy: new ManagedPluginActivationPolicy(
       process.env.PASEO_MANAGED_PLUGIN_POLICY,
       path.join(config.paseoHome, "plugin-promotions"),
@@ -688,7 +755,20 @@ export async function createPaseoDaemon(
     }),
     builtinPlugins: resolveBuiltinPluginLoader(dependencies),
     settingsDirectory: path.join(config.paseoHome, "plugin-settings"),
-  });
+  };
+  const pluginRuntime: PluginService = new PluginService(
+    logger,
+    daemonConfigStore,
+    daemonVersion,
+    pluginDependencies,
+  );
+  const rawPluginMaintenance = pluginMaintenancePort(pluginRuntime);
+  maintenance.bindParticipant(
+    qualifiedMaintenanceParticipant(
+      rawPluginMaintenance ?? unsupportedMaintenanceParticipant,
+      qualifiedDaemon,
+    ),
+  );
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -696,9 +776,11 @@ export async function createPaseoDaemon(
   // Reconcile the helper-process ledger in the background so it never blocks the
   // daemon from coming up; terminating a live leftover can take a few seconds.
   // Best-effort, so a failure is logged here rather than crashing startup.
-  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
-    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
-  });
+  void maintenance
+    .run(() => reconcileManagedProcessLedger(managedProcesses, logger))
+    .catch((error) => {
+      logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+    });
   let relayRuntime: RelayRuntime | null = null;
 
   const staticDir = config.staticDir;
@@ -732,6 +814,7 @@ export async function createPaseoDaemon(
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
   });
+  guardMaintenanceMethod(terminalManager, "createTerminal", maintenance);
   applyTerminalAgentHookSetting({ store: daemonConfigStore, logger });
 
   const serviceProxyPublicBaseUrl = config.serviceProxy?.publicBaseUrl
@@ -742,7 +825,7 @@ export async function createPaseoDaemon(
     publicBaseUrl: serviceProxyPublicBaseUrl,
   });
   const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
-  const workspaceSetupRuntime = new WorkspaceSetupRuntime();
+  const workspaceSetupRuntime = new WorkspaceSetupRuntime(maintenance);
   let configuredHostnames = config.hostnames ?? config.allowedHosts;
   let appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
   daemonConfigStore.onFieldChange("hostnames", (value) => {
@@ -1002,6 +1085,7 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     logger,
     snapshotManager: {
+      maintenance,
       refreshTimeoutMs: config.providerCatalogRefreshTimeoutMs,
       runtimeSettings: config.agentProviderSettings,
       providerOverrides: config.providerOverrides,
@@ -1039,6 +1123,7 @@ export async function createPaseoDaemon(
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
+  agentManager.installMaintenanceReservation(maintenance);
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
       providerSnapshotManager.replacePluginProviders(pluginRuntime.getProviderRegistrations()),
@@ -1463,6 +1548,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    maintenance,
     paseoHome: config.paseoHome,
     logger,
     agentManager,
@@ -1908,10 +1994,22 @@ export async function createPaseoDaemon(
               workspaceLabelService,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
-            await pluginRuntime.start();
+            if (maintenance.hasPersistedHold()) {
+              if (!rawPluginMaintenance)
+                throw new Error("Plugin maintenance recovery port unavailable");
+              await maintenance.restoreParticipantBeforeStart();
+            }
+            pluginBootstrapWindow = true;
+            try {
+              await pluginRuntime.start();
+            } finally {
+              pluginBootstrapWindow = false;
+            }
+            await maintenance.recheckRestoredParticipant();
             providerSnapshotManager.settlePluginProviders();
             restartRecovery.resumePending();
             await finishSubscriptions.start();
+            maintenance.setReady(true);
             wsServer.beginAcceptingConnections();
             const relaySecurityLogger = logger.child({ module: "relay-security" });
             relayRuntime = createRelayRuntime({
@@ -1985,6 +2083,7 @@ export async function createPaseoDaemon(
   };
 
   const stop = async (options?: { keepTerminals?: boolean }) => {
+    maintenance.setReady(false);
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
     localCredential = null;
@@ -2065,8 +2164,15 @@ export async function createPaseoDaemon(
     serviceProxy,
     scriptRuntimeStore,
     browserToolsBroker,
-    start,
-    stop,
+    start: () => maintenance.execute(start),
+    stop: (options) =>
+      maintenance.runCleanup(async () => {
+        try {
+          await stop(options);
+        } finally {
+          await maintenance.flushStorage();
+        }
+      }),
     getListenTarget: () => boundListenTarget,
     getServerId: () => serverId,
   };

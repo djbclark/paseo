@@ -2386,7 +2386,18 @@ export class Session {
   /**
    * Main entry point for processing session messages
    */
-  public async handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
+  public handleMessage(msg: SessionInboundMessage, source?: object): Promise<void> {
+    const handle = () => this.handleMessageInExecutionContext(msg, source);
+    // Reads remain available. Only concrete execution beneath the request acquires admission.
+    return this.agentManager.maintenanceReservation
+      ? this.agentManager.maintenanceReservation.execute(handle)
+      : handle();
+  }
+
+  private async handleMessageInExecutionContext(
+    msg: SessionInboundMessage,
+    source?: object,
+  ): Promise<void> {
     return this.delivery.request(source, msg, () => this.handleRequest(msg, source));
   }
 
@@ -3246,6 +3257,56 @@ export class Session {
     }
   }
 
+  private async handleMaintenanceRequest(
+    msg: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "daemon.maintenance.begin.request"
+          | "daemon.maintenance.status.request"
+          | "daemon.maintenance.end.request";
+      }
+    >,
+  ): Promise<void> {
+    const maintenance = this.agentManager.maintenanceReservation;
+    try {
+      if (!maintenance || process.platform === "win32")
+        throw new Error("Maintenance reservation unsupported");
+      if (msg.type === "daemon.maintenance.begin.request") {
+        const result = await maintenance.begin(msg.generation, msg.transactionId);
+        this.emit({
+          type: "daemon.maintenance.begin.response",
+          payload: { requestId: msg.requestId, result, error: null },
+        });
+      } else {
+        const result =
+          msg.type === "daemon.maintenance.end.request"
+            ? await maintenance.end(msg.generation, msg.ownerToken)
+            : maintenance.status();
+        this.emit({
+          type:
+            msg.type === "daemon.maintenance.end.request"
+              ? "daemon.maintenance.end.response"
+              : "daemon.maintenance.status.response",
+          payload: { requestId: msg.requestId, result, error: null },
+        });
+      }
+    } catch {
+      // Do not echo requests or errors: the end payload contains a bearer token.
+      this.emit({
+        type: msg.type.replace(".request", ".response") as
+          | "daemon.maintenance.begin.response"
+          | "daemon.maintenance.status.response"
+          | "daemon.maintenance.end.response",
+        payload: {
+          requestId: msg.requestId,
+          result: null,
+          error: "Maintenance unavailable, busy, or ownership mismatch",
+        },
+      });
+    }
+  }
+
   private dispatchAgentConfigMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "set_agent_mode_request":
@@ -3267,6 +3328,10 @@ export class Session {
           },
         });
         return undefined;
+      case "daemon.maintenance.begin.request":
+      case "daemon.maintenance.status.request":
+      case "daemon.maintenance.end.request":
+        return this.handleMaintenanceRequest(msg);
       case "daemon.get_status.request":
         return this.daemonSession.handleGetStatusRequest(msg);
       case "daemon.get_pairing_offer.request":

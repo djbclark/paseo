@@ -726,3 +726,73 @@ Always run typecheck after changes:
 ```bash
 npm run typecheck
 ```
+
+## Maintenance reservation
+
+The controller uses `paseo daemon maintenance begin --generation N --transaction-id ID --json`
+only after checking `server_info.features.maintenanceReservationV1`. Save the returned owner token
+privately; status never returns it. End with `paseo daemon maintenance end --generation N
+--owner-token-fd 0 --json`, supplying token bytes over stdin. Every RPC requires `daemon.manage`.
+Never put the token in argv or diagnostic logs. A lost begin response requires operator recovery;
+there is no second token read or automatic expiry.
+
+Production capability also requires the trusted plugin maintenance port and genuine executing
+supervisor, daemon and compiler qualifications, plus each plugin host's reviewed passive closure.
+Source/dev launches and the initial plugin-host-only producer remain unsupported. Parsed receipts,
+disk hashes and caller-supplied callbacks cannot grant qualification. The persistent plugin transport
+is not foreground work: its participant closes admission, accounts actual execution and helpers,
+and acknowledges the child barrier. Unknown or unqualified activity keeps admission held.
+
+A restored hold closes the participant barrier before plugin startup. Only independently qualified
+passive initialization may obtain fresh loaded evidence; settlement and a fresh child acknowledgment
+precede owner-authorized release. There is no automatic end or forced plugin shutdown during recovery.
+The native source slice does not qualify Cafe or other unreviewed background plugins.
+
+Begin closes admission before observing work. It refuses in-flight operations, open terminals,
+and all live provider sessions (including idle sessions whose autonomous work cannot be proved
+quiet), discovery children, and remaining provider-process ledger entries. It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,
+worktree creation, workspace setup/scripts, and scheduled execution share that admission owner.
+
+The daemon stores the token digest, generation and transaction in
+`maintenance-reservation.json`, with a permanent private `maintenance-enrollment.json` alongside
+it. A fresh home has neither file. Enrollment precedes the first reservation attempt; its private
+zero-generation idle record is not a controller generation. Missing established authority,
+malformed records, unsafe paths and uncertain reads refuse startup. Never delete the enrollment
+marker to clear a hold.
+
+Known busy work refuses begin and reopens admission without cancelling anything. Known unavailable
+or unsupported provider queries with confirmed successful cleanup return ordinary errors, without
+creating a recovery hold. Failed close or unknown cleanup outcome holds admission. A query timeout
+or response is not proof its child ended: the process lease lasts through actual close. Unknown
+observations persist an uncertain recovery hold where storage permits; any persistence lifecycle
+failure latches the current process closed. An unknown-work latch raised during an awaited observation or participant operation is rechecked
+before granting a token or committing release. Initial participant BUSY permits reopening only after
+a confirmed rollback of every provisional barrier; failed or unsupported rollback stays held.
+Pending status reports held; failure status reports
+recovery-required even before a token exists. An uncertain hold without an issued owner token
+requires separately authorized operator recovery; this API cannot manufacture a replacement token.
+
+Restart keeps a protected held record as recovery-required until its matching owner ends it.
+For end, token/generation validation authorizes release and atomic rename of the idle generation
+record is the logical commit point; directory fsync establishes durability. A lost response is not
+the commit point. Startup waits for bounded asynchronous protected reads before exposing the owner.
+File preparation and directory durability are asynchronous; the final revision/latch check, rename
+and committed-state update do not yield. An unknown-work notification closes admission immediately;
+a queued uncertainty write is durable only after its own commit. BEGIN and END drain relevant writes
+and recheck failure before success; END never releases participants before directory durability.
+After an I/O failure the current process stays closed, while restart reads the
+protected stable record: held remains held, a valid idle record is committed release, and missing
+established or malformed authority refuses startup. Generations increase after release and rollback.
+
+After independently verifying daemon exit, the external installer runs
+`paseo daemon maintenance verify-offline --generation N --transaction-id ID --json` using its
+trusted installed CLI. This read-only check fixes authority to the real account's `.paseo` directory;
+`HOME`, `--home`, artifact paths and candidate code cannot select a substitute authority. It checks
+ownership, permissions, symlinks, file identity and stability, including both enrollment and record.
+Root-owned sticky ancestors may contain the protected user-owned authority directory; the authority
+directory itself must never be writable by other users. Nonregular entries are rejected before a
+nonblocking no-follow open, and reads are bounded. A successful offline check proves a
+persisted hold, not daemon exit or candidate qualification. The installer's protected journal must
+bind the same transaction/generation to exact old/new hashes and current activation/recovery consent
+at every swap/start boundary. Existing daemons without this feature require separately reviewed
+operator bootstrap. No live restart or cutover is part of this source change.

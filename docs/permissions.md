@@ -20,7 +20,7 @@ A pairing invitation is neither. It is an expiring, single-use exchange that cre
 | Permission          | Authority                                                                  |
 | ------------------- | -------------------------------------------------------------------------- |
 | `daemon.read`       | Daemon status, diagnostics, configuration, and provider information        |
-| `daemon.manage`     | Restart, update, configuration changes, providers, skills, and plugins     |
+| `daemon.manage`     | Maintenance reservations, restart, update, configuration changes, providers, skills, and plugins     |
 | `tunnel.manage`     | Relay, Hub, service tunnel, and public endpoint relationships              |
 | `access.manage`     | Pairing invitations, principals, credentials, grants, and revocation       |
 | `workspace.read`    | Projects, workspaces, agents, timelines, files, diffs, and terminal output |

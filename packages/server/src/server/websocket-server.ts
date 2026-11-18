@@ -1,3 +1,4 @@
+import { guardMaintenanceMethod } from "./maintenance-reservation.js";
 import {
   ChunkedTransport,
   ChunkedTransportProtocolError,
@@ -759,6 +760,9 @@ export class VoiceAssistantWebSocketServer {
       (snapshot) => this.validateCompletedCreation(snapshot),
       join(paseoHome, "agent-requests"),
     );
+    if (agentManager.maintenanceReservation) {
+      guardMaintenanceMethod(this.creationService, "create", agentManager.maintenanceReservation);
+    }
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
@@ -2080,6 +2084,9 @@ export class VoiceAssistantWebSocketServer {
         ...(this.advertiseDaemonStatusRpc ? { daemonStatusRpc: true } : {}),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: true,
+        maintenanceReservationV1:
+          process.platform !== "win32" &&
+          this.agentManager.maintenanceReservation?.isReady() === true,
         // COMPAT(speechSettings): added in v0.12.0, remove gate after 2027-04-18.
         speechSettings: true,
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.

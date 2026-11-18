@@ -726,3 +726,32 @@ Always run typecheck after changes:
 ```bash
 npm run typecheck
 ```
+
+## Maintenance reservation
+
+The controller uses `paseo daemon maintenance begin --generation N --transaction-id ID --json`
+only after checking `server_info.features.maintenanceReservationV1`. Save the returned owner token
+privately; status never returns it. End with `paseo daemon maintenance end --generation N
+--owner-token-fd 0 --json`, supplying token bytes over stdin. Every RPC requires `daemon.manage`.
+Never put the token in argv or diagnostic logs. A lost begin response requires operator recovery;
+there is no second token read or automatic expiry.
+
+Begin closes admission before observing work. It refuses in-flight operations, open terminals,
+and all live provider sessions (including idle sessions whose autonomous work cannot be proved
+quiet). It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,
+worktree creation, workspace setup/scripts, and scheduled execution share that admission owner.
+
+The daemon stores only the token digest, generation and transaction in
+`maintenance-reservation.json` inside its home, with atomic replacement and fsync. Restart keeps
+the hold as recovery-required until matching token and generation explicitly end it. Generations
+must increase, including after rollback.
+
+After independently verifying daemon exit, the external installer runs
+`paseo daemon maintenance verify-offline --generation N --transaction-id ID --json` using its
+trusted installed CLI. This read-only check fixes authority to the real account's `.paseo` directory;
+`HOME`, `--home`, artifact paths and candidate code cannot select a substitute authority. It checks
+ownership, permissions, symlinks, file identity and stability. A successful offline check proves a
+persisted hold, not daemon exit or candidate qualification. The installer's protected journal must
+bind the same transaction/generation to exact old/new hashes and current activation/recovery consent
+at every swap/start boundary. Existing daemons without this feature require separately reviewed
+operator bootstrap. No live restart or cutover is part of this source change.

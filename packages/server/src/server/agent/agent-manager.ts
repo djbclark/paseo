@@ -1,3 +1,4 @@
+import { type MaintenanceReservation, guardMaintenanceMethod, guardMaintenanceStream } from "../maintenance-reservation.js";
 import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
 import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
@@ -1111,6 +1112,27 @@ export class AgentManager {
     const nowMs = Date.now();
     const nextMs = nowMs > previousMs ? nowMs : previousMs + 1;
     return new Date(nextMs).toISOString();
+  }
+
+  maintenanceReservation?: MaintenanceReservation;
+
+  installMaintenanceReservation(reservation: MaintenanceReservation): void {
+    if (this.maintenanceReservation) throw new Error("Maintenance already installed");
+    this.maintenanceReservation = reservation;
+    for (const key of ["createAgent", "createAgentFromRecord", "resumeAgentFromPersistence",
+      "importProviderSession", "reloadAgentSession", "runAgent", "tryRunOutOfBand",
+      "replaceAgentRun", "steerAgentRun", "steerOrReplaceActiveTurn", "reloadStalePluginSession", "respondToPermission", "rewind", "executePluginTool"] as const) {
+      guardMaintenanceMethod(this, key, reservation);
+    }
+    guardMaintenanceStream(this, "streamAgent", reservation);
+  }
+
+  isMaintenanceQuiet(): boolean {
+    // An idle provider session may launch autonomous background work. Until every provider
+    // has an authoritative drain contract, live sessions are unknown, not proof of quiet.
+    return this.backgroundTasks.size === 0 && this.collectingRuntimes.size === 0 &&
+      this.lifecycleMutationTails.size === 0 && this.foregroundMutationTails.size === 0 &&
+      Array.from(this.agents.values()).every(agent => agent.lifecycle === "closed");
   }
 
   hasInFlightRun(agentId: string): boolean {

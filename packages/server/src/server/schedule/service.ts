@@ -1,3 +1,4 @@
+import type { MaintenanceReservation } from "../maintenance-reservation.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -251,6 +252,7 @@ interface ScheduleWorkspaceCreateInput {
 }
 
 export interface ScheduleServiceOptions {
+  maintenance?: MaintenanceReservation;
   paseoHome: string;
   logger: Logger;
   agentManager: ScheduleAgentManager;
@@ -298,7 +300,10 @@ export class ScheduleService {
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
     this.now = options.now ?? (() => new Date());
-    this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
+    const runner = options.runner ?? ((schedule: StoredSchedule, runId: string) => this.executeSchedule(schedule, runId));
+    this.runner = options.maintenance
+      ? (schedule, runId) => options.maintenance!.run(() => runner(schedule, runId))
+      : runner;
   }
 
   async start(): Promise<void> {

@@ -1,3 +1,4 @@
+import { MaintenanceReservation, guardMaintenanceMethod } from "./maintenance-reservation.js";
 import { ManagedPluginActivationPolicy } from "./plugins/activation-policy.js";
 import { unarchiveWorkspaceAgents } from "./workspace-archive-service.js";
 import { createRestartRecovery } from "./agent/restart-recovery/index.js";
@@ -726,12 +727,20 @@ export async function createPaseoDaemon(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
+  let maintenanceReady = false;
+  const maintenance = new MaintenanceReservation(config.paseoHome, async () => {
+    if (!maintenanceReady || terminalManager.getUnavailableError?.() || !agentManager.isMaintenanceQuiet()) return false;
+    // Open terminals can accept input and run arbitrary commands: treat every one as busy.
+    const terminals = await terminalManager.adoptTerminals();
+    return terminals === 0 && agentManager.isMaintenanceQuiet();
+  });
   const terminalManager = await startWorkerTerminalManager({
     paseoHome: config.paseoHome,
     paseoVersion: daemonVersion,
     logger,
     getTerminalActivityUrl: () => createTerminalActivityUrl(boundListenTarget),
   });
+  guardMaintenanceMethod(terminalManager, "createTerminal", maintenance);
   applyTerminalAgentHookSetting({ store: daemonConfigStore, logger });
 
   const serviceProxyPublicBaseUrl = config.serviceProxy?.publicBaseUrl
@@ -742,7 +751,7 @@ export async function createPaseoDaemon(
     publicBaseUrl: serviceProxyPublicBaseUrl,
   });
   const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
-  const workspaceSetupRuntime = new WorkspaceSetupRuntime();
+  const workspaceSetupRuntime = new WorkspaceSetupRuntime(maintenance);
   let configuredHostnames = config.hostnames ?? config.allowedHosts;
   let appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
   daemonConfigStore.onFieldChange("hostnames", (value) => {
@@ -1039,6 +1048,7 @@ export async function createPaseoDaemon(
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
+  agentManager.installMaintenanceReservation(maintenance);
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
       providerSnapshotManager.replacePluginProviders(pluginRuntime.getProviderRegistrations()),
@@ -1463,6 +1473,7 @@ export async function createPaseoDaemon(
     );
   };
   const scheduleService = new ScheduleService({
+    maintenance,
     paseoHome: config.paseoHome,
     logger,
     agentManager,

@@ -1,3 +1,4 @@
+import type { MaintenanceReservation } from "./maintenance-reservation.js";
 export type WorkspaceSetupOperation = (signal: AbortSignal) => Promise<void>;
 
 interface WorkspaceSetupRun {
@@ -8,7 +9,10 @@ interface WorkspaceSetupRun {
 export class WorkspaceSetupRuntime {
   private readonly runs = new Map<string, WorkspaceSetupRun>();
 
+  constructor(private readonly maintenance?: MaintenanceReservation) {}
+
   start(workspaceId: string, operation: WorkspaceSetupOperation): void {
+    const release = this.maintenance?.enter();
     const controller = new AbortController();
     const run: WorkspaceSetupRun = {
       controller,
@@ -19,6 +23,7 @@ export class WorkspaceSetupRuntime {
       .then(() => operation(controller.signal))
       .catch(() => undefined)
       .finally(() => {
+        release?.();
         if (this.runs.get(workspaceId) === run) {
           this.runs.delete(workspaceId);
         }

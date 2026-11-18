@@ -1,3 +1,4 @@
+import { daemonMaintenanceCommand } from "./maintenance.js";
 import { Command } from "commander";
 import { startCommand, daemonRunCommand } from "./start.js";
 import { daemonStatusCommand } from "./status.js";
@@ -21,6 +22,7 @@ export function createDaemonCommand(): Command {
     daemonReloadCommand(),
     pairCommand(),
     daemonConfigCommand(),
+    daemonMaintenanceCommand(),
   ])
     daemon.addCommand(command);
   addJsonOption(

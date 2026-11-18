@@ -1,3 +1,8 @@
+import { AgentManager } from "../../agent/agent-manager.js";
+import { MaintenanceReservation, guardMaintenanceMethod } from "../../maintenance-reservation.js";
+import { mkdtempSync as makeMaintenanceHome, readFileSync as readMaintenanceFile, rmSync as removeMaintenanceHome } from "node:fs";
+import { tmpdir as maintenanceTmpdir } from "node:os";
+import { join as maintenanceJoin } from "node:path";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -525,5 +530,73 @@ describe("DaemonSession", () => {
       "Checkout diff: targets=6, subscriptions=7, watchers=8, fallbackRefreshTargets=9",
     );
     expect(message.payload.diagnostic).toContain("Agent lifecycle: idle=8, running=2");
+  });
+});
+
+describe("maintenance reservation admission", () => {
+  function fixture(quiet: () => Promise<boolean> = async () => true) {
+    const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "maintenance-"));
+    const reservation = new MaintenanceReservation(home, quiet);
+    return { home, reservation, close: () => removeMaintenanceHome(home, { recursive: true, force: true }) };
+  }
+  test("persists only ownership digest, survives restart indefinitely, requires token and generation", async () => {
+    const f = fixture();
+    try {
+      const held = await f.reservation.begin(1, "transaction");
+      const persisted = readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8");
+      expect(persisted).not.toContain(held.ownerToken);
+      expect(JSON.stringify(f.reservation.status())).not.toContain(held.ownerToken);
+      const restarted = new MaintenanceReservation(f.home, async () => true);
+      expect(restarted.status().state).toBe("recovery-required");
+      expect(() => restarted.enter()).toThrow();
+      expect(() => restarted.end(2, held.ownerToken)).toThrow();
+      expect(() => restarted.end(1, "wrong")).toThrow();
+      expect(restarted.end(1, held.ownerToken).state).toBe("idle");
+      await expect(restarted.begin(1, "reused")).rejects.toThrow();
+      expect((await restarted.begin(2, "new")).state).toBe("held");
+    } finally { f.close(); }
+  });
+  test("serializes shared internal admission and never cancels existing work", async () => {
+    const f = fixture();
+    let finish!: () => void;
+    const owner = { execute: () => new Promise<void>(resolve => { finish = resolve; }) };
+    guardMaintenanceMethod(owner, "execute", f.reservation);
+    try {
+      const existing = owner.execute();
+      await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
+      finish(); await existing;
+      await f.reservation.begin(1, "quiet");
+      await expect(owner.execute()).rejects.toThrow();
+    } finally { f.close(); }
+  });
+  test("closes admission before awaiting observation, rejecting simultaneous begin and new work", async () => {
+    let observed!: (quiet: boolean) => void;
+    const f = fixture(() => new Promise(resolve => { observed = resolve; }));
+    try {
+      const grant = f.reservation.begin(1, "first");
+      expect(() => f.reservation.enter()).toThrow();
+      await expect(f.reservation.begin(2, "second")).rejects.toThrow();
+      observed(false);
+      await expect(grant).rejects.toThrow();
+      const release = f.reservation.enter(); release(); release();
+    } finally { f.close(); }
+  });
+  test("direct internal manager calls share the held admission owner", async () => {
+    const f = fixture();
+    const manager = new AgentManager({ logger: pino({ level: "silent" }) });
+    manager.installMaintenanceReservation(f.reservation);
+    try {
+      await f.reservation.begin(1, "internal-call");
+      await expect(manager.createAgent({ provider: "codex", cwd: f.home }, undefined, {})).rejects.toThrow("maintenance");
+      await expect(manager.streamAgent("unloaded-agent", "prompt").next()).rejects.toThrow("maintenance");
+      await expect(manager.steerOrReplaceActiveTurn("unloaded-agent", "prompt")).rejects.toThrow("maintenance");
+    } finally { f.close(); }
+  });
+  test("unknown observation fails closed without granting or expiring a hold", async () => {
+    const f = fixture(async () => { throw new Error("unknown"); });
+    try {
+      await expect(f.reservation.begin(1, "unknown")).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("idle");
+    } finally { f.close(); }
   });
 });

@@ -1,3 +1,4 @@
+import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
 import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
 import type { ManagedPluginCohortExecution } from "@getpaseo/protocol/messages";
@@ -44,7 +45,7 @@ import {
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
-import { compileDirectoryPlugin } from "./compiler.js";
+import { compileDirectoryPlugin, compileQualifiedDirectoryPlugin } from "./compiler.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import type {
   PluginProcessMessage,
@@ -100,6 +101,7 @@ interface DirectoryCompilation {
   bundles: Awaited<ReturnType<typeof compileDirectoryPlugin>>;
 }
 interface ServerPluginActivation {
+  held?: PluginHeldOperation;
   canPublish: () => boolean;
   pluginId: string;
   configuredPath: string;
@@ -387,7 +389,7 @@ export class PluginRuntime {
   private maintenanceUncertain = false;
   /** HOLD by default until both executing daemon and child closure capabilities are integrated. */
   readonly maintenance: PluginMaintenancePort = {
-    supportsV1: () => false,
+    supportsV1: () => this.hasQualifiedCohort(),
     begin: (identity) => {
       // Runs synchronously, including restored holds before start/qualification/IPC awaits.
       if (
@@ -398,30 +400,118 @@ export class PluginRuntime {
         return Promise.resolve("unknown");
       }
       this.maintenanceIdentity = { ...identity };
-      return this.holdUnqualifiedCohort(identity);
+      return this.holdQualifiedCohort(identity);
     },
-    end: async () => {
-      throw new Error("Plugin executing closure is not qualified for maintenance release");
-    },
+    end: (identity) => this.releaseQualifiedCohort(identity),
   };
 
-  private async holdUnqualifiedCohort(identity: PluginMaintenanceIdentity): Promise<"unknown"> {
-    await Promise.allSettled(
-      [...this.plugins.values()].map(async (loaded) => {
-        if (!loaded.child) return;
-        await this.request(loaded, {
-          type: "maintenance.begin",
-          requestId: randomUUID(),
-          instanceId: loaded.instanceId,
-          ...identity,
-        });
-      }),
-    );
-    // A child ACK is execution evidence, never authority to qualify its own code.
-    return "unknown";
+  private hasQualifiedCohort(): boolean {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!owner || !isQualifiedDaemonOwner(owner) || this.maintenanceUncertain) return false;
+    try {
+      owner.assertFresh();
+      for (const loaded of this.plugins.values()) {
+        if (
+          !loaded.qualifiedChild ||
+          !loaded.activationTicket?.authorization.passiveProfile ||
+          !loaded.loadedReceipt ||
+          loaded.termination?.closed
+        )
+          return false;
+        owner.assertOwnedExecutionHandle(
+          loaded.qualifiedChild.child,
+          "plugin-child",
+          loaded.instanceId,
+        );
+        loaded.qualifiedChild.assertFresh();
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  private requireLifecycleAdmission(): void {
+  private async childBarrier(
+    loaded: LoadedPlugin,
+    identity: PluginMaintenanceIdentity,
+    type: "maintenance.begin" | "maintenance.end",
+  ): Promise<string> {
+    const response = await this.request(loaded, {
+      type,
+      requestId: randomUUID(),
+      instanceId: loaded.instanceId,
+      ...identity,
+    });
+    if (
+      !response ||
+      typeof response !== "object" ||
+      Reflect.get(response, "generation") !== identity.generation ||
+      Reflect.get(response, "transactionId") !== identity.transactionId ||
+      Reflect.get(response, "instanceId") !== loaded.instanceId
+    )
+      throw new Error("Plugin barrier acknowledgement identity mismatch");
+    const status = Reflect.get(response, "status");
+    if (typeof status !== "string") throw new Error("Missing plugin barrier acknowledgement");
+    return status;
+  }
+
+  private async holdQualifiedCohort(
+    identity: PluginMaintenanceIdentity,
+  ): Promise<"held" | "known-busy" | "unknown"> {
+    const epoch = this.observationEpoch;
+    // Close every child execution-side barrier even when qualification is absent.
+    const replies = await Promise.allSettled(
+      [...this.plugins.values()].map((loaded) =>
+        this.childBarrier(loaded, identity, "maintenance.begin"),
+      ),
+    );
+    try {
+      await this.observeQualifiedExecutions();
+      if (!this.hasQualifiedCohort() || epoch !== this.observationEpoch) return "unknown";
+      let busy = false;
+      for (const reply of replies) {
+        if (reply.status !== "fulfilled") return "unknown";
+        if (reply.value === "known-busy") busy = true;
+        else if (reply.value !== "held") return "unknown";
+      }
+      for (const loaded of this.plugins.values()) if (loaded.executionOwner?.busy()) busy = true;
+      return busy ? "known-busy" : "held";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  private async releaseQualifiedCohort(identity: PluginMaintenanceIdentity): Promise<void> {
+    if (
+      !this.maintenanceIdentity ||
+      !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity)
+    )
+      throw new Error("Plugin barrier release identity mismatch");
+    await this.observeQualifiedExecutions();
+    if (!this.hasQualifiedCohort())
+      throw new Error("Plugin executing closure is not qualified for maintenance release");
+    const epoch = this.observationEpoch;
+    for (const loaded of this.plugins.values()) {
+      if ((await this.childBarrier(loaded, identity, "maintenance.end")) !== "ended")
+        throw new Error("Plugin barrier release uncertain");
+    }
+    await this.observeQualifiedExecutions();
+    if (epoch !== this.observationEpoch || !this.hasQualifiedCohort())
+      throw new Error("Plugin barrier release changed");
+    this.maintenanceIdentity = null;
+  }
+
+  private requireLifecycleAdmission(held?: PluginHeldOperation): void {
+    if (held) {
+      assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+      if (
+        !this.maintenanceIdentity ||
+        !samePluginMaintenanceIdentity(this.maintenanceIdentity, held.claim) ||
+        this.maintenanceUncertain
+      )
+        throw new Error("Held plugin lifecycle reservation mismatch");
+      return;
+    }
     if (this.maintenanceIdentity || this.maintenanceUncertain)
       throw new Error("Plugin maintenance admission is closed");
   }
@@ -471,8 +561,10 @@ export class PluginRuntime {
     configuredPath: string,
     canPublish: () => boolean = () => true,
     operation: ActivationOperation = "activate",
+    held?: PluginHeldOperation,
   ): Promise<void> {
-    this.requireLifecycleAdmission();
+    this.requireLifecycleAdmission(held);
+    if (held) assertPluginHeldOperation(held, pluginId, configuredPath);
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
     const loaded = await this.loadDirectoryPlugin(
@@ -480,6 +572,7 @@ export class PluginRuntime {
       configuredPath,
       canPublish,
       operation,
+      held,
     ).catch((error) => {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
@@ -487,6 +580,7 @@ export class PluginRuntime {
     if (!canPublish() || loaded.termination?.closed) {
       if (loaded.termination?.closed && loaded.loadedReceipt?.snapshotRoot)
         await this.dependencies.activationPolicy?.hold(pluginId);
+      if (held) loaded.executionOwner?.expectHeldTermination(held, loaded.instanceId);
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
@@ -502,6 +596,8 @@ export class PluginRuntime {
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
     const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
+    if (ticket?.authorization.passiveProfile)
+      throw new Error("Qualified builtin startup requires native restricted initialization");
     const bundles = await compileDirectoryPlugin(directory, this.daemonVersion, input.id);
     const { manifest } = bundles;
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
@@ -535,10 +631,11 @@ export class PluginRuntime {
     pluginId: string,
     directory: string,
     operation: ActivationOperation = "activate",
+    held?: PluginHeldOperation,
   ): Promise<void> {
     const policy = this.dependencies.activationPolicy;
     const ticket = await policy?.authorize(pluginId, directory, operation);
-    const bundles = await compileDirectoryPlugin(directory, this.daemonVersion);
+    const bundles = await this.compileActivation(pluginId, directory, ticket, held);
     if (ticket && !bundles.serverBundle)
       throw new Error("Managed activation requires a server bundle");
     await policy?.authorize(
@@ -581,8 +678,7 @@ export class PluginRuntime {
       !receipt ||
       !profile ||
       loaded.child !== child.child ||
-      loaded.termination?.closed ||
-      loaded.executionOwner?.busy()
+      loaded.termination?.closed
     )
       throw new Error("Unqualified or busy plugin in executing cohort");
     owner.assertOwnedExecutionHandle(child.child, "plugin-child", child.incarnation);
@@ -609,6 +705,33 @@ export class PluginRuntime {
     };
   }
 
+  private async compileActivation(
+    pluginId: string,
+    directory: string,
+    ticket: ActivationTicket | undefined,
+    held?: PluginHeldOperation,
+  ) {
+    if (!ticket?.authorization.passiveProfile) {
+      if (held) throw new Error("Held plugin operations require protected passive qualification");
+      return compileDirectoryPlugin(directory, this.daemonVersion);
+    }
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const native = this.dependencies.nativeMaintenance;
+    if (!held || !owner || !isQualifiedDaemonOwner(owner) || !native)
+      throw new Error("Qualified activation requires an authenticated held operation");
+    assertPluginHeldOperation(held, pluginId, directory);
+    await owner.refresh();
+    const incarnation = owner.binding.expectedIncarnation;
+    if (typeof incarnation !== "string") throw new Error("Missing qualified daemon incarnation");
+    owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    return compileQualifiedDirectoryPlugin(directory, this.daemonVersion, {
+      owner,
+      native,
+      held,
+      snapshotRoot: ticket.authorization.snapshotRoot,
+    });
+  }
+
   getLoadedReceipt(pluginId: string): PluginLoadedReceipt | undefined {
     return this.plugins.get(pluginId)?.loadedReceipt;
   }
@@ -617,9 +740,19 @@ export class PluginRuntime {
     await compileDirectoryPlugin(path.resolve(configuredPath), this.daemonVersion);
   }
 
-  async stopPluginById(pluginId: string): Promise<boolean> {
+  async stopPluginById(pluginId: string, held?: PluginHeldOperation): Promise<boolean> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) return false;
+    if (held) {
+      this.requireLifecycleAdmission(held);
+      const source = loaded.loadedReceipt?.sourcePath;
+      if (
+        held.claim.pluginId !== pluginId ||
+        (source !== held.claim.expectedPath && source !== held.claim.path)
+      )
+        throw new Error("Held stop source identity mismatch");
+      loaded.executionOwner?.expectHeldTermination(held, loaded.instanceId);
+    }
     this.observationEpoch++;
     this.plugins.delete(pluginId);
     this.notifySessionOpenChange(loaded);
@@ -1061,17 +1194,19 @@ export class PluginRuntime {
     configuredPath: string,
     canPublish: () => boolean,
     operation: ActivationOperation,
+    held?: PluginHeldOperation,
   ): Promise<LoadedPlugin> {
     const directory = await realpath(path.resolve(configuredPath));
     const policy = this.dependencies.activationPolicy;
     const ticket = await policy?.authorize(pluginId, configuredPath, operation);
-    const bundles = await compileDirectoryPlugin(directory, this.daemonVersion);
+    const bundles = await this.compileActivation(pluginId, directory, ticket, held);
     const { manifest } = bundles;
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
     const serverBundle = bundles.serverBundle;
     const compilation = { pluginId, configuredPath, directory, operation, ticket, bundles };
     if (!serverBundle) return this.loadClientOnlyPlugin(compilation);
     return this.launchPreparedPlugin({
+      held,
       canPublish,
       pluginId,
       configuredPath,
@@ -1137,15 +1272,28 @@ export class PluginRuntime {
     const startedAt = new Date().toISOString();
     let launched: LoadedPlugin | undefined;
     try {
+      const owned = await this.prepareOwnedChild(input);
       const loaded = await this.launchPlugin({
+        qualifiedChild: owned,
+        activationTicket: ticket,
         pluginId,
         pluginDirectory: directory,
         managedSource: ticket !== undefined,
         requirements,
-        child: ticket && !this.dependencies.spawnChild ? spawnPluginChild({}) : this.spawnChild(),
+        child:
+          owned?.child ??
+          (ticket && !this.dependencies.spawnChild ? spawnPluginChild({}) : this.spawnChild()),
         bundle: serverBundle,
         clientBundle,
         beforeInitialize: async (dispatch) => {
+          if (owned) {
+            const owner = this.dependencies.qualifiedDaemonOwner;
+            if (!owner || !input.held) throw new Error("Qualified initialize authority missing");
+            await owner.refresh();
+            owner.assertOwnedExecutionHandle(owned.child, "plugin-child", owned.incarnation);
+            owned.assertFresh();
+            assertPluginHeldOperation(input.held, pluginId, directory);
+          }
           if (policy)
             await policy.dispatchAuthorized({
               id: pluginId,
@@ -1160,6 +1308,15 @@ export class PluginRuntime {
         },
       });
       launched = loaded;
+      if (owned) {
+        const identity = this.maintenanceIdentity;
+        if (
+          !identity ||
+          (await this.childBarrier(loaded, identity, "maintenance.begin")) !== "held"
+        )
+          throw new Error("Qualified successor did not acknowledge its inherited barrier");
+        owned.assertFresh();
+      }
       assertChildAlive(loaded);
       await this.assertPreparedAuthorization(input, "Managed enrollment changed during launch");
       assertChildAlive(loaded);
@@ -1167,8 +1324,38 @@ export class PluginRuntime {
       assertChildAlive(loaded);
       return loaded;
     } catch (error) {
-      if (launched) await this.stopPlugin(launched);
+      if (launched) {
+        if (input.held)
+          launched.executionOwner?.expectHeldTermination(input.held, launched.instanceId);
+        await this.stopPlugin(launched);
+      }
       await policy?.finish(pluginId, ticket, false);
+      throw error;
+    }
+  }
+
+  private async prepareOwnedChild(
+    input: ServerPluginActivation,
+  ): Promise<QualifiedOwnedChild | undefined> {
+    const profile = input.ticket?.authorization.passiveProfile;
+    if (!profile) return undefined;
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!input.held || !owner || !isQualifiedDaemonOwner(owner))
+      throw new Error("Qualified child owner unavailable");
+    assertPluginHeldOperation(input.held, input.pluginId, input.directory);
+    await owner.refresh();
+    const incarnation = owner.binding.expectedIncarnation;
+    if (typeof incarnation !== "string") throw new Error("Missing qualified daemon incarnation");
+    owner.assertQualification(profile, incarnation);
+    const child = await owner.launchPluginChild();
+    try {
+      owner.assertOwnedExecutionHandle(child.child, "plugin-child", child.incarnation);
+      child.assertFresh();
+      assertProfileClosure(profile, child);
+      return child;
+    } catch (error) {
+      const termination = observeChildTermination(child.child);
+      await terminateObservedChild(child.child, termination);
       throw error;
     }
   }
@@ -1186,6 +1373,7 @@ export class PluginRuntime {
       ticket,
     );
     if (JSON.stringify(currentTicket) !== JSON.stringify(ticket)) throw new Error(message);
+    if (input.held) assertPluginHeldOperation(input.held, pluginId, input.directory);
   }
 
   private async recordDirectoryReceipt(
@@ -1220,6 +1408,8 @@ export class PluginRuntime {
   }
 
   private async launchPlugin(input: {
+    qualifiedChild?: QualifiedOwnedChild;
+    activationTicket?: ActivationTicket;
     pluginId: string;
     pluginDirectory: string;
     managedSource?: boolean;
@@ -1232,7 +1422,7 @@ export class PluginRuntime {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
     this.observationEpoch++;
     const termination = observeChildTermination(child);
-    const instanceId = randomUUID();
+    const instanceId = input.qualifiedChild?.incarnation ?? randomUUID();
     const executionOwner = new PluginExecutionOwner(
       instanceId,
       this.dependencies.nativeMaintenance,
@@ -1250,7 +1440,10 @@ export class PluginRuntime {
       executionOwner.terminated();
     });
     const sessionHost = this.sessionHost;
-    if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
+    if (!sessionHost) {
+      await terminateObservedChild(child, termination);
+      throw new Error("Plugin Paseo session host is not attached");
+    }
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {
       this.appendLog(pluginId, stream, message);
     });
@@ -1283,6 +1476,7 @@ export class PluginRuntime {
             reject(error);
           };
           child.on("message", (rawMessage) => {
+            if (input.qualifiedChild?.consumeObservation(rawMessage)) return;
             const parsed = PluginProcessMessageSchema.safeParse(rawMessage);
             if (!parsed.success) {
               const error = new Error(
@@ -1338,6 +1532,14 @@ export class PluginRuntime {
               pluginDirectory: input.pluginDirectory,
               managedSource: input.managedSource === true,
               hostInstanceId: instanceId,
+              ...(input.qualifiedChild && this.maintenanceIdentity
+                ? {
+                    passiveInitialization: {
+                      contract: "native-passive-contract-1" as const,
+                      hold: { ...this.maintenanceIdentity, instanceId },
+                    },
+                  }
+                : {}),
               appVersion: this.daemonVersion,
               bundle,
               settingsDirectory: this.dependencies.settingsDirectory
@@ -1358,6 +1560,8 @@ export class PluginRuntime {
     loaded = {
       id: pluginId,
       instanceId,
+      qualifiedChild: input.qualifiedChild,
+      activationTicket: input.activationTicket,
       executionOwner,
       clientBundle,
       clientBundleHash: hashClientBundle(clientBundle),

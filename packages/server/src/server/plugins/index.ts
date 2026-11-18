@@ -1,3 +1,12 @@
+import { assertHeldPluginOperation } from "../maintenance-reservation.js";
+import {
+  assertHeldPluginOperationResult,
+  type HeldPluginOperationClaim,
+  type HeldPluginOperationScope,
+  type HeldPluginOperationResult,
+} from "../maintenance-operation.js";
+import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
+import { compileQualifiedDirectoryPlugin } from "./compiler.js";
 import {
   isQualifiedDaemonOwner,
   getQualifiedDaemonObservation,
@@ -136,9 +145,10 @@ interface PluginRuntimePort {
     path: string,
     canPublish: () => boolean,
     operation?: ActivationOperation,
+    held?: PluginHeldOperation,
   ): Promise<void>;
   startBuiltinPlugin?(plugin: BuiltinPlugin): Promise<void>;
-  stopPluginById(pluginId: string): Promise<boolean>;
+  stopPluginById(pluginId: string, held?: PluginHeldOperation): Promise<boolean>;
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
   bindPaseoSessionHost(sessionHost: Parameters<PluginRuntime["bindPaseoSessionHost"]>[0]): void;
@@ -169,7 +179,7 @@ export class PluginService {
   private maintenanceIdentity: PluginMaintenanceIdentity | null = null;
   private maintenanceUncertain = false;
   readonly maintenance: PluginMaintenancePort = {
-    supportsV1: () => false,
+    supportsV1: () => this.supportsQualifiedMaintenance(),
     begin: (identity) => {
       if (
         this.maintenanceIdentity &&
@@ -181,10 +191,27 @@ export class PluginService {
       this.maintenanceIdentity = { ...identity };
       return this.runtime.maintenance?.begin(identity) ?? Promise.resolve("unknown");
     },
-    end: async () => {
-      throw new Error("Plugin executing closure is not qualified for maintenance release");
+    end: async (identity) => {
+      if (
+        !this.maintenanceIdentity ||
+        !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity) ||
+        this.maintenanceUncertain
+      )
+        throw new Error("Plugin maintenance release identity mismatch");
+      if (!this.supportsQualifiedMaintenance() || !this.runtime.maintenance)
+        throw new Error("Plugin executing closure is not qualified for maintenance release");
+      await this.runtime.maintenance.end(identity);
+      if (!this.supportsQualifiedMaintenance())
+        throw new Error("Plugin maintenance release changed");
+      this.maintenanceIdentity = null;
     },
   };
+  private supportsQualifiedMaintenance(): boolean {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (!owner || !isQualifiedDaemonOwner(owner) || this.maintenanceUncertain) return false;
+    return this.runtime.maintenance?.supportsV1() === true;
+  }
+
   private requireLifecycleAdmission(): void {
     if (this.maintenanceIdentity || this.maintenanceUncertain)
       throw new Error("Plugin maintenance admission is closed");
@@ -579,6 +606,251 @@ export class PluginService {
       }
       return installed;
     });
+  }
+
+  heldPluginOperation(
+    claim: HeldPluginOperationClaim,
+    scope: HeldPluginOperationScope,
+  ): Promise<HeldPluginOperationResult> {
+    assertHeldPluginOperation(scope, claim);
+    const native = this.dependencies.nativeMaintenance;
+    if (!native?.runHeldOperation)
+      return Promise.reject(new Error("Held plugin admission unavailable"));
+    const held = { claim, scope };
+    const admitted = () =>
+      native.runHeldOperation!(scope, claim, async () => {
+        assertPluginHeldOperation(held, claim.pluginId, claim.path);
+        if (
+          !this.maintenanceIdentity ||
+          !samePluginMaintenanceIdentity(this.maintenanceIdentity, claim)
+        )
+          throw new Error("Held plugin reservation identity mismatch");
+        this.qualifiedEpoch++;
+        this.qualifiedMutations++;
+        try {
+          return await this.performHeldPluginOperation(held);
+        } finally {
+          this.qualifiedMutations--;
+          this.qualifiedEpoch++;
+        }
+      });
+    const turn = this.lifecycle.then(admitted, admitted);
+    this.lifecycle = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return turn;
+  }
+
+  private async performHeldPluginOperation(
+    held: PluginHeldOperation,
+  ): Promise<HeldPluginOperationResult> {
+    const { claim } = held;
+    const policy = this.dependencies.activationPolicy;
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    if (
+      !policy ||
+      !owner ||
+      !isQualifiedDaemonOwner(owner) ||
+      !this.runtime.validateActivation ||
+      !this.runtime.observeQualifiedExecutions
+    )
+      throw new Error("Qualified managed operation unavailable");
+    await owner.refresh();
+    const source = this.requireSource(claim.pluginId);
+    const state = await policy.status(claim.pluginId);
+    if (
+      source.source !== "directory" ||
+      source.path !== claim.expectedPath ||
+      state.generation !== claim.expectedGeneration
+    )
+      throw new Error("Held plugin source/generation CAS mismatch");
+    if (
+      this.configStore.get().pluginsEnabled !== true ||
+      this.pendingOperations.has(claim.pluginId)
+    )
+      throw new Error("Held plugin operation cancelled");
+    if (claim.operation === "verify") return this.verifyHeldPlugin(held);
+    if (claim.operation === "replace") return this.replaceHeldPlugin(held, source);
+    return this.recoverHeldPlugin(held, source, state);
+  }
+
+  private async verifyHeldPlugin(held: PluginHeldOperation): Promise<HeldPluginOperationResult> {
+    const { claim } = held;
+    const loaded = this.runtime.getLoadedReceipt?.(claim.pluginId);
+    if (
+      claim.path !== claim.expectedPath ||
+      !loaded?.snapshotRoot ||
+      !loaded.snapshotSha256 ||
+      loaded.sourcePath !== claim.path ||
+      loaded.snapshotSha256 !== claim.snapshotSha256 ||
+      loaded.serverBundleSha256 !== claim.serverBundleSha256
+    )
+      throw new Error("Held verification requires exact actual loaded identity");
+    await this.runtime.observeQualifiedExecutions!();
+    const owner = this.dependencies.qualifiedDaemonOwner!;
+    const native = this.dependencies.nativeMaintenance!;
+    const context = { owner, native, held, snapshotRoot: loaded.snapshotRoot };
+    await compileQualifiedDirectoryPlugin(claim.path, this.daemonVersion, context);
+    await compileQualifiedDirectoryPlugin(claim.path, this.daemonVersion, context);
+    if (this.runtime.getLoadedReceipt?.(claim.pluginId) !== loaded)
+      throw new Error("Loaded identity changed during verification");
+    return this.finishHeldPluginOperation(held);
+  }
+
+  private async replaceHeldPlugin(
+    held: PluginHeldOperation,
+    source: PluginSource,
+  ): Promise<HeldPluginOperationResult> {
+    const { claim } = held;
+    const policy = this.dependencies.activationPolicy!;
+    if (source.enabled === false || claim.path === source.path)
+      throw new Error("Held replacement requires enabled distinct source");
+    const baseline = await this.requireManagedBaseline(claim.pluginId, source, policy);
+    await this.validateHeldCandidate(held, "activate");
+    await this.runtime.observeQualifiedExecutions!();
+    await this.assertHeldCas(held, source.path);
+    await policy.replacing(claim.pluginId, source.path, claim.path, { source, receipt: baseline });
+    try {
+      await this.stopHeldPlugin(held);
+      await this.launchHeldPlugin(held, "activate");
+      await this.assertHeldSource(held, source.path);
+      await this.patchSource(claim.pluginId, { ...source, path: claim.path });
+      await policy.committedReplacement(claim.pluginId);
+      return await this.finishHeldPluginOperation(held);
+    } catch (error) {
+      await this.holdFailedPlugin(held);
+      throw error;
+    } finally {
+      policy.releaseReplacement(claim.pluginId);
+    }
+  }
+
+  private async recoverHeldPlugin(
+    held: PluginHeldOperation,
+    source: PluginSource,
+    state: ManagedPluginActivationState,
+  ): Promise<HeldPluginOperationResult> {
+    const { claim } = held;
+    const policy = this.dependencies.activationPolicy!;
+    const baseline = state.baseline;
+    if (
+      !baseline ||
+      baseline.source.source !== "directory" ||
+      baseline.source.path !== claim.path ||
+      baseline.receipt.sourcePath !== claim.path ||
+      baseline.receipt.snapshotSha256 !== claim.snapshotSha256 ||
+      baseline.receipt.serverBundleSha256 !== claim.serverBundleSha256
+    )
+      throw new Error("Held recovery requires exact retained baseline evidence");
+    const loaded = this.runtime.getLoadedReceipt?.(claim.pluginId);
+    await this.inspectRecoveryIdentity({
+      pluginId: claim.pluginId,
+      current: source,
+      state,
+      baseline,
+      loaded,
+      policy,
+    });
+    await this.validateHeldCandidate(held, "recover");
+    await this.assertHeldCas(held, source.path);
+    await policy.recovering(claim.pluginId, claim.expectedGeneration);
+    try {
+      await this.stopHeldPlugin(held);
+      await this.launchHeldPlugin(held, "recover");
+      await this.assertHeldSource(held, source.path);
+      await this.patchSource(claim.pluginId, { ...baseline.source, enabled: true });
+      await policy.committedReplacement(claim.pluginId);
+      return await this.finishHeldPluginOperation(held);
+    } catch (error) {
+      await this.holdFailedPlugin(held);
+      throw error;
+    } finally {
+      policy.releaseReplacement(claim.pluginId);
+    }
+  }
+
+  private async validateHeldCandidate(
+    held: PluginHeldOperation,
+    operation: ActivationOperation,
+  ): Promise<void> {
+    const { claim } = held;
+    const policy = this.dependencies.activationPolicy!;
+    const ticket = await policy.authorize(claim.pluginId, claim.path, operation);
+    if (
+      !ticket?.authorization.passiveProfile ||
+      ticket.authorization.snapshotSha256 !== claim.snapshotSha256 ||
+      ticket.authorization.serverBundleSha256 !== claim.serverBundleSha256
+    )
+      throw new Error("Held candidate lacks exact protected passive authorization");
+    await this.checkRequirements(claim.path);
+    await this.runtime.validateActivation!(claim.pluginId, claim.path, operation, held);
+    await policy.authorize(claim.pluginId, claim.path, operation, undefined, ticket);
+  }
+
+  private async assertHeldSource(held: PluginHeldOperation, expectedPath: string): Promise<void> {
+    assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+    const source = this.requireSource(held.claim.pluginId);
+    if (
+      source.path !== expectedPath ||
+      this.pendingOperations.has(held.claim.pluginId) ||
+      this.configStore.get().pluginsEnabled !== true
+    )
+      throw new Error("Held plugin registration changed");
+  }
+  private async assertHeldCas(held: PluginHeldOperation, expectedPath: string): Promise<void> {
+    await this.assertHeldSource(held, expectedPath);
+    if (
+      (await this.dependencies.activationPolicy!.status(held.claim.pluginId)).generation !==
+      held.claim.expectedGeneration
+    )
+      throw new Error("Held plugin activation CAS changed");
+  }
+  private async launchHeldPlugin(
+    held: PluginHeldOperation,
+    operation: ActivationOperation,
+  ): Promise<void> {
+    const { claim } = held;
+    await this.runtime.startPlugin(
+      claim.pluginId,
+      claim.path,
+      () => {
+        assertPluginHeldOperation(held, claim.pluginId, claim.path);
+        return (
+          this.requireSource(claim.pluginId).path === claim.expectedPath &&
+          this.configStore.get().pluginsEnabled === true &&
+          !this.pendingOperations.has(claim.pluginId)
+        );
+      },
+      operation,
+      held,
+    );
+    await this.publishProviderRegistrations(claim.pluginId, claim.path);
+    this.publishUsageSources(claim.pluginId);
+  }
+  private stopHeldPlugin(held: PluginHeldOperation): Promise<boolean> {
+    this.removeProviderRegistrations(held.claim.pluginId);
+    this.removeUsageSources(held.claim.pluginId);
+    return this.runtime.stopPluginById(held.claim.pluginId, held);
+  }
+  private async holdFailedPlugin(held: PluginHeldOperation): Promise<void> {
+    try {
+      await this.stopHeldPlugin(held);
+    } finally {
+      await this.dependencies.activationPolicy!.hold(held.claim.pluginId);
+    }
+  }
+  private async finishHeldPluginOperation(
+    held: PluginHeldOperation,
+  ): Promise<HeldPluginOperationResult> {
+    assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+    await this.runtime.observeQualifiedExecutions!();
+    const plugin = await this.requireItem(held.claim.pluginId);
+    const state = await this.dependencies.activationPolicy!.status(held.claim.pluginId);
+    const result = { plugin, nativeGeneration: state.generation };
+    assertHeldPluginOperationResult(held.claim, result);
+    this.notify(held.claim.pluginId);
+    return result;
   }
 
   async replaceDirectory(input: DirectoryReplacementInput): Promise<PluginListItem> {

@@ -62,3 +62,25 @@ describe("plugin execution ownership independent of reply correlation", () => {
     expect(owner.busy()).toBe(true);
   });
 });
+
+it("cannot authorize held child termination using a fabricated reservation scope", () => {
+  const { owner, close, native } = fixture();
+  const held = {
+    claim: {
+      generation: 1,
+      transactionId: "forged",
+      operation: "replace" as const,
+      pluginId: "probe",
+      path: "/new",
+      expectedPath: "/old",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    },
+    scope: {} as import("../maintenance-operation.js").HeldPluginOperationScope,
+  };
+  expect(() => owner.expectHeldTermination(held, "instance")).toThrow();
+  close();
+  owner.terminated();
+  expect(native.holdForUnknownWork).toHaveBeenCalledOnce();
+});

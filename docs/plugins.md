@@ -16,6 +16,34 @@ initialize paths before invoking the contribution. Contribution cleanup remains 
 
 > **Trust every plugin you add.** `paseo plugin add` and `paseo plugin install` mean “I trust this codebase.” Plugins are unsandboxed: server code and preparation commands run with the daemon user's access on the daemon host, and client contributions run inside Paseo. The repository's dependencies and future updates are part of that trust decision. With `--host`, preparation runs on that remote daemon host.
 
+## Passive maintenance prototype (fork)
+
+`PluginService.maintenance` exposes the native V1 port. This source slice always
+returns `supportsV1() === false`: the executing daemon and child closure producer
+has not been integrated. An administrator passive profile is an expectation;
+it cannot qualify a running host by itself. A restored `begin({ generation,
+transactionId })` closes normal and lifecycle admission synchronously and returns
+`unknown`. Repeating the same identity retains the hold. `end` refuses release
+without executing-closure qualification. Startup under this unsupported hold
+leaves plugin code uninitialized.
+
+Child accounting follows actual handler settlement and SDK helper `close`,
+independently of RPC replies, caller abort, timeout, or subscription acknowledgement.
+Helpers inherit the admitted root and keep it alive after its handler returns.
+Settings subscriptions and provider connections retain their execution owner until
+release and actual handler/close settlement. A wrong child incarnation, uncertain
+IPC, or child exit with unfinished work holds native admission. The host process
+itself is transport, not counted as plugin work.
+
+This is accounting infrastructure, not a general plugin suspension facility.
+An externally qualified passive closure must exclude autonomous/unowned work,
+raw helper launches, and detached descendants outside these owners. Source/dev
+launches, arbitrary plugins, Cafe, and retrospective disk hashes cannot grant
+maintenance. No production or coupled positive qualification is claimed by these
+unit tests. The genuine role producer and native bootstrap integration must verify
+actual executing bindings, immutable artifacts, incarnation, and fresh child ACK
+before enabling support or restricted initialization.
+
 ## Managed activation policy (fork)
 
 Set `PASEO_MANAGED_PLUGIN_POLICY` in the daemon administrator's launch environment to an absolute

@@ -290,6 +290,59 @@ function nextNotification(service: PluginService, pluginId: string): Promise<voi
 }
 
 describe("PluginService", () => {
+  it("restores an unsupported maintenance hold before any plugin initialization and retains it", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-held-"));
+    roots.push(home);
+    const directory = await createPlugin(
+      "held",
+      `throw new Error("must never evaluate under unqualified hold"); export default function contribute() { return () => {}; }`,
+    );
+    const service = createService(home, { held: { source: "directory", path: directory } });
+    const identity = { generation: 7, transactionId: "restored" };
+    expect(service.maintenance.supportsV1()).toBe(false);
+    const holding = service.maintenance.begin(identity);
+    // begin installs the barrier before the caller awaits it.
+    await expect(service.enablePlugin("held")).rejects.toThrow("admission is closed");
+    expect(await holding).toBe("unknown");
+    await service.start();
+    expect(service.catalog()).toEqual([]);
+    expect(await service.maintenance.begin(identity)).toBe("unknown");
+    await expect(service.maintenance.end(identity)).rejects.toThrow("not qualified");
+    await expect(service.reloadPlugin("held")).rejects.toThrow("admission is closed");
+  });
+
+  it("unqualified child barrier closes actual RPC dispatch without altering registration or dropping loaded receipt", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-held-child-"));
+    roots.push(home);
+    const directory = await createPlugin(
+      "held",
+      `import { z } from "zod"; export default function contribute(context) { context.handle({ name: "probe", input: z.unknown(), output: z.string() }, () => "running"); return () => {}; }`,
+    );
+    const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0");
+    const service = createService(
+      home,
+      { held: { source: "directory", path: directory } },
+      { runtime },
+    );
+    try {
+      await service.start();
+      expect(await service.invokePluginRpc("held", "probe", null)).toBe("running");
+      const before = (await service.listPlugins()).find((plugin) => plugin.id === "held");
+      const identity = { generation: 2, transactionId: "hold" };
+      expect(await service.maintenance.begin(identity)).toBe("unknown");
+      await expect(service.invokePluginRpc("held", "probe", null)).rejects.toThrow(
+        "admission is closed",
+      );
+      await expect(service.disablePlugin("held")).rejects.toThrow("admission is closed");
+      await expect(service.removePlugin("held")).rejects.toThrow("admission is closed");
+      const after = (await service.listPlugins()).find((plugin) => plugin.id === "held");
+      expect(after?.loaded).toEqual(before?.loaded);
+      expect(after?.enabled).toBe(before?.enabled);
+    } finally {
+      await runtime.stopAll();
+    }
+  });
+
   it.each([
     { shadow: false, runtime: "subprocess" },
     { shadow: true, runtime: "subprocess" },

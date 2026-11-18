@@ -1,3 +1,9 @@
+import { PluginActivityOwner, type PluginActivityLease } from "@getpaseo/plugin/internal/activity";
+import {
+  isPluginExecutionRoot,
+  pluginExecutionKey,
+  type PluginExecutionRoot,
+} from "./execution-roots.js";
 import path from "node:path";
 import { realpath, stat } from "node:fs/promises";
 import { PluginAgentTools } from "./agent-tools.js";
@@ -66,6 +72,12 @@ export function createPluginWorker(options: {
   contribute: PluginServerContribution;
 }): { shutdown(): Promise<void> } {
   const { channel, contribute } = options;
+  const activity = new PluginActivityOwner(() =>
+    send({ type: "execution.unknown", instanceId: hostInstanceId }),
+  );
+  let hostInstanceId = "legacy-unbound";
+  let qualifiedPassive = false;
+  let initializationStarted = false;
   let settingsStore: PluginSettingsStore | null = null;
   function registerSettings<Schema extends ZodType>(definition: SettingsDefinition<Schema>) {
     if (!settingsStore) throw new Error("Plugin settings storage is unavailable");
@@ -77,7 +89,34 @@ export function createPluginWorker(options: {
     register(handlers.reset.contract, (input) =>
       handlers.reset.handle(handlers.reset.contract.input.parse(input)),
     );
-    return handlers.settings;
+    return {
+      read: handlers.settings.read,
+      subscribe(listener: Parameters<typeof handlers.settings.subscribe>[0]) {
+        const lifetime = activity.retainCurrent();
+        try {
+          const unsubscribe = handlers.settings.subscribe((state) => {
+            const invocation = lifetime.run(() => activity.retainCurrent());
+            return invocation.run(async () => {
+              try {
+                await listener(state);
+              } finally {
+                invocation.release();
+              }
+            });
+          });
+          return () => {
+            try {
+              lifetime.run(unsubscribe);
+            } finally {
+              lifetime.release();
+            }
+          };
+        } catch (error) {
+          lifetime.release();
+          throw error;
+        }
+      },
+    };
   }
 
   type RpcHandler = (input: unknown, context: PluginHandlerContext) => unknown | Promise<unknown>;
@@ -92,12 +131,17 @@ export function createPluginWorker(options: {
     send({ type: "hooks.changed", hooks: hooks.catalog() });
   }, agentTools);
   const handlers = new Map<string, RegisteredRpc>();
-  const subscriptions = new PluginSubscriptionHandlers({ send, sendAndWait });
+  const subscriptions = new PluginSubscriptionHandlers({ send, sendAndWait }, activity);
   const providers = new Map<string, ProviderRegistration>();
   const usageSources = new Map<string, UsageSourceRegistration>();
   const providerConnections = new Map<
     string,
-    { connection: ProviderConnection; unsubscribe: () => void; closing?: Promise<void> }
+    {
+      connection: ProviderConnection;
+      unsubscribe: () => void;
+      activity: PluginActivityLease;
+      closing?: Promise<void>;
+    }
   >();
   const pendingProviderConnections = new Map<string, { tombstoned: boolean }>();
   let cleanup: (() => void | Promise<void>) | null = null;
@@ -105,7 +149,11 @@ export function createPluginWorker(options: {
   let paseo: PaseoApi | null = null;
   let stopping = false;
   function send(message: PluginProcessMessage): void {
-    channel.send(message);
+    try {
+      channel.send(message);
+    } catch {
+      activity.markUnknown();
+    }
   }
 
   function sendAndWait(message: PluginProcessMessage): Promise<void> {
@@ -234,16 +282,23 @@ export function createPluginWorker(options: {
     const pending = { tombstoned: false };
     pendingProviderConnections.set(message.connectionId, pending);
     let connection: ProviderConnection;
+    const connectionActivity = activity.retainCurrent();
     try {
-      connection = await provider.connect(message.request);
+      connection = await connectionActivity.run(() => provider.connect(message.request));
     } catch (error) {
+      connectionActivity.release();
       pendingProviderConnections.delete(message.connectionId);
       if (pending.tombstoned || stopping) return;
       throw error;
     }
     pendingProviderConnections.delete(message.connectionId);
     if (pending.tombstoned || stopping) {
-      await connection.close().catch(() => undefined);
+      try {
+        await connectionActivity.run(() => connection.close());
+        connectionActivity.release();
+      } catch {
+        activity.markUnknown();
+      }
       return;
     }
     let unsubscribe = () => {};
@@ -255,9 +310,7 @@ export function createPluginWorker(options: {
           event: ProviderEventSchema.parse(jsonTransportValue(event)),
         });
       } catch (error) {
-        providerConnections.delete(message.connectionId);
-        unsubscribe();
-        void connection.close().catch(() => undefined);
+        void closeProviderConnection(message.connectionId);
         send({
           type: "provider.closed",
           connectionId: message.connectionId,
@@ -265,7 +318,11 @@ export function createPluginWorker(options: {
         });
       }
     });
-    providerConnections.set(message.connectionId, { connection, unsubscribe });
+    providerConnections.set(message.connectionId, {
+      connection,
+      unsubscribe,
+      activity: connectionActivity,
+    });
     send({
       type: "provider.connected",
       connectionId: message.connectionId,
@@ -298,9 +355,11 @@ export function createPluginWorker(options: {
     const closing = (async () => {
       current.unsubscribe();
       try {
-        await current.connection.close();
+        await current.activity.run(() => current.connection.close());
+        current.activity.release();
         send({ type: "provider.closed", connectionId });
       } catch (error) {
+        activity.markUnknown();
         send({ type: "provider.closed", connectionId, error: describeError(error) });
       } finally {
         providerConnections.delete(connectionId);
@@ -318,65 +377,81 @@ export function createPluginWorker(options: {
   });
 
   async function initialize(message: Extract<PluginProcessRequest, { type: "initialize" }>) {
-    const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
-    daemonClient = new DaemonClient({
-      url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
-      clientId: createPluginClientId(message.pluginId),
-      clientType: "cli",
-      appVersion: message.appVersion,
-      // The runtime re-attaches a session when the daemon drops this socket.
-      reconnect: { enabled: true },
-      transportFactory,
-    });
-    paseo = createPaseoApi(daemonClient);
-    await daemonClient.connect();
-    settingsStore = message.settingsDirectory
-      ? new PluginSettingsStore(message.settingsDirectory, (settingsId) =>
-          send({ type: "settings.changed", settingsId }),
-        )
-      : null;
-    const context: PluginServerContext = {
-      sourceDirectory,
-      handle,
-      registerProvider,
-      registerUsageSource,
-      registerSettings,
-      addHook: hooks.addHook,
-      on: hooks.on,
-      before: hooks.before,
-    };
-    Object.defineProperty(context, "sourceDirectory", {
-      value: sourceDirectory,
-      writable: false,
-      configurable: false,
-      enumerable: true,
-    });
-    const contributedCleanup = contribute(context);
-    if (typeof contributedCleanup !== "function") {
-      throw new Error("Plugin contribution must return a cleanup function");
+    if (initializationStarted) {
+      activity.markUnknown();
+      throw new Error("Plugin initialization already started");
     }
-    cleanup = contributedCleanup;
-    const usageSourceMetadata = await Promise.all(
-      [...usageSources.values()]
-        .sort((a, b) => a.id.localeCompare(b.id))
-        .map(async (source) => ({
-          id: source.id,
-          label: source.label,
-          icon: source.icon
-            ? await readPluginProviderIcon(message.pluginDirectory, source.icon)
-            : undefined,
-        })),
-    );
-    send({
-      type: "ready",
-      methods: [...handlers.keys()].sort(),
-      subscriptions: subscriptions.catalog(),
-      hooks: hooks.catalog(),
-      providers: [...providers.values()]
-        .sort((left, right) => left.id.localeCompare(right.id))
-        .map(providerMetadata),
-      usageSources: usageSourceMetadata,
-    });
+    initializationStarted = true;
+    const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
+    hostInstanceId = message.hostInstanceId ?? "legacy-unbound";
+    qualifiedPassive = message.passiveInitialization?.contract === "native-passive-contract-1";
+    if (qualifiedPassive) activity.qualifyPassive();
+    if (message.passiveInitialization?.hold) activity.begin(message.passiveInitialization.hold);
+    const initializationActivity = qualifiedPassive
+      ? activity.initialization()
+      : activity.acquire();
+    try {
+      daemonClient = new DaemonClient({
+        url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
+        clientId: createPluginClientId(message.pluginId),
+        clientType: "cli",
+        appVersion: message.appVersion,
+        // The runtime re-attaches a session when the daemon drops this socket.
+        reconnect: { enabled: true },
+        transportFactory,
+      });
+      paseo = createPaseoApi(daemonClient);
+      await daemonClient.connect();
+      settingsStore = message.settingsDirectory
+        ? new PluginSettingsStore(message.settingsDirectory, (settingsId) =>
+            send({ type: "settings.changed", settingsId }),
+          )
+        : null;
+      const context: PluginServerContext = {
+        sourceDirectory,
+        handle,
+        registerProvider,
+        registerUsageSource,
+        registerSettings,
+        addHook: hooks.addHook,
+        on: hooks.on,
+        before: hooks.before,
+      };
+      Object.defineProperty(context, "sourceDirectory", {
+        value: sourceDirectory,
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
+      const contributedCleanup = initializationActivity.run(() => contribute(context));
+      if (typeof contributedCleanup !== "function") {
+        throw new Error("Plugin contribution must return a cleanup function");
+      }
+      cleanup = contributedCleanup;
+      const usageSourceMetadata = await Promise.all(
+        [...usageSources.values()]
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .map(async (source) => ({
+            id: source.id,
+            label: source.label,
+            icon: source.icon
+              ? await readPluginProviderIcon(message.pluginDirectory, source.icon)
+              : undefined,
+          })),
+      );
+      send({
+        type: "ready",
+        methods: [...handlers.keys()].sort(),
+        subscriptions: subscriptions.catalog(),
+        hooks: hooks.catalog(),
+        providers: [...providers.values()]
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map(providerMetadata),
+        usageSources: usageSourceMetadata,
+      });
+    } finally {
+      initializationActivity.release();
+    }
   }
 
   async function shutdown(): Promise<void> {
@@ -405,261 +480,218 @@ export function createPluginWorker(options: {
     channel.disconnect();
   }
 
-  function handleUsageRequest(
-    message: Extract<PluginProcessRequest, { type: "usage.fetch" | "usage.discover" }>,
-  ): void {
-    void (async () => {
-      const source = usageSources.get(message.sourceId);
-      if (!source) throw new Error(`Unknown usage source: ${message.sourceId}`);
-      if (message.type === "usage.discover")
-        return jsonTransportValue(await source.discover(message.scope));
-      const input = await source.input.parseAsync(message.input);
-      return jsonTransportValue(await source.fetch(input));
-    })().then(
-      (output) => send({ type: "result", requestId: message.requestId, output }),
-      (error) => send({ type: "error", requestId: message.requestId, error: describeError(error) }),
-    );
-  }
-
-  function rejectWhileStopping(message: PluginProcessRequest): void {
-    if (
-      message.type === "provider.status" ||
-      message.type === "provider.catalog_key" ||
-      message.type === "usage.fetch" ||
-      message.type === "usage.discover" ||
-      message.type === "subscribe"
-    ) {
-      send({ type: "error", requestId: message.requestId, error: "Plugin is stopping" });
-    } else if (message.type === "provider.connect") {
-      send({
-        type: "provider.connect_failed",
-        connectionId: message.connectionId,
-        error: "Plugin is stopping",
-      });
-    } else if (message.type === "provider.send") {
+  function rejectRoot(message: PluginExecutionRoot, error: unknown): void {
+    const reason = describeError(error);
+    if (message.type === "provider.connect")
+      send({ type: "provider.connect_failed", connectionId: message.connectionId, error: reason });
+    else if (message.type === "provider.send")
       send({
         type: "provider.rejected",
         connectionId: message.connectionId,
         acceptanceId: message.acceptanceId,
-        error: "Plugin is stopping",
+        error: reason,
       });
-    } else if (message.type === "provider.close") {
-      send({ type: "provider.closed", connectionId: message.connectionId });
-    }
+    else send({ type: "error", requestId: message.requestId, error: reason });
   }
 
-  function handleToolMessage(
-    message: PluginProcessRequest,
-  ): message is Extract<
-    PluginProcessRequest,
-    { type: "tool.call" | "tool.cancel" | "tools.detach" }
-  > {
-    if (message.type === "tools.detach") {
-      agentTools.detach(message.agentId);
-      return true;
-    }
-    if (message.type === "tool.cancel") {
-      agentTools.cancel(message.requestId);
-      return true;
-    }
-    if (message.type === "tool.call") {
-      if (!paseo) {
-        send({ type: "error", requestId: message.requestId, error: "Plugin API unavailable" });
-        return true;
-      }
-      void agentTools
-        .call(message.requestId, message.agent, message.name, message.input, paseo)
-        .then((output) =>
-          send({
-            type: "result",
-            requestId: message.requestId,
-            output: jsonTransportValue(output),
-          }),
-        )
-        .catch((error) =>
-          send({ type: "error", requestId: message.requestId, error: describeError(error) }),
+  async function invokeRoot(
+    message: Extract<PluginProcessRequest, { type: "invoke" }>,
+  ): Promise<unknown> {
+    const registered = handlers.get(message.method);
+    if (!registered) throw new Error(`Unknown RPC method: ${message.method}`);
+    const input = await registered.contract.input.parseAsync(message.input);
+    if (!paseo) throw new Error("Plugin Paseo API is unavailable");
+    const output = await registered.handler(input, { paseo });
+    assertPluginWireValue(output, "output");
+    return output;
+  }
+
+  async function usageRoot(
+    message: Extract<PluginProcessRequest, { type: "usage.fetch" | "usage.discover" }>,
+  ): Promise<unknown> {
+    const source = usageSources.get(message.sourceId);
+    if (!source) throw new Error(`Unknown usage source: ${message.sourceId}`);
+    if (message.type === "usage.discover")
+      return jsonTransportValue(await source.discover(message.scope));
+    return jsonTransportValue(await source.fetch(await source.input.parseAsync(message.input)));
+  }
+
+  async function dispatchRoot(message: PluginExecutionRoot): Promise<void> {
+    if (!paseo) throw new Error("Plugin API unavailable");
+    let output: unknown;
+    switch (message.type) {
+      case "invoke":
+        output = await invokeRoot(message);
+        break;
+      case "hook":
+        output = await hooks.invoke(message.requestId, message.name, message.input, paseo);
+        break;
+      case "tool.call":
+        output = jsonTransportValue(
+          await agentTools.call(
+            message.requestId,
+            message.agent,
+            message.name,
+            message.input,
+            paseo,
+          ),
         );
-      return true;
+        break;
+      case "usage.fetch":
+      case "usage.discover":
+        output = await usageRoot(message);
+        break;
+      case "provider.status": {
+        const provider = providers.get(message.providerId);
+        if (!provider?.status)
+          throw new Error(`Provider has no status capability: ${message.providerId}`);
+        output = ProviderStatusSchema.parse(await provider.status(message.request));
+        break;
+      }
+      case "provider.catalog_key": {
+        const provider = providers.get(message.providerId);
+        if (!provider) throw new Error(`Unknown provider: ${message.providerId}`);
+        output = await provider.getCatalogCacheKey?.(message.options);
+        if (output !== undefined && typeof output !== "string")
+          throw new Error("Invalid catalogue key");
+        break;
+      }
+      case "provider.connect":
+        await connectProvider(message);
+        return;
+      case "provider.send":
+        await sendProviderInput(message);
+        return;
+      case "subscribe":
+        subscriptions.start(message, paseo);
+        return;
     }
-    return false;
+    send({ type: "result", requestId: message.requestId, output });
   }
 
-  function handleSubscriptionMessage(
-    message: Extract<PluginProcessRequest, { type: "subscribe" | "unsubscribe" }>,
+  function admitRoot(message: PluginExecutionRoot): void {
+    const requestKey = pluginExecutionKey(message);
+    const settled = () =>
+      send({ type: "execution.settled", requestKey, instanceId: hostInstanceId });
+    let lease: PluginActivityLease;
+    try {
+      if (stopping) throw new Error("Plugin is stopping");
+      lease = activity.acquire(settled);
+    } catch (error) {
+      rejectRoot(message, error);
+      settled();
+      return;
+    }
+    void lease
+      .run(() => dispatchRoot(message))
+      .catch((error) => rejectRoot(message, error))
+      .finally(() => lease.release());
+  }
+
+  function handleMaintenance(
+    message: Extract<PluginProcessRequest, { type: "maintenance.begin" | "maintenance.end" }>,
   ): void {
-    if (message.type === "unsubscribe") subscriptions.release(message.subscriptionId);
-    else if (paseo) subscriptions.start(message, paseo);
-    else send({ type: "error", requestId: message.requestId, error: "Plugin API unavailable" });
+    try {
+      if (message.instanceId !== hostInstanceId)
+        throw new Error("Plugin maintenance incarnation mismatch");
+      if (message.type === "maintenance.end") {
+        activity.end(message);
+        send({
+          type: "result",
+          requestId: message.requestId,
+          output: { status: "ended", ...message },
+        });
+        return;
+      }
+      const status = activity.begin(message);
+      send({
+        type: "result",
+        requestId: message.requestId,
+        output: {
+          status: qualifiedPassive ? status : "unknown",
+          generation: message.generation,
+          transactionId: message.transactionId,
+          instanceId: hostInstanceId,
+        },
+      });
+    } catch (error) {
+      send({ type: "error", requestId: message.requestId, error: describeError(error) });
+    }
+  }
+
+  function rejectInvalidProviderInput(raw: unknown, reason: string): boolean {
+    if (
+      !raw ||
+      typeof raw !== "object" ||
+      !("connectionId" in raw) ||
+      typeof raw.connectionId !== "string" ||
+      !("acceptanceId" in raw) ||
+      typeof raw.acceptanceId !== "string"
+    )
+      return false;
+    send({
+      type: "provider.rejected",
+      connectionId: raw.connectionId,
+      acceptanceId: raw.acceptanceId,
+      error: `Invalid provider input: ${reason}`,
+    });
+    void closeProviderConnection(raw.connectionId);
+    return true;
   }
 
   function handleMessage(rawMessage: unknown): void {
     const parsed = PluginProcessRequestSchema.safeParse(rawMessage);
     if (!parsed.success) {
-      const value = rawMessage as { connectionId?: unknown; acceptanceId?: unknown } | null;
-      if (
-        value &&
-        typeof value.connectionId === "string" &&
-        typeof value.acceptanceId === "string"
-      ) {
-        send({
-          type: "provider.rejected",
-          connectionId: value.connectionId,
-          acceptanceId: value.acceptanceId,
-          error: `Invalid provider input: ${parsed.error.message}`,
-        });
-        void closeProviderConnection(value.connectionId);
-        return;
-      }
+      if (rejectInvalidProviderInput(rawMessage, parsed.error.message)) return;
+      activity.markUnknown();
       send({ type: "fatal", error: `Invalid plugin process request: ${parsed.error.message}` });
       void shutdown();
       return;
     }
     const message = parsed.data;
-    if (message.type === "initialize") {
-      void initialize(message).catch(async (error) => {
-        send({ type: "fatal", error: describeError(error) });
-        await paseo
-          ?.dispose()
-          .catch((failure) => console.error("Plugin API cleanup failed", failure));
-        await daemonClient?.close().catch(() => undefined);
-      });
+    if (isPluginExecutionRoot(message)) {
+      admitRoot(message);
       return;
     }
-    if (message.type === "shutdown") {
-      void shutdown();
-      return;
-    }
-    if (stopping) {
-      rejectWhileStopping(message);
-      return;
-    }
-    if (handleToolMessage(message)) return;
-    if (message.type === "provider.status") {
-      void (async () => {
-        const provider = providers.get(message.providerId);
-        if (!provider || !provider.status)
-          throw new Error(`Provider has no status capability: ${message.providerId}`);
-        const output = ProviderStatusSchema.parse(await provider.status(message.request));
-        send({ type: "result", requestId: message.requestId, output });
-      })().catch((error) =>
-        send({ type: "error", requestId: message.requestId, error: describeError(error) }),
-      );
-      return;
-    }
-    if (message.type === "provider.catalog_key") {
-      void (async () => {
-        const provider = providers.get(message.providerId);
-        if (!provider) throw new Error(`Unknown provider: ${message.providerId}`);
-        const output = await provider.getCatalogCacheKey?.(message.options);
-        if (output !== undefined && typeof output !== "string")
-          throw new Error("Invalid catalogue key");
-        send({ type: "result", requestId: message.requestId, output });
-      })().catch((error) =>
-        send({ type: "error", requestId: message.requestId, error: describeError(error) }),
-      );
-      return;
-    }
-    if (message.type === "usage.fetch" || message.type === "usage.discover") {
-      handleUsageRequest(message);
-      return;
-    }
-    if (message.type === "provider.connect") {
-      void connectProvider(message).catch((error) => {
-        if (stopping) return;
-        send({
-          type: "provider.connect_failed",
-          connectionId: message.connectionId,
-          error: describeError(error),
+    switch (message.type) {
+      case "initialize":
+        void initialize(message).catch(async (error) => {
+          send({ type: "fatal", error: describeError(error) });
+          await paseo
+            ?.dispose()
+            .catch((failure) => console.error("Plugin API cleanup failed", failure));
+          await daemonClient?.close().catch(() => undefined);
         });
-      });
-      return;
+        return;
+      case "shutdown":
+        void shutdown();
+        return;
+      case "maintenance.begin":
+      case "maintenance.end":
+        handleMaintenance(message);
+        return;
+      case "hook.cancel":
+        hooks.cancel(message.requestId);
+        return;
+      case "tool.cancel":
+        agentTools.cancel(message.requestId);
+        return;
+      case "tools.detach":
+        agentTools.detach(message.agentId);
+        return;
+      case "unsubscribe":
+        subscriptions.release(message.subscriptionId);
+        return;
+      case "provider.close":
+        void closeProviderConnection(message.connectionId);
+        return;
+      case "paseo_frame":
+      case "paseo_close":
+        return;
     }
-    if (message.type === "provider.send") {
-      void sendProviderInput(message).catch((error) => {
-        if (stopping) return;
-        send({
-          type: "provider.rejected",
-          connectionId: message.connectionId,
-          acceptanceId: message.acceptanceId,
-          error: describeError(error),
-        });
-      });
-      return;
-    }
-    if (message.type === "provider.close") {
-      void closeProviderConnection(message.connectionId);
-      return;
-    }
-    if (message.type === "paseo_frame" || message.type === "paseo_close") return;
-    if (isHookMessage(message)) {
-      handleHookMessage(message);
-      return;
-    }
-    if (message.type === "invoke") invoke(message);
-    else handleSubscriptionMessage(message);
-  }
-
-  function invoke(message: Extract<PluginProcessRequest, { type: "invoke" }>): void {
-    const registered = handlers.get(message.method);
-    if (!registered) {
-      send({
-        type: "error",
-        requestId: message.requestId,
-        error: `Unknown RPC method: ${message.method}`,
-      });
-      return;
-    }
-    void registered.contract.input
-      .parseAsync(message.input)
-      .then((input) => {
-        if (!paseo) throw new Error("Plugin Paseo API is unavailable");
-        return registered.handler(input, { paseo });
-      })
-      .then((output: unknown) => {
-        assertPluginWireValue(output, "output");
-        return output;
-      })
-      .then(
-        (output) => send({ type: "result", requestId: message.requestId, output }),
-        (error) =>
-          send({ type: "error", requestId: message.requestId, error: describeError(error) }),
-      );
   }
   channel.onMessage(handleMessage);
 
-  function handleHookMessage(
-    message: Extract<PluginProcessRequest, { type: "hook" | "hook.cancel" }>,
-  ): void {
-    if (message.type === "hook.cancel") {
-      hooks.cancel(message.requestId);
-      return;
-    }
-    if (message.type === "hook") {
-      if (!paseo) {
-        send({
-          type: "error",
-          requestId: message.requestId,
-          error: "Plugin Paseo API is unavailable",
-        });
-        return;
-      }
-      void hooks.invoke(message.requestId, message.name, message.input, paseo).then(
-        (output) => {
-          return send({ type: "result", requestId: message.requestId, output });
-        },
-        (error) => {
-          return send({ type: "error", requestId: message.requestId, error: describeError(error) });
-        },
-      );
-      return;
-    }
-  }
-
-  function isHookMessage(
-    message: PluginProcessRequest,
-  ): message is Extract<PluginProcessRequest, { type: "hook" | "hook.cancel" }> {
-    return message.type === "hook" || message.type === "hook.cancel";
-  }
   return { shutdown };
 }
 

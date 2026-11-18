@@ -6,6 +6,17 @@ import path from "node:path";
 import { z } from "zod";
 
 const Digest = z.string().regex(/^[a-f0-9]{64}$/);
+export const PassivePluginProfileSchema = z
+  .object({
+    version: z.literal(1),
+    contract: z.literal("native-passive-contract-1"),
+    qualificationSha256: Digest,
+    runtimeClosureSha256: Digest,
+    helperClosureSha256: Digest,
+    initialization: z.literal("registration-only"),
+  })
+  .strict();
+export type PassivePluginProfile = z.infer<typeof PassivePluginProfileSchema>;
 const Authorization = z
   .object({
     operation: z.enum(["activate", "recover"]),
@@ -16,6 +27,7 @@ const Authorization = z
     serverBundleSha256: Digest,
     state: z.literal("binary-only"),
     forbiddenEnvironment: z.array(z.string()),
+    passiveProfile: PassivePluginProfileSchema.optional(),
   })
   .strict();
 export const ManagedPluginPolicySchema = z

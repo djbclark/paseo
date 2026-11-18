@@ -1,3 +1,11 @@
+import { PluginExecutionOwner } from "./execution-owner.js";
+import { isPluginExecutionRoot } from "./execution-roots.js";
+import {
+  samePluginMaintenanceIdentity,
+  type NativePluginAdmission,
+  type PluginMaintenanceIdentity,
+  type PluginMaintenancePort,
+} from "./maintenance.js";
 import { realpath } from "node:fs/promises";
 import {
   ManagedPluginActivationPolicy,
@@ -105,6 +113,7 @@ interface ChildTermination {
 }
 
 interface LoadedPlugin {
+  executionOwner?: PluginExecutionOwner;
   termination?: ChildTermination;
   loadedReceipt?: PluginLoadedReceipt;
   id: string;
@@ -166,6 +175,7 @@ interface RemoteProviderConnection {
 }
 
 interface PluginRuntimeDependencies {
+  nativeMaintenance?: NativePluginAdmission;
   activationPolicy?: ManagedPluginActivationPolicy;
   settingsDirectory?: string;
   onSettingsChanged?: (pluginId: string, settingsId: string) => void;
@@ -304,15 +314,29 @@ function jsonTransportValue<Value>(value: Value): Value {
   return JSON.parse(encoded) as Value;
 }
 
+const childExecutionOwners = new WeakMap<PluginChild, PluginExecutionOwner>();
 function send(child: PluginChild, message: PluginProcessRequest): Promise<void> {
+  if (!child.connected) return Promise.reject(new Error("Plugin child is disconnected"));
+  const owner = childExecutionOwners.get(child);
+  const root = isPluginExecutionRoot(message);
   return new Promise((resolve, reject) => {
-    child.send(message, (error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve();
-    });
+    try {
+      if (root) owner?.admit(message);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    try {
+      child.send(message, (error) => {
+        if (error) {
+          if (root) owner?.markUnknown();
+          reject(error);
+        } else resolve();
+      });
+    } catch (error) {
+      if (root) owner?.markUnknown();
+      reject(error);
+    }
   });
 }
 
@@ -347,6 +371,48 @@ function assertChildAlive(loaded: LoadedPlugin): void {
 }
 
 export class PluginRuntime {
+  private maintenanceIdentity: PluginMaintenanceIdentity | null = null;
+  private maintenanceUncertain = false;
+  /** HOLD by default until both executing daemon and child closure capabilities are integrated. */
+  readonly maintenance: PluginMaintenancePort = {
+    supportsV1: () => false,
+    begin: (identity) => {
+      // Runs synchronously, including restored holds before start/qualification/IPC awaits.
+      if (
+        this.maintenanceIdentity &&
+        !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity)
+      ) {
+        this.maintenanceUncertain = true;
+        return Promise.resolve("unknown");
+      }
+      this.maintenanceIdentity = { ...identity };
+      return this.holdUnqualifiedCohort(identity);
+    },
+    end: async () => {
+      throw new Error("Plugin executing closure is not qualified for maintenance release");
+    },
+  };
+
+  private async holdUnqualifiedCohort(identity: PluginMaintenanceIdentity): Promise<"unknown"> {
+    await Promise.allSettled(
+      [...this.plugins.values()].map(async (loaded) => {
+        if (!loaded.child) return;
+        await this.request(loaded, {
+          type: "maintenance.begin",
+          requestId: randomUUID(),
+          instanceId: loaded.instanceId,
+          ...identity,
+        });
+      }),
+    );
+    // A child ACK is execution evidence, never authority to qualify its own code.
+    return "unknown";
+  }
+
+  private requireLifecycleAdmission(): void {
+    if (this.maintenanceIdentity || this.maintenanceUncertain)
+      throw new Error("Plugin maintenance admission is closed");
+  }
   private readonly plugins = new Map<string, LoadedPlugin>();
   private readonly activationGenerations = new Map<string, number>();
   private readonly pendingEvents = new Set<Promise<void>>();
@@ -394,6 +460,7 @@ export class PluginRuntime {
     canPublish: () => boolean = () => true,
     operation: ActivationOperation = "activate",
   ): Promise<void> {
+    this.requireLifecycleAdmission();
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
     const loaded = await this.loadDirectoryPlugin(
@@ -417,6 +484,7 @@ export class PluginRuntime {
   }
 
   async startBuiltinPlugin(input: { id: string; directory: string }): Promise<void> {
+    this.requireLifecycleAdmission();
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
@@ -1074,6 +1142,17 @@ export class PluginRuntime {
   }): Promise<LoadedPlugin> {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
     const termination = observeChildTermination(child);
+    const instanceId = randomUUID();
+    const executionOwner = new PluginExecutionOwner(
+      instanceId,
+      this.dependencies.nativeMaintenance,
+      () => this.maintenanceIdentity !== null || this.maintenanceUncertain,
+      () => {
+        if (this.dependencies.nativeMaintenance) this.maintenanceUncertain = true;
+      },
+    );
+    childExecutionOwners.set(child, executionOwner);
+    child.on("close", () => executionOwner.terminated());
     const sessionHost = this.sessionHost;
     if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {
@@ -1118,7 +1197,11 @@ export class PluginRuntime {
               return;
             }
             const message = parsed.data;
-            if (message.type === "paseo_frame") {
+            if (message.type === "execution.unknown") {
+              executionOwner.markUnknown();
+            } else if (message.type === "execution.settled") {
+              executionOwner.settled(message.instanceId, message.requestKey);
+            } else if (message.type === "paseo_frame") {
               this.routePluginFrame({
                 session,
                 pluginId,
@@ -1157,6 +1240,7 @@ export class PluginRuntime {
               type: "initialize",
               pluginId,
               pluginDirectory: input.pluginDirectory,
+              hostInstanceId: instanceId,
               appVersion: this.daemonVersion,
               bundle,
               settingsDirectory: this.dependencies.settingsDirectory
@@ -1176,7 +1260,8 @@ export class PluginRuntime {
     }
     loaded = {
       id: pluginId,
-      instanceId: randomUUID(),
+      instanceId,
+      executionOwner,
       clientBundle,
       clientBundleHash: hashClientBundle(clientBundle),
       requirements,
@@ -1263,6 +1348,14 @@ export class PluginRuntime {
   }
 
   private handleChildMessage(loaded: LoadedPlugin, message: PluginProcessMessage): void {
+    if (message.type === "execution.settled") {
+      loaded.executionOwner?.settled(message.instanceId, message.requestKey);
+      return;
+    }
+    if (message.type === "execution.unknown") {
+      loaded.executionOwner?.markUnknown();
+      return;
+    }
     if (message.type === "hooks.changed") {
       const hadSessionOpen = loaded.hooks.includes("agent.open.before");
       loaded.hooks = message.hooks;

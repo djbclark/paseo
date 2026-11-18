@@ -58,6 +58,11 @@
       "types": "./dist/server/lifecycle.d.ts",
       "source": "./src/server/lifecycle.ts",
       "default": "./dist/server/lifecycle.js"
+    },
+    "./internal/activity": {
+      "types": "./dist/server/process-internal/activity.d.ts",
+      "source": "./src/server/process-internal/activity.ts",
+      "default": "./dist/server/process-internal/activity.js"
     }
   },
   "publishConfig": {

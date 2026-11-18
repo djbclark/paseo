@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { installCompilerHelperOwner } from "./compiler-helpers.js";
-import { verifyEnclosingProcess } from "./daemon-verifier.js";
+import { assertEnclosingAuthorityUnchanged, verifyEnclosingProcess } from "./daemon-verifier.js";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const transferred: unknown = workerData?.qualificationPort;
 if (!(transferred instanceof MessagePort))
@@ -20,14 +20,32 @@ const incarnation = randomUUID();
 const queued: string[] = [];
 let initialized = false;
 let stopping = false;
+let compilerRuntime: object | null = null;
 port.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object") return;
   if (Reflect.get(raw, "type") === "qualified.execution.stop") {
     const challenge = Reflect.get(raw, "challenge");
     if (stopping || typeof challenge !== "string" || challenge.length > 128) return;
     stopping = true;
-    void helperOwner
-      .stop()
+    const retire = compilerRuntime
+      ? Reflect.get(compilerRuntime, "retireQualifiedCompilerTasks")
+      : undefined;
+    if (!initialized || typeof retire !== "function") {
+      port.postMessage({ type: "qualified.execution.unknown" });
+      return;
+    }
+    // Fixed real worker export closes task ingress synchronously on this call.
+    // Existing tasks keep their helper ownership until their actual completion.
+    let admitted: Promise<void>;
+    try {
+      admitted = retire();
+      helperOwner.sealAdmission();
+    } catch {
+      port.postMessage({ type: "qualified.execution.unknown" });
+      return;
+    }
+    void admitted
+      .then(() => helperOwner.stop())
       .then(() => {
         port.postMessage({
           type: "qualified.execution.stopped",
@@ -52,8 +70,9 @@ port.on("message", (raw: unknown) => {
   else if (queued.length < 8) queued.push(challenge);
 });
 async function respond(challenge: string): Promise<void> {
-  await verifyEnclosingProcess(root);
+  const current = await verifyEnclosingProcess(root);
   await helperOwner.settled();
+  await assertEnclosingAuthorityUnchanged(current);
   port.postMessage({
     challenge,
     incarnation,
@@ -63,6 +82,9 @@ async function respond(challenge: string): Promise<void> {
     distributionBuildId: initial.manifest.distributionBuildId,
   });
 }
-await import(path.join(root, "compiler-code.mjs"));
+await assertEnclosingAuthorityUnchanged(initial);
+compilerRuntime = await import(path.join(root, "compiler-code.mjs"));
+if (typeof Reflect.get(compilerRuntime, "retireQualifiedCompilerTasks") !== "function")
+  throw new Error("Qualified compiler task retirement unavailable");
 initialized = true;
 for (const challenge of queued.splice(0)) await respond(challenge);

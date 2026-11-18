@@ -1,3 +1,4 @@
+import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, lstat, readdir, readFile, realpath } from "node:fs/promises";
@@ -19,7 +20,10 @@ async function protectedPath(file: string): Promise<void> {
     if (current === path.dirname(current)) break;
   }
 }
-async function bytes(file: string, maximum: number): Promise<Buffer> {
+async function snapshotBytes(
+  file: string,
+  maximum: number,
+): Promise<{ data: Buffer; identity: string }> {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
@@ -40,10 +44,27 @@ async function bytes(file: string, maximum: number): Promise<Buffer> {
       if (before[key] !== after[key] || before[key] !== current[key]) return unsupported();
     }
     if (BigInt(total) !== before.size) return unsupported();
-    return Buffer.concat(chunks);
+    return {
+      data: Buffer.concat(chunks),
+      identity: [
+        before.dev,
+        before.ino,
+        before.mode,
+        before.uid,
+        before.gid,
+        before.size,
+        before.mtimeNs,
+        before.ctimeNs,
+      ]
+        .map(String)
+        .join(":"),
+    };
   } finally {
     await handle.close();
   }
+}
+async function bytes(file: string, maximum: number): Promise<Buffer> {
+  return (await snapshotBytes(file, maximum)).data;
 }
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 async function verifyFile(root: string, file: FileIdentity): Promise<void> {
@@ -66,9 +87,12 @@ async function verifyFile(root: string, file: FileIdentity): Promise<void> {
   )
     return unsupported();
 }
-async function enrollment(
-  root: string,
-): Promise<{ manifestSha256: string; distributionBuildId: string; qualificationSha256: string }> {
+async function enrollment(root: string): Promise<{
+  manifestSha256: string;
+  distributionBuildId: string;
+  qualificationSha256: string;
+  authorityIdentity: string;
+}> {
   const account = userInfo();
   const home = await realpath(account.homedir);
   const file = path.join(home, ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json");
@@ -79,7 +103,8 @@ async function enrollment(
     if (current === home) break;
     if (current === path.dirname(current)) return unsupported();
   }
-  const policy = JSON.parse((await bytes(file, 65536)).toString("utf8"));
+  const snapshot = await snapshotBytes(file, 65536);
+  const policy = JSON.parse(snapshot.data.toString("utf8"));
   if (policy.schemaVersion !== 1 || !Array.isArray(policy.qualifications)) return unsupported();
   const rows = policy.qualifications.filter(
     (entry: { immutableRoot?: string }) => entry.immutableRoot === root,
@@ -87,7 +112,15 @@ async function enrollment(
   if (rows.length !== 1 || rows[0].immutabilityAdapter !== "linux-root-owned-retained-v1")
     return unsupported();
   if (!/^[a-f0-9]{64}$/.test(rows[0].qualificationSha256)) return unsupported();
-  return rows[0];
+  return { ...rows[0], authorityIdentity: `${snapshot.identity}:${digest(snapshot.data)}` };
+}
+/** Final authority CAS after every awaited observation; never a source of capability. */
+export async function assertEnclosingAuthorityUnchanged(observed: {
+  root: string;
+  authorityIdentity: string;
+}): Promise<void> {
+  const current = await enrollment(observed.root);
+  if (current.authorityIdentity !== observed.authorityIdentity) return unsupported();
 }
 export async function observeLinuxProcess(pid: number) {
   const text = await readFile(`/proc/${pid}/stat`, "utf8");
@@ -202,10 +235,12 @@ export async function verifyEnclosingDistribution(root: string) {
     JSON.stringify(manifest.helperInventory) !== JSON.stringify(helperInventory)
   )
     return unsupported();
+  await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });
   return {
     root,
     manifest,
     manifestSha256,
+    authorityIdentity: expected.authorityIdentity,
     closure: Object.freeze({
       runtimeClosureSha256: manifestSha256,
       helperClosureSha256,
@@ -226,6 +261,8 @@ export async function verifyEnclosingProcess(root: string) {
     process.env.ESBUILD_BINARY_PATH !== path.join(root, "runtime/esbuild")
   )
     return unsupported();
+  const managedPolicy = await readFixedManagedPluginPolicy();
+  if (process.env.PASEO_MANAGED_PLUGIN_POLICY !== managedPolicy.path) return unsupported();
   const distribution = await verifyEnclosingDistribution(root);
   const observed = await observeLinuxProcess(process.pid);
   if (observed.executable !== path.join(root, "runtime/node")) return unsupported();
@@ -239,5 +276,6 @@ export async function verifyEnclosingProcess(root: string) {
     const match = line.match(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +(\/.*)$/);
     if (match && !permitted.has(await realpath(match[1]!))) return unsupported();
   }
+  await assertEnclosingAuthorityUnchanged(distribution);
   return { ...distribution, observed };
 }

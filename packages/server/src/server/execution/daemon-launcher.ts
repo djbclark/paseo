@@ -1,3 +1,4 @@
+import { qualifiedManagedEnvironment } from "./managed-policy-environment.js";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { verifyEnclosingDistribution, unsupported } from "./daemon-verifier.js";
@@ -7,7 +8,7 @@ export async function createQualifiedDaemonInvocation(root: string, paseoHome: s
   return Object.freeze({
     command: path.join(root, "runtime/node"),
     args: Object.freeze([path.join(root, "role.cjs")]),
-    env: Object.freeze({ PATH: "/usr/bin:/bin", PASEO_HOME: paseoHome }),
+    env: Object.freeze({ ...(await qualifiedManagedEnvironment()), PASEO_HOME: paseoHome }),
     closure: verified.closure,
   });
 }

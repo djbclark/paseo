@@ -26,9 +26,9 @@ jobs:
       - name: Typecheck server producer
         run: npm run typecheck --workspace=@getpaseo/server
       - name: Focused producer lint
-        run: npm run lint -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs packages/server/scripts/build-qualified-daemon.mjs packages/server/scripts/finalize-qualified-daemon.mjs packages/server/scripts/qualified-daemon.test.mjs packages/server/src/terminal/terminal-worker-launch.ts packages/server/src/terminal/worker-terminal-manager.ts
+        run: npm run lint -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs packages/server/scripts/build-qualified-daemon.mjs packages/server/scripts/finalize-qualified-daemon.mjs packages/server/scripts/qualified-daemon.test.mjs packages/server/scripts/archive-qualified-daemon.mjs packages/server/src/terminal/terminal-worker-launch.ts packages/server/src/terminal/worker-terminal-manager.ts
       - name: Focused formatting
-        run: npm run format:check:files -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs packages/server/scripts/build-qualified-daemon.mjs packages/server/scripts/finalize-qualified-daemon.mjs packages/server/scripts/qualified-daemon.test.mjs packages/server/src/terminal/terminal-worker-launch.ts packages/server/src/terminal/worker-terminal-manager.ts .github/workflows/fork-qualified-host.yml
+        run: npm run format:check:files -- packages/server/src/server/execution packages/server/scripts/build-qualified-host.mjs packages/server/scripts/finalize-qualified-host.mjs packages/server/scripts/qualified-host.test.mjs packages/server/scripts/build-qualified-daemon.mjs packages/server/scripts/finalize-qualified-daemon.mjs packages/server/scripts/qualified-daemon.test.mjs packages/server/scripts/archive-qualified-daemon.mjs packages/server/src/terminal/terminal-worker-launch.ts packages/server/src/terminal/worker-terminal-manager.ts .github/workflows/fork-qualified-host.yml
       - name: Genuine protected-root A/B launches and closed dependency negatives
         run: node --test packages/server/scripts/qualified-host.test.mjs
       - name: Build finite actual daemon distribution (no support inferred from build)
@@ -39,3 +39,11 @@ jobs:
         env:
           QUALIFIED_DAEMON_ROOT: ${{ runner.temp }}/qualified-daemon
         run: node --test packages/server/scripts/qualified-daemon.test.mjs
+      - name: Archive measured build inputs (no qualification or runtime acceptance)
+        run: node packages/server/scripts/archive-qualified-daemon.mjs "$RUNNER_TEMP/qualified-daemon" "$RUNNER_TEMP/qualified-daemon-build-artifact"
+      - name: Retain build-only distribution evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualified-daemon-build-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualified-daemon-build-artifact/
+          if-no-files-found: error

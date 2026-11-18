@@ -1,9 +1,46 @@
-import { build } from "esbuild";
+import { build, version as esbuildVersion } from "esbuild";
+import { createHash } from "node:crypto";
 import { builtinModules, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+const repositoryRoot = path.resolve(packageRoot, "../..");
+const digest = (data) => createHash("sha256").update(data).digest("hex");
+function inputName(file) {
+  if (file.startsWith("qualified-disabled:")) return file;
+  const relative = path.relative(repositoryRoot, path.resolve(repositoryRoot, file));
+  if (path.isAbsolute(relative) || relative.split(path.sep).includes(".."))
+    throw new Error("Input outside finite source tree");
+  return relative.split(path.sep).join("/");
+}
+function inputMetafile(meta, output) {
+  const inputs = Object.fromEntries(
+    Object.entries(meta.inputs).map(([name, value]) => [
+      inputName(name),
+      {
+        ...value,
+        imports: value.imports.map((row) => ({
+          ...row,
+          path: row.external ? row.path : inputName(row.path),
+        })),
+      },
+    ]),
+  );
+  const outputs = Object.fromEntries(
+    Object.values(meta.outputs).map((value) => [
+      output,
+      {
+        ...value,
+        entryPoint: inputName(value.entryPoint),
+        inputs: Object.fromEntries(
+          Object.entries(value.inputs).map(([key, row]) => [inputName(key), row]),
+        ),
+      },
+    ]),
+  );
+  return { inputs, outputs };
+}
 const require = createRequire(import.meta.url);
 const externals = ["node-pty", "sherpa-onnx-node", "onnxruntime-node", "esbuild", "typescript"];
 const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
@@ -37,6 +74,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   ];
   for (const [entry, output, define] of entries) {
     const result = await build({
+      absWorkingDir: repositoryRoot,
       entryPoints: [
         path.isAbsolute(entry)
           ? entry
@@ -77,7 +115,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         )
           throw new Error(`Unknown qualified daemon external: ${imported.path}`);
       }
-    allInputs[output] = result.metafile;
+    allInputs[output] = inputMetafile(result.metafile, output);
   }
   // Finite installed dependency closure, materialized without workspace symlinks.
   const copied = new Map();
@@ -139,12 +177,32 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     path.join(outDir, "shell-integration"),
     { recursive: true },
   );
+  await cp(path.join(packageRoot, "package.json"), path.join(outDir, "package.json"));
+  const sourceInputs = [];
+  const inputNames = [
+    ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
+  ].sort();
+  for (const name of inputNames) {
+    const raw = name.startsWith("qualified-disabled:")
+      ? Buffer.from('throw new Error("Optional native accelerator disabled");')
+      : await readFile(path.join(repositoryRoot, name));
+    sourceInputs.push({ path: name, bytes: raw.length, sha256: digest(raw) });
+  }
   await writeFile(
     path.join(outDir, "inputs.json"),
     JSON.stringify({
       schemaVersion: 2,
       distributionBuildId,
       metafiles: allInputs,
+      sourceInputs,
+      packageLockSha256: digest(await readFile(path.join(repositoryRoot, "package-lock.json"))),
+      toolchain: {
+        node: process.version,
+        versions: process.versions,
+        esbuild: esbuildVersion,
+        platform: process.platform,
+        arch: process.arch,
+      },
       dependencies: Object.fromEntries(copied),
     }),
   );

@@ -1,3 +1,4 @@
+import { qualifiedManagedEnvironment } from "./managed-policy-environment.js";
 import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
 import {
@@ -12,13 +13,23 @@ import { Worker, MessageChannel } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { qualifiedBindings } from "./qualified-bindings.js";
-import { observeLinuxProcess, verifyEnclosingProcess, unsupported } from "./daemon-verifier.js";
+import {
+  assertEnclosingAuthorityUnchanged,
+  observeLinuxProcess,
+  verifyEnclosingProcess,
+  unsupported,
+} from "./daemon-verifier.js";
 import type { QualifiedExecutionBinding } from "./types.js";
-import type { QualifiedDaemonOwner, OwnedObservation } from "./daemon-types.js";
+import type {
+  QualifiedDaemonOwner,
+  OwnedObservation,
+  QualifiedDaemonObservation,
+} from "./daemon-types.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
 const owners = new WeakSet<object>();
 const bindings = new WeakSet<object>();
+const observations = new WeakMap<object, () => QualifiedDaemonObservation>();
 let instance: Promise<QualifiedDaemonOwner> | null = null;
 let executingOwner: QualifiedDaemonOwner | null = null;
 interface HandleRecord {
@@ -152,6 +163,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         )
           return unsupported();
         for (const observe of observers.values()) await observe();
+        await assertEnclosingAuthorityUnchanged(current);
         fresh = true;
       } catch (error) {
         failed = true;
@@ -204,7 +216,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       const child = spawn(
         path.join(root, "runtime/node"),
         [path.join(root, "plugin-child-entry.mjs")],
-        { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
+        { env: await qualifiedManagedEnvironment(), stdio: ["ignore", "pipe", "pipe", "ipc"] },
       );
       child.once("error", () => {
         failed = true;
@@ -292,7 +304,10 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           "--runtime",
           root,
         ],
-        { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"] },
+        {
+          env: await qualifiedManagedEnvironment(),
+          stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"],
+        },
       );
       try {
         const ready = await new Promise<string>((resolve, reject) => {
@@ -374,7 +389,10 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       const { port1, port2 } = new MessageChannel();
       const worker = new Worker(path.join(root, "compiler-entry.mjs"), {
         execArgv: [],
-        env: { PATH: "/usr/bin:/bin", ESBUILD_BINARY_PATH: path.join(root, "runtime/esbuild") },
+        env: {
+          ...(await qualifiedManagedEnvironment()),
+          ESBUILD_BINARY_PATH: path.join(root, "runtime/esbuild"),
+        },
         workerData: { qualificationPort: port2 },
         transferList: [port2],
       });
@@ -492,7 +510,46 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       }
     },
   });
+  await assertEnclosingAuthorityUnchanged(initial);
   installQualifiedPluginHelperGuard();
+  const artifact = initial.manifest.files.find((entry) => entry.path === "daemon.mjs");
+  if (!artifact) return unsupported();
+  observations.set(owner, () => {
+    assertFresh();
+    const ownedHandles = [...observers.keys()].map((handle) => {
+      const record = handles.get(handle);
+      if (!record) return unsupported();
+      const actual = handle as ChildProcess | Worker;
+      assertOwnedExecutionHandle(actual, record.kind, record.incarnation);
+      return {
+        kind: record.kind,
+        pid: actual instanceof Worker ? process.pid : actual.pid!,
+        threadId: actual instanceof Worker ? actual.threadId : null,
+        incarnation: record.incarnation,
+      };
+    });
+    return {
+      schemaVersion: 1,
+      role: "daemon",
+      distributionBuildId: initial.manifest.distributionBuildId,
+      manifestSha256: initial.manifestSha256,
+      pid: process.pid,
+      incarnation,
+      bootId: initial.observed.bootId,
+      osBirthIdentity: initial.observed.birth,
+      executable: initial.observed.executable,
+      executableIdentity: initial.observed.image,
+      evidenceDigest,
+      closure: initial.closure,
+      namespaces: [...namespaces.keys()].sort().map((bindingKey) => ({
+        bindingKey,
+        moduleBuildId: `${initial.manifest.distributionBuildId}:daemon`,
+        artifactSha256: artifact.sha256,
+        qualifiedOrigin: `${root}/daemon.mjs#${bindingKey}`,
+      })),
+      ownedHandles,
+    };
+  });
   owners.add(owner);
   bindings.add(binding);
   executingOwner = owner;
@@ -528,4 +585,12 @@ export function isQualifiedDaemonBinding(value: unknown): value is QualifiedExec
 export function assertQualifiedDaemonEvaluation(): void {
   if (!executingOwner || !owners.has(executingOwner)) return unsupported();
   executingOwner.assertFresh();
+}
+
+/** Data-only view from the same executing private owner/table; never deserializes a brand. */
+export function getQualifiedDaemonObservation(owner: unknown): QualifiedDaemonObservation {
+  if (!isQualifiedDaemonOwner(owner)) return unsupported();
+  const observe = observations.get(owner);
+  if (!observe) return unsupported();
+  return structuredClone(observe());
 }

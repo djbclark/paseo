@@ -1,3 +1,4 @@
+import { isQualifiedDaemonOwner } from "../server/execution/daemon-owner.js";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { buildSelfNodeCommand } from "../server/paseo-env.js";
@@ -28,9 +29,15 @@ export async function launchTerminalWorker(input: {
   paseoHome: string;
   paseoVersion: string;
   timeoutMs?: number;
+  qualifiedDaemonOwner?: unknown;
   /** Defaults to the copy of this installation's bundle (source in dev). */
   entry?: TerminalWorkerEntry;
 }): Promise<{ record: TerminalWorkerRecord; recordPath: string }> {
+  if (input.qualifiedDaemonOwner !== undefined) {
+    if (!isQualifiedDaemonOwner(input.qualifiedDaemonOwner))
+      throw new TerminalWorkerLaunchError("Qualified terminal owner unavailable");
+    return input.qualifiedDaemonOwner.launchTerminalWorker(input);
+  }
   const recordId = randomUUID();
   ensurePrivateDirectory(terminalWorkerDirectory(input.paseoHome));
   const entry = input.entry ?? resolveTerminalWorkerEntry(input);

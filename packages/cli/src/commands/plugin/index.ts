@@ -3,18 +3,29 @@ import { expandUserPath } from "../../classify.js";
 import { createInterface } from "node:readline/promises";
 import { reviewPluginUpdates, type UpdateOutcome } from "./update.js";
 import { Command } from "commander";
-import type { PluginListItem, PluginLogEntry } from "@getpaseo/protocol/messages";
+import type {
+  ManagedPluginStatus,
+  PluginListItem,
+  PluginLogEntry,
+} from "@getpaseo/protocol/messages";
 import {
   formatPluginSourceReference,
   parsePluginSourceReference,
   formatPluginIdentity,
 } from "@getpaseo/protocol/plugin-source-reference";
-import type { CommandOptions, ListResult, OutputSchema, SingleResult } from "../../output/index.js";
+import type {
+  AnyCommandResult,
+  CommandOptions,
+  ListResult,
+  OutputSchema,
+  SingleResult,
+} from "../../output/index.js";
 import { withOutput } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
 import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
 import {
   withManagedPluginClient,
+  withManagedPluginStatusClient,
   withPluginLogsClient,
   withPluginUpdateClient,
   withPluginManagementClient,
@@ -258,8 +269,57 @@ export async function runPluginRecoverCommand(
   return { type: "single", data, schema: pluginSchema };
 }
 
+function managedStatusResult<T extends ManagedPluginStatus>(data: T): SingleResult<T> {
+  const schema: OutputSchema<T> = {
+    idField: "pluginId",
+    columns: [
+      { header: "PLUGIN", field: "pluginId", width: 20 },
+      { header: "CONSISTENCY", field: "consistency", width: 16 },
+      {
+        header: "PHASE",
+        field: (status) =>
+          status.consistency === "coherent" ? status.journal.phase : status.reason,
+        width: 22,
+      },
+      {
+        header: "JOURNAL_GENERATION",
+        field: (status) =>
+          status.consistency === "coherent" ? String(status.journal.generation) : "-",
+        width: 20,
+      },
+      {
+        header: "LOADED_GENERATION",
+        field: (status) =>
+          status.consistency === "coherent"
+            ? String(status.loaded?.activationGeneration ?? "-")
+            : "-",
+        width: 20,
+      },
+    ],
+  };
+  return { type: "single", data, schema };
+}
+
+export async function runManagedPluginStatusCommand(
+  pluginId: string,
+  options: PluginOptions,
+  _command: Command,
+): Promise<AnyCommandResult<ManagedPluginStatus>> {
+  const data = await withManagedPluginStatusClient(options.daemonTarget, (client) =>
+    client.getManagedPluginStatus(pluginId),
+  );
+  if (data.consistency === "coherent") return managedStatusResult(data);
+  return managedStatusResult(data);
+}
+
 export function createPluginCommand(): Command {
   const plugin = new Command("plugin").description("Manage trusted, unsandboxed plugins");
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("managed-status")
+      .description("Read a bounded coherent managed journal/runtime snapshot")
+      .argument("<id>"),
+  ).action(withOutput<ManagedPluginStatus, [string]>(runManagedPluginStatusCommand));
   addJsonAndDaemonHostOptions(
     plugin
       .command("recover")

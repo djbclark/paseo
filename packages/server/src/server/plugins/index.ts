@@ -1,3 +1,4 @@
+import { boundedStatusRead, observeManagedStatus } from "./managed-status.js";
 import {
   samePluginMaintenanceIdentity,
   type NativePluginAdmission,
@@ -18,6 +19,7 @@ import type pino from "pino";
 import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import {
   PluginIdSchema,
+  type ManagedPluginStatus,
   type PluginLogEntry,
   type PluginListItem,
   type PluginSource,
@@ -93,6 +95,7 @@ interface NativeUpdateActivation {
 const BUILTIN_PROVIDER_ID_SET: ReadonlySet<string> = new Set(BUILTIN_PROVIDER_IDS);
 
 interface PluginRuntimePort {
+  getObservationEpoch?: PluginRuntime["getObservationEpoch"];
   readonly maintenance?: PluginMaintenancePort;
   subscribeSessionOpenChanges?: PluginRuntime["subscribeSessionOpenChanges"];
   isToolPluginAvailable?: PluginRuntime["isToolPluginAvailable"];
@@ -193,6 +196,7 @@ export class PluginService {
     { kind: "disable" | "remove"; completion: Promise<void> }
   >();
   private started = false;
+  private starting = false;
   private readonly settingsListeners = new Set<(pluginId: string, settingsId: string) => void>();
 
   constructor(
@@ -311,35 +315,62 @@ export class PluginService {
     // An unsupported restored hold keeps plugin code uninitialized. No early END for startup.
     if (this.maintenanceIdentity || this.maintenanceUncertain) return;
     if (this.started) return;
-    this.started = true;
-    const config = this.configStore.get();
-    this.globalStartsBlocked = config.pluginsEnabled !== true;
-    await this.builtinPlugins.load(async (plugin) => {
-      try {
-        await this.runtime.startBuiltinPlugin?.(plugin);
-        await this.publishProviderRegistrations(plugin.id, plugin.directory);
-        this.publishUsageSources(plugin.id);
-      } catch (error) {
-        this.logger.error({ err: error, pluginId: plugin.id }, "Failed to start built-in plugin");
+    this.starting = true;
+    try {
+      this.started = true;
+      const config = this.configStore.get();
+      this.globalStartsBlocked = config.pluginsEnabled !== true;
+      await this.builtinPlugins.load(async (plugin) => {
+        try {
+          await this.runtime.startBuiltinPlugin?.(plugin);
+          await this.publishProviderRegistrations(plugin.id, plugin.directory);
+          this.publishUsageSources(plugin.id);
+        } catch (error) {
+          this.logger.error({ err: error, pluginId: plugin.id }, "Failed to start built-in plugin");
+        }
+      });
+      if (config.pluginsEnabled === true) {
+        let earlierPublished: Promise<unknown> = Promise.resolve();
+        await Promise.all(
+          Object.entries(config.plugins ?? {})
+            .filter(([, source]) => source.enabled !== false)
+            .map(async ([pluginId]) => {
+              const publishTurn = earlierPublished;
+              const starting = this.startConfigured(pluginId, publishTurn);
+              earlierPublished = Promise.all([publishTurn, starting]);
+              await starting;
+              this.notify(pluginId);
+            }),
+        );
       }
-    });
-    if (config.pluginsEnabled === true) {
-      let earlierPublished: Promise<unknown> = Promise.resolve();
-      await Promise.all(
-        Object.entries(config.plugins ?? {})
-          .filter(([, source]) => source.enabled !== false)
-          .map(async ([pluginId]) => {
-            const publishTurn = earlierPublished;
-            const starting = this.startConfigured(pluginId, publishTurn);
-            earlierPublished = Promise.all([publishTurn, starting]);
-            await starting;
-            this.notify(pluginId);
-          }),
-      );
+      this.configStore.onFieldChange("pluginsEnabled", (value) => {
+        this.handleGlobalSwitch(value === true);
+      });
+    } finally {
+      this.starting = false;
     }
-    this.configStore.onFieldChange("pluginsEnabled", (value) => {
-      this.handleGlobalSwitch(value === true);
-    });
+  }
+
+  getManagedPluginStatus(pluginId: string): Promise<ManagedPluginStatus> {
+    PluginIdSchema.parse(pluginId);
+    const { turn, result } = boundedStatusRead(pluginId, this.lifecycle, () =>
+      observeManagedStatus(pluginId, this.dependencies.activationPolicy, () => {
+        const config = this.configStore.get();
+        return {
+          configIdentity: config,
+          registration: config.plugins?.[pluginId],
+          loaded: this.runtime.getLoadedReceipt?.(pluginId),
+          epoch: this.runtime.getObservationEpoch?.(),
+          busy: this.starting || this.pendingOperations.has(pluginId),
+        };
+      }),
+    );
+    // Read turns serialize with mutations but require no normal-work admission while held.
+    this.lifecycle = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async listPlugins(): Promise<PluginListItem[]> {

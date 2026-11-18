@@ -1,3 +1,5 @@
+import { execFile as nativeExecFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -86,4 +88,28 @@ it("caller abort cannot settle actual helper activity before child close", async
     await operation.catch(() => undefined);
     await expect.poll(() => settled, { timeout: 5000 }).toBe(true);
   }
+});
+
+it("sealed startup helper restriction applies before ALS and cannot be replaced", async () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import { installQualifiedHelperAdmission } from '@getpaseo/plugin/internal/activity';
+    import { spawnProcess, execCommand } from '@getpaseo/plugin/server';
+    let calls = 0;
+    installQualifiedHelperAdmission(() => { calls++; throw new Error('qualified zero-helper'); });
+    assert.throws(() => installQualifiedHelperAdmission(() => {}), /already installed/);
+    assert.throws(() => spawnProcess(process.execPath, ['-e', 'process.exit(99)']), /qualified zero-helper/);
+    await assert.rejects(execCommand(process.execPath, ['-e', 'process.exit(99)']), /qualified zero-helper/);
+    assert.equal(calls, 2);
+    process.stdout.write('helper-guard-verified');
+  `;
+  const { stdout } = await promisify(nativeExecFile)(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    {
+      cwd: new URL("../../../", import.meta.url),
+      env: { PATH: process.env.PATH },
+    },
+  );
+  expect(stdout).toBe("helper-guard-verified");
 });

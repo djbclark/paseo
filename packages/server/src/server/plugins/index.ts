@@ -1104,7 +1104,8 @@ export class PluginService {
     } catch (error) {
       throw new Error("Update failed; recovery required", { cause: error });
     } finally {
-      await managedSources.discard(candidate);
+      if (this.configStore.get().plugins?.[pluginId]?.path !== candidate.directory)
+        await managedSources.discard(candidate);
       this.notify(pluginId);
     }
   }

@@ -195,7 +195,12 @@ export async function retainSystemClosure(root) {
     }
   }
   async function discover(row) {
-    const description = describeElf(row.bytes);
+    let description;
+    try {
+      description = describeElf(row.bytes);
+    } catch (error) {
+      throw new Error(`ELF inventory refused member ${row.member}`, { cause: error });
+    }
     elfs.set(row.member, { member: row.member, ...description });
     if (elfs.size > 512) throw new Error("System ELF bound");
     for (const name of description.needed) {

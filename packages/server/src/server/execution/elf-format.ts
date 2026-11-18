@@ -135,12 +135,9 @@ function applyDynamic(
     if (entry.tag === 15n) result.rpath.push(...value.split(":"));
     if (entry.tag === 29n) result.runpath.push(...value.split(":"));
   }
-  if (
-    result.needed.length > 128 ||
-    result.rpath.some((row) => !row) ||
-    result.runpath.some((row) => !row)
-  )
-    return fail();
+  if (result.needed.length > 128) return fail();
+  if (result.rpath.some((row) => !row) || result.runpath.some((row) => !row))
+    throw new Error("Unsupported ELF current-directory search entry");
 }
 export interface LoaderCacheEntry {
   soname: string;

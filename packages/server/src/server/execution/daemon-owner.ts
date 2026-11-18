@@ -7,7 +7,7 @@ import {
 } from "../../terminal/terminal-worker-record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { Worker, MessageChannel, type MessagePort } from "node:worker_threads";
+import { Worker, MessageChannel } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { qualifiedBindings } from "./qualified-bindings.js";
@@ -25,10 +25,12 @@ interface HandleRecord {
   incarnation: string;
   alive: boolean;
 }
-function exchange(
-  port: Pick<MessagePort, "on" | "off" | "postMessage">,
-  challenge: string,
-): Promise<OwnedObservation> {
+interface ObservationPort {
+  on(event: "message", listener: (value: unknown) => void): void;
+  off(event: "message", listener: (value: unknown) => void): void;
+  postMessage(message: { type: string; challenge: string }): void;
+}
+function exchange(port: ObservationPort, challenge: string): Promise<OwnedObservation> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -47,10 +49,14 @@ function exchange(
     port.postMessage({ type: "qualified.execution.challenge", challenge });
   });
 }
-function childPort(child: ChildProcess): Pick<MessagePort, "on" | "off" | "postMessage"> {
+function childPort(child: ChildProcess): ObservationPort {
   return {
-    on: child.on.bind(child) as MessagePort["on"],
-    off: child.off.bind(child) as MessagePort["off"],
+    on: (event, listener) => {
+      child.on(event, listener);
+    },
+    off: (event, listener) => {
+      child.off(event, listener);
+    },
     postMessage: (message) => {
       child.send(message);
     },
@@ -70,6 +76,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   const namespaces = new Map(Object.entries(qualifiedBindings));
   const incarnation = `${initial.observed.bootId}:${initial.observed.birth}:${randomUUID()}`;
   const handles = new WeakMap<object, HandleRecord>();
+  const observers = new Map<object, () => Promise<void>>();
   const terminals = new WeakMap<object, { child: ChildProcess; incarnation: string }>();
   let fresh = true;
   let failed = false;
@@ -107,6 +114,11 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   ): void {
     assertFresh();
     const record = handles.get(handle);
+    if (handle instanceof Worker) {
+      if (handle.threadId < 0) return unsupported();
+    } else if (handle.exitCode !== null || handle.signalCode !== null || !handle.connected) {
+      return unsupported();
+    }
     if (
       !record ||
       !record.alive ||
@@ -129,6 +141,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           JSON.stringify(current.closure) !== JSON.stringify(initial.closure)
         )
           return unsupported();
+        for (const observe of observers.values()) await observe();
         fresh = true;
       } catch (error) {
         failed = true;
@@ -157,7 +170,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       return unsupported();
     if (kind === "compiler" && !Number.isInteger(observed.threadId)) return unsupported();
   }
-  const owner: QualifiedDaemonOwner = Object.freeze({
+  const owner = Object.freeze<QualifiedDaemonOwner>({
     binding,
     evidenceDigest,
     root,
@@ -169,7 +182,9 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       assertFresh();
       if (
         expectedIncarnation !== incarnation ||
-        JSON.stringify(expected) !== JSON.stringify(initial.closure)
+        expected.runtimeClosureSha256 !== initial.closure.runtimeClosureSha256 ||
+        expected.helperClosureSha256 !== initial.closure.helperClosureSha256 ||
+        expected.qualificationSha256 !== initial.closure.qualificationSha256
       )
         return unsupported();
     },
@@ -195,9 +210,19 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         };
         await refresh();
         assertFresh();
+        if (child.exitCode !== null || child.signalCode !== null || !child.connected)
+          return unsupported();
         handles.set(child, record);
+        observers.set(child, async () => {
+          const nonce = randomUUID();
+          const result = await exchange(port, nonce);
+          const now = await observeLinuxProcess(child.pid!);
+          if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
+          accept(result, nonce, "plugin-child", now, record.incarnation);
+        });
         child.once("close", () => {
           record.alive = false;
+          observers.delete(child);
         });
         return Object.freeze({
           child,
@@ -299,10 +324,20 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         };
         await refresh();
         assertFresh();
+        if (child.exitCode !== null || child.signalCode !== null || !child.connected)
+          return unsupported();
         handles.set(child, owned);
         terminals.set(record, { child, incarnation: owned.incarnation });
+        observers.set(child, async () => {
+          const challenge = randomUUID();
+          const reply = await exchange(childPort(child), challenge);
+          const now = await observeLinuxProcess(child.pid!);
+          if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
+          accept(reply, challenge, "terminal-worker", now, owned.incarnation);
+        });
         child.once("close", () => {
           owned.alive = false;
+          observers.delete(child);
         });
         return { record, recordPath };
       } catch (error) {
@@ -340,10 +375,18 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         };
         await refresh();
         assertFresh();
+        if (worker.threadId < 0) return unsupported();
         handles.set(worker, record);
+        observers.set(worker, async () => {
+          const challenge = randomUUID();
+          const reply = await exchange(port1, challenge);
+          accept(reply, challenge, "compiler", { pid: process.pid }, record.incarnation);
+          if (reply.threadId !== worker.threadId) return unsupported();
+        });
         worker.once("exit", () => {
           record.alive = false;
           port1.close();
+          observers.delete(worker);
         });
         return Object.freeze({
           worker,

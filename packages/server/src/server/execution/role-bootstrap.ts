@@ -17,6 +17,21 @@ process.on("message", (raw: unknown) => {
     challenge: raw.challenge,
     ...observation,
     bindingProbe: probe,
+    rejectedPrivateImports: [
+      "@getpaseo/plugin/internal/activity",
+      "@getpaseo/client/internal/daemon-client",
+      "@getpaseo/protocol/binary-frames/index",
+      "node:child_process",
+      "./execution/qualified-host.js",
+    ].every((name) => {
+      if (!observation.supported) return true;
+      try {
+        host.qualifiedRuntimeRequire(name);
+        return false;
+      } catch {
+        return true;
+      }
+    }),
     rejectedRelabel: local
       ? !host.isQualifiedExecutionBinding(local, "daemon") &&
         !host.isQualifiedExecutionBinding(local, "supervisor") &&

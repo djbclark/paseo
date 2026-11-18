@@ -38,6 +38,7 @@ port.on("message", (raw: unknown) => {
   else if (queued.length < 8) queued.push(challenge);
 });
 async function respond(challenge: string): Promise<void> {
+  await verifyEnclosingProcess(root);
   await helperOwner.settled();
   (port as MessagePort).postMessage({
     challenge,

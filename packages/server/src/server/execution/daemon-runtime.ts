@@ -8,10 +8,7 @@ export async function startQualifiedDaemon(): Promise<void> {
   const home = resolvePaseoHome();
   const config = loadConfig(home);
   const logger = createRootLogger({ log: config.log }, { paseoHome: home });
-  const dependencies: PaseoDaemonDependencies = {};
-  // Native owner adds this trusted typed dependency on the integration head.
-  // It is never sourced from config/environment or serialized observations.
-  Object.assign(dependencies, { qualifiedDaemonOwner: owner });
+  const dependencies: PaseoDaemonDependencies = { qualifiedDaemonOwner: owner };
   const daemon = await createPaseoDaemon(config, logger, dependencies);
   await owner.refresh();
   owner.assertFresh();

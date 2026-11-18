@@ -103,6 +103,11 @@ int main(int argc, char **argv) {
     if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) < 0) _exit(126);
     execute_git(argv[1], argv[2], ready[1], control[0]);
   }
+  /* Only the actual Git owns standard IO; retaining a parent read end would
+   * hide Git stdin closure/backpressure from the original execFile caller. */
+  close(0);
+  close(1);
+  close(2);
   owned_leader = child;
   if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) < 0) return 126;
   (void)forward_request(child);

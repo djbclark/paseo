@@ -1,12 +1,29 @@
 // Real native protocol/behavior checks, not a protected helper profile or daemon proof.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm, open, readFile, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  rm,
+  open,
+  readFile,
+  realpath,
+  lstat,
+  unlink,
+} from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { buildQualifiedGit } from "./build-qualified-git.mjs";
+import {
+  observeFiniteGitConfig,
+  assertFiniteGitConfigUnchanged,
+} from "../dist/server/server/execution/finite-git-config.js";
+
+if (process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true")
+  throw new Error("Privileged disposable source fixtures run only in Linux GitHub CI");
 
 test(
   "actual Git FD gate preserves NUL/stdin/exit1 and drains naturally on control loss",
@@ -198,6 +215,181 @@ int main(void) {
     } finally {
       execFileSync("sudo", ["-k", "-n", "/usr/bin/rm", "-rf", retained]);
       await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "protected meaningful original Git configuration is observed without minting execution support",
+  { timeout: 60000 },
+  async () => {
+    const stage = await mkdtemp(path.join(tmpdir(), "paseo-config-source-"));
+    const root = `/opt/paseo-config-source-${process.pid}`;
+    const sudo = (command, args) => execFileSync("sudo", ["-k", "-n", command, ...args]);
+    try {
+      await mkdir(path.join(stage, "repository"));
+      await mkdir(path.join(stage, "config"));
+      await mkdir(path.join(stage, "hooks"));
+      execFileSync("/usr/bin/git", ["init", "--quiet", path.join(stage, "repository")]);
+      await writeFile(
+        path.join(stage, "config/system"),
+        `[core]\nfsmonitor = false\nhooksPath = ${root}/hooks\n[safe]\ndirectory = ${root}/repository\n`,
+      );
+      await writeFile(path.join(stage, "config/global"), "[include]\npath = include.conf\n");
+      await writeFile(
+        path.join(stage, "config/include.conf"),
+        `[core]\nexcludesFile = ${root}/config/excludes\n`,
+      );
+      await writeFile(path.join(stage, "config/excludes"), "external.txt\n");
+      await writeFile(path.join(stage, "repository/.worktreeinclude"), "*.txt\n");
+      await writeFile(path.join(stage, "repository/.gitignore"), "local.txt\n");
+      for (const name of ["external.txt", "local.txt", "keep.txt"])
+        await writeFile(path.join(stage, "repository", name), name);
+      sudo("/usr/bin/install", ["-d", "-m", "0755", root]);
+      sudo("/usr/bin/cp", ["-R", `${stage}/.`, `${root}/`]);
+      sudo("/usr/bin/chmod", ["-R", "a-w", root]);
+      const environment = {
+        HOME: userInfo().homedir,
+        PATH: "/usr/bin:/bin",
+        LC_ALL: "C",
+        GIT_CONFIG_SYSTEM: `${root}/config/system`,
+        GIT_CONFIG_GLOBAL: `${root}/config/global`,
+      };
+      const records = async () =>
+        Promise.all(
+          [
+            "config/system",
+            "config/global",
+            "config/include.conf",
+            "config/excludes",
+            "repository/.git/config",
+            "repository/.git/HEAD",
+          ]
+            .sort()
+            .map(async (relative) => {
+              const bytes = await readFile(path.join(root, relative));
+              return {
+                path: path.join(root, relative),
+                mode: 292,
+                size: bytes.length,
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+              };
+            }),
+        );
+      const recipe = {
+        contract: "worktree-include-git-config-v1",
+        distributionManifestSha256: "a".repeat(64),
+        systemClosureSha256: "b".repeat(64),
+        tools: {
+          git: "runtime/git",
+          observer: "runtime/git-observer",
+          gate: "runtime/git-gate.so",
+        },
+        argv: {
+          lsFiles: ["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude", "-z"],
+          checkIgnore: ["check-ignore", "--stdin", "-z"],
+        },
+        repository: {
+          cwd: `${root}/repository`,
+          gitDirectory: `${root}/repository/.git`,
+          layout: "direct-dotgit-v1",
+        },
+        environment,
+        configRoots: {
+          system: environment.GIT_CONFIG_SYSTEM,
+          global: environment.GIT_CONFIG_GLOBAL,
+          local: `${root}/repository/.git/config`,
+        },
+        includes: [{ from: environment.GIT_CONFIG_GLOBAL, to: `${root}/config/include.conf` }],
+        files: await records(),
+        protectedAbsent: [
+          "commondir",
+          "config.worktree",
+          "index",
+          "objects/info/alternates",
+          "shallow",
+        ]
+          .map((name) => `${root}/repository/.git/${name}`)
+          .sort(),
+      };
+      const proof = await observeFiniteGitConfig(recipe);
+      assertFiniteGitConfigUnchanged(proof);
+      assert.throws(() => assertFiniteGitConfigUnchanged({ contract: "protected-git-config-v1" }));
+      const matches = execFileSync("/usr/bin/git", recipe.argv.lsFiles, {
+        cwd: recipe.repository.cwd,
+        env: environment,
+      });
+      const ignored = execFileSync("/usr/bin/git", recipe.argv.checkIgnore, {
+        cwd: recipe.repository.cwd,
+        env: environment,
+        input: matches,
+      });
+      assert.deepEqual(ignored.toString().split("\0").filter(Boolean).sort(), [
+        "external.txt",
+        "local.txt",
+      ]);
+      sudo("/usr/bin/chmod", ["0777", `${root}/config`]);
+      await assert.rejects(() => observeFiniteGitConfig(recipe));
+      sudo("/usr/bin/chmod", ["0555", `${root}/config`]);
+      await observeFiniteGitConfig(recipe); // Restore a real supported component baseline.
+      sudo("/usr/bin/chmod", ["0777", `${root}/repository/.git`]);
+      await assert.rejects(() => observeFiniteGitConfig(recipe));
+      sudo("/usr/bin/chmod", ["0555", `${root}/repository/.git`]);
+      await observeFiniteGitConfig(recipe);
+      const changed = path.join(stage, "changed");
+      await writeFile(changed, '[includeIf "gitdir:*"]\npath = include.conf\n');
+      sudo("/usr/bin/install", ["-m", "0444", changed, `${root}/config/global`]);
+      await assert.rejects(async () =>
+        observeFiniteGitConfig({ ...recipe, files: await records() }),
+      );
+      await writeFile(changed, "[include]\npath = include.conf\n");
+      sudo("/usr/bin/install", ["-m", "0444", changed, `${root}/config/global`]);
+      await observeFiniteGitConfig(recipe);
+      await writeFile(
+        changed,
+        `[core]\nfsmonitor = true\nhooksPath = ${root}/hooks\n[safe]\ndirectory = ${root}/repository\n`,
+      );
+      sudo("/usr/bin/install", ["-m", "0444", changed, `${root}/config/system`]);
+      await assert.rejects(async () =>
+        observeFiniteGitConfig({ ...recipe, files: await records() }),
+      );
+      assert.throws(() => assertFiniteGitConfigUnchanged(proof));
+    } finally {
+      sudo("/usr/bin/rm", ["-rf", root]);
+      await rm(stage, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "synchronous prelaunch policy CAS refuses a real FIFO in a bounded subprocess",
+  { timeout: 10000 },
+  async () => {
+    const home = await realpath(userInfo().homedir);
+    const authority = path.join(
+      home,
+      ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json",
+    );
+    await assert.rejects(() => lstat(authority), { code: "ENOENT" });
+    await mkdir(path.dirname(authority), { recursive: true, mode: 0o700 });
+    execFileSync("/usr/bin/mkfifo", ["-m", "0600", authority]);
+    const original = await lstat(authority);
+    try {
+      const module = new URL("../dist/server/server/execution/daemon-verifier.js", import.meta.url);
+      const program = `import {assertEnclosingAuthorityUnchangedSync} from ${JSON.stringify(module.href)};
+      let refused=false;
+      try { assertEnclosingAuthorityUnchangedSync({root:"/not-enrolled",authorityIdentity:"not-a-grant"}); }
+      catch(error) { if(error.message!=="Enclosing daemon execution unsupported") throw error; refused=true; }
+      if(!refused) throw new Error("FIFO was accepted");`;
+      execFileSync(process.execPath, ["--input-type=module", "-e", program], {
+        timeout: 3000,
+        env: { PATH: "/usr/bin:/bin", HOME: "/ignored-ambient-home" },
+      });
+    } finally {
+      const current = await lstat(authority);
+      assert.equal(current.ino, original.ino);
+      assert.equal(current.dev, original.dev);
+      await unlink(authority);
     }
   },
 );

@@ -5,7 +5,15 @@ import builtinBindingsRecipe from "./builtin-bindings-recipe.json" with { type: 
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import {
+  constants,
+  openSync,
+  closeSync,
+  readSync,
+  fstatSync,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
 import { open, lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
@@ -127,6 +135,71 @@ export async function assertEnclosingAuthorityUnchanged(observed: {
 }): Promise<void> {
   const current = await enrollment(observed.root);
   if (current.authorityIdentity !== observed.authorityIdentity) return unsupported();
+}
+/** Bounded final CAS for the SDK's synchronous ChildProcess launch contract. */
+export function assertEnclosingAuthorityUnchangedSync(observed: {
+  root: string;
+  authorityIdentity: string;
+}): void {
+  const account = userInfo(),
+    home = realpathSync(account.homedir);
+  const file = path.join(home, ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json");
+  for (let current = file; ; current = path.dirname(current)) {
+    const info = lstatSync(current);
+    if (info.isSymbolicLink() || (info.uid !== account.uid && info.uid !== 0) || info.mode & 0o022)
+      return unsupported();
+    if (current === home) break;
+    if (current === path.dirname(current)) return unsupported();
+  }
+  if (snapshotAuthoritySync(file) !== observed.authorityIdentity) return unsupported();
+}
+function snapshotAuthoritySync(file: string): string {
+  const descriptor = openSync(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size > 65536n) return unsupported();
+    const buffer = Buffer.alloc(65537);
+    let total = 0;
+    for (;;) {
+      const count = readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (!count) break;
+      total += count;
+      if (total > 65536 || BigInt(total) > before.size) return unsupported();
+    }
+    const after = fstatSync(descriptor, { bigint: true }),
+      current = lstatSync(file, { bigint: true });
+    for (const key of [
+      "dev",
+      "ino",
+      "mode",
+      "uid",
+      "gid",
+      "nlink",
+      "size",
+      "mtimeNs",
+      "ctimeNs",
+    ] as const)
+      if (before[key] !== after[key] || before[key] !== current[key]) return unsupported();
+    const identity = [
+      before.dev,
+      before.ino,
+      before.mode,
+      before.uid,
+      before.gid,
+      before.size,
+      before.mtimeNs,
+      before.ctimeNs,
+    ]
+      .map(String)
+      .join(":");
+    if (BigInt(total) !== before.size) return unsupported();
+    return `${identity}:${digest(buffer.subarray(0, total))}`;
+  } finally {
+    closeSync(descriptor);
+  }
 }
 export async function observeLinuxProcess(pid: number) {
   const text = await readFile(`/proc/${pid}/stat`, "utf8");

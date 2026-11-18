@@ -92,6 +92,9 @@ test("descriptive builtin data and wrong role cannot mint an original instance",
     refresh: async () => {},
   };
   assert.throws(() => producer.assertQualifiedBuiltinInstance({}, fakeOwner, "worktree-include"));
+  const runtime = await import("../dist/server/server/execution/finite-git-runtime.js");
+  assert.throws(() => runtime.assertPreparedQualifiedBuiltinGit({}, fakeOwner));
+  assert.equal(runtime.qualifiedBuiltinGitPermit({}, fakeOwner, {}), null);
   await assert.rejects(() =>
     producer.createQualifiedBuiltinInstance(fakeOwner, "worktree-include"),
   );

@@ -42,6 +42,8 @@ jobs:
         run: npm exec --workspace=@getpaseo/server -- vitest run src/server/plugins/compiler.test.ts --bail=1
       - name: Genuine protected-root A/B launches and closed dependency negatives
         run: node --test packages/server/scripts/qualified-host.test.mjs
+      - name: Bounded observation, canonical profile and ELF source tests
+        run: node --test packages/server/scripts/qualified-measurement.test.mjs
       - name: Build finite actual daemon distribution (no support inferred from build)
         run: node packages/server/scripts/build-qualified-daemon.mjs "$RUNNER_TEMP/qualified-daemon" "ci-${{ github.sha }}"
       - name: Finalize Linux runtime and native/helper inventory
@@ -49,8 +51,6 @@ jobs:
       - name: Actual finite Git gate and control-loss source checks (no profile grant)
         if: always() && steps.build_workspace.outcome == 'success'
         run: node --test packages/server/scripts/qualified-git.test.mjs
-      - name: Bounded observation, canonical profile and ELF source tests
-        run: node --test packages/server/scripts/qualified-measurement.test.mjs
       - name: Archive measured build inputs (no qualification or runtime acceptance)
         run: node packages/server/scripts/archive-qualified-daemon.mjs "$RUNNER_TEMP/qualified-daemon" "$RUNNER_TEMP/qualified-daemon-build-artifact"
       - name: Retain build-only distribution evidence

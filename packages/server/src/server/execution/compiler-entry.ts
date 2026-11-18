@@ -39,6 +39,7 @@ port.on("message", (raw: unknown) => {
     let admitted: Promise<void>;
     try {
       admitted = retire();
+      helperOwner.sealAdmission();
     } catch {
       port.postMessage({ type: "qualified.execution.unknown" });
       return;

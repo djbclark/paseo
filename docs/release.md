@@ -296,6 +296,13 @@ independent role receipts and disk hashes cannot create the in-process capabilit
 Preserve immutable retained roots for running processes; changing the visible install
 pointer cannot relabel a loaded host. Revocation holds support without relabeling it.
 
+Successful build/inventory/source-boundary checks retain a tar archive named
+`qualified-daemon-build-SHA-RUN-ATTEMPT`. It preserves relative distribution/manifest
+layout and file modes, with measured source inputs, toolchain/runtime/esbuild hashes
+and native-library inventory. It is build evidence; the independently authenticated
+completed run and later controller/evaluator proof supply the qualification decision.
+No running workflow authenticates itself or emits an ADE qualified snapshot receipt.
+
 A successful distribution build does not establish native maintenance support. The
 reviewed native and plugin consumers must share the producer's exact module instance,
 actual daemon owner, retained terminal manager and owned compiler/child handles. The

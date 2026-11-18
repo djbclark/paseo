@@ -1499,6 +1499,9 @@ export default function contribute(server: { registerProvider(provider: Provider
       kill() {
         this.killed = true;
         this.connected = false;
+        queueMicrotask(() => {
+          for (const listener of listeners.get("close") ?? []) listener(null as never);
+        });
         return true;
       },
       disconnect() {
@@ -2313,3 +2316,14 @@ it.each(["verify", "journal"])(
   },
   15_000,
 );
+
+it("loads arrow default server exports with their live CommonJS binding", async () => {
+  const directory = await createPlugin("arrow-default", "export default () => () => undefined;");
+  const runtime = createTestRuntime();
+  try {
+    await runtime.startPlugin("arrow-default", directory);
+    expect(runtime.catalog().map((plugin) => plugin.id)).toEqual(["arrow-default"]);
+  } finally {
+    await runtime.stopAll();
+  }
+});

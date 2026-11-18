@@ -1930,7 +1930,10 @@ describe("managed plugin promotion boundary", () => {
   }
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export default function register() {}");
+    const directory = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     for (const invalid of [undefined, "{}", "not-json"]) {
       if (invalid !== undefined) await writeFile(f.policyFile, invalid);
       const service = createService(
@@ -1946,7 +1949,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("captures actual loaded bytes and removes receipt on stop despite disk changes", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export default function register() {}");
+    const directory = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     await allow(f.policyFile, [await authorization(directory, 0)]);
     const service = createService(
       f.home,
@@ -1975,10 +1981,13 @@ describe("managed plugin promotion boundary", () => {
   });
   it("replaces a stateless snapshot retaining identity, settings, logs and old source", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const candidate = await createPlugin(
       "managed",
-      "export default function register() { console.log('candidate'); }",
+      "export default function register() { console.log('candidate'); return () => {}; }",
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const settingsDirectory = path.join(f.home, "settings");
@@ -2013,7 +2022,7 @@ describe("managed plugin promotion boundary", () => {
       expect(result.loaded?.activationGeneration).toBe(2);
       expect(await readFile(setting, "utf8")).toBe("preserve");
       expect(await readFile(path.join(old, "index.server.ts"), "utf8")).toBe(
-        "export default function register() {}",
+        "export default function register() { return () => {}; }",
       );
       expect(service.getLogs("managed").slice(0, logs.length)).toEqual(logs);
       expect(result.promotionState).toMatchObject({
@@ -2027,7 +2036,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds an interrupted replacement on next daemon startup", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     await allow(f.policyFile, [await authorization(old, 0)]);
     await f.policy.replacing("managed", old, "/retained-candidate");
     const policy = new ManagedPluginActivationPolicy(f.policyFile, path.join(f.home, "promotions"));
@@ -2043,7 +2055,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("recovers failed startup only with independent current authorization and a new generation", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const bad = await createPlugin(
       "managed",
       "export default function register() { throw new Error('startup failure'); }",
@@ -2079,7 +2094,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds failed replacement when recovery identity has been revoked", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const bad = await createPlugin(
       "managed",
       "export default function register() { throw new Error('startup failure'); }",
@@ -2109,15 +2127,21 @@ describe("managed plugin promotion boundary", () => {
   });
   it("rechecks replacement requests after a real child startup holds the operation queue", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
-    const candidate = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
+    const candidate = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const begun = path.join(f.home, "begun");
     const release = path.join(f.home, "release");
     const blocker = await createPlugin(
       "blocker",
       `import { writeFileSync, existsSync } from 'node:fs';
       export default async function register() { writeFileSync(${JSON.stringify(begun)}, 'started');
-        while (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); }`,
+        while (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); return () => {}; }`,
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const service = createService(
@@ -2191,7 +2215,7 @@ describe("managed plugin promotion boundary", () => {
     const sentinel = path.join(f.home, "must-not-build");
     const blocker = await createPlugin(
       "blocker",
-      `import { writeFileSync, existsSync } from 'node:fs'; export default async function() { writeFileSync(${JSON.stringify(begun)}, 'started'); while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); }`,
+      `import { writeFileSync, existsSync } from 'node:fs'; export default async function() { writeFileSync(${JSON.stringify(begun)}, 'started'); while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); return () => {}; }`,
     );
     try {
       await service.start();

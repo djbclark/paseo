@@ -73,6 +73,10 @@ interface RecoveryIdentityInspection {
   loaded: PluginListItem["loaded"];
   policy: ManagedPluginActivationPolicy;
 }
+interface NativeUpdateRecovery extends NativeUpdateActivation {
+  wasRunning: boolean;
+  failure: unknown;
+}
 interface NativeUpdateActivation {
   pluginId: string;
   source: PluginSource;
@@ -1073,7 +1077,7 @@ export class PluginService {
       }));
     } catch (error) {
       await this.stopPlugin(pluginId);
-      await this.restoreNativeUpdate(input, isRunning);
+      await this.restoreNativeUpdate({ ...input, wasRunning: isRunning, failure: error });
       throw error;
     }
     this.errors.delete(pluginId);
@@ -1087,11 +1091,8 @@ export class PluginService {
     };
   }
 
-  private async restoreNativeUpdate(
-    input: NativeUpdateActivation,
-    wasRunning: boolean,
-  ): Promise<void> {
-    const { pluginId, source, candidate, managedSources } = input;
+  private async restoreNativeUpdate(input: NativeUpdateRecovery): Promise<void> {
+    const { pluginId, source, candidate, managedSources, wasRunning, failure } = input;
     try {
       if (
         wasRunning &&
@@ -1102,7 +1103,10 @@ export class PluginService {
         await this.startExplicit(pluginId, source.path, "recover");
       }
     } catch (error) {
-      throw new Error("Update failed; recovery required", { cause: error });
+      throw new Error(
+        `Update failed: ${failure instanceof Error ? failure.message : String(failure)}; restoring previous plugin also failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     } finally {
       if (this.configStore.get().plugins?.[pluginId]?.path !== candidate.directory)
         await managedSources.discard(candidate);

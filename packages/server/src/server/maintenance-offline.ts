@@ -1,3 +1,4 @@
+import { parseRecoveryOnly, type RecoveryOnlyRestriction } from "./maintenance-operation.js";
 import { constants, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -11,6 +12,7 @@ export interface MaintenanceRecord {
   transactionId: string | null;
   tokenDigest: string | null;
   uncertain?: boolean;
+  recoveryOnly?: RecoveryOnlyRestriction;
 }
 
 function validateProtectedRecord(before: Stats, beforePath: Stats, uid: number): void {
@@ -115,7 +117,7 @@ export function parseMaintenanceRecord(value: unknown): MaintenanceRecord {
   if (
     Object.keys(record).some(
       (key) =>
-        !["schemaVersion", "generation", "transactionId", "tokenDigest", "uncertain"].includes(key),
+        !["schemaVersion", "generation", "transactionId", "tokenDigest", "uncertain", "recoveryOnly"].includes(key),
     ) ||
     record.schemaVersion !== 1 ||
     !Number.isSafeInteger(record.generation) ||
@@ -132,6 +134,11 @@ export function parseMaintenanceRecord(value: unknown): MaintenanceRecord {
         record.transactionId.length > 256)
   )
     throw new Error("Invalid maintenance record");
+  if (record.recoveryOnly !== undefined) {
+    if (!record.tokenDigest || record.generation === 0)
+      throw new Error("Recovery restriction requires held authority");
+    record.recoveryOnly = parseRecoveryOnly(record.recoveryOnly);
+  }
   return record as unknown as MaintenanceRecord;
 }
 export function validateMaintenanceEnrollment(value: unknown): void {
@@ -173,5 +180,6 @@ export async function verifyOfflineMaintenance(generation: number, transactionId
     generation,
     transactionId,
     recoveryRequired: true,
+    ...(record.recoveryOnly ? { recoveryOnly: record.recoveryOnly } : {}),
   };
 }

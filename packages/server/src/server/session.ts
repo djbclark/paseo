@@ -3294,7 +3294,9 @@ export class Session {
         const result = await maintenance.executePluginOperation(msg);
         this.emit({
           type: "daemon.maintenance.plugin.operation.response",
-          payload: { requestId: msg.requestId, result, error: null },
+          payload: "outcome" in result
+            ? { requestId: msg.requestId, result: null, knownFailedHeld: result, error: null }
+            : { requestId: msg.requestId, result, error: null },
         });
       } else if (msg.type === "daemon.maintenance.begin.request") {
         const result = await maintenance.begin(msg.generation, msg.transactionId);

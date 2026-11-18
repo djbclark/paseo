@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { readSync, fstatSync } from "node:fs";
 import { Command } from "commander";
 import { verifyOfflineMaintenance } from "@getpaseo/server/maintenance-offline";
@@ -74,6 +75,33 @@ function identity(options: CommandOptions) {
         ? undefined
         : String(options.expectedDaemonIncarnation),
   };
+}
+
+type MaintenanceOperationPayload = Awaited<ReturnType<Awaited<ReturnType<typeof connectToDaemon>>["maintenancePluginOperation"]>>;
+function knownFailureIdentityValid(known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>): boolean {
+  const authority = known.maintenance.authority;
+  return authority?.qualified === true && authority.serverId === known.serverId &&
+    authority.daemonIncarnation === known.daemonIncarnation &&
+    known.maintenance.generation !== null && known.maintenance.transactionId !== null &&
+    known.maintenance.reservationGeneration === known.maintenance.generation &&
+    known.maintenance.recoveryRequired === true;
+}
+export function maintenancePluginOutput(payload: MaintenanceOperationPayload, supported: boolean) {
+  if (payload.error) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
+  if (payload.knownFailedHeld) {
+    const known = payload.knownFailedHeld;
+    if (payload.result || !supported || !knownFailureIdentityValid(known) ||
+      known.maintenance.authority?.features.maintenanceKnownFailedHeldV1 !== true ||
+      !known.maintenance.recoveryOnly || known.maintenance.state === "idle" ||
+      known.maintenance.recoveryOnly.phase !== "recover-required" ||
+      known.pluginId !== known.maintenance.recoveryOnly.pluginId ||
+      known.nativeGeneration !== known.maintenance.recoveryOnly.nativeGeneration ||
+      !isDeepStrictEqual(known.baseline, known.maintenance.recoveryOnly.baseline))
+      throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
+    return known;
+  }
+  if (!payload.result) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
+  return payload.result;
 }
 
 export function daemonMaintenanceCommand(): Command {
@@ -175,13 +203,14 @@ export function daemonMaintenanceCommand(): Command {
           snapshotSha256: String(options.snapshotSha256),
           serverBundleSha256: String(options.serverBundleSha256),
         });
-        if (payload.error || !payload.result) throw new Error("Maintenance operation refused");
-        const output: OutputSchema<NonNullable<typeof payload.result>> = {
+        const result = maintenancePluginOutput(payload, options.json === true &&
+          client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true);
+        const output: OutputSchema<typeof result> = {
           idField: () => "maintenance-operation",
           columns: [],
           renderHuman: () => "Maintenance operation completed",
         };
-        return { type: "single" as const, data: payload.result, schema: output };
+        return { type: "single" as const, data: result, schema: output };
       } finally {
         await client.close();
       }

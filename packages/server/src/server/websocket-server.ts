@@ -2090,6 +2090,9 @@ export class VoiceAssistantWebSocketServer {
         maintenancePluginOperationV1:
           process.platform !== "win32" &&
           this.agentManager.maintenanceReservation?.supportsPluginOperations() === true,
+        maintenanceKnownFailedHeldV1:
+          process.platform !== "win32" &&
+          this.agentManager.maintenanceReservation?.supportsKnownFailedHeld() === true,
         maintenanceReservationV1:
           process.platform !== "win32" &&
           this.agentManager.maintenanceReservation?.isReady() === true,

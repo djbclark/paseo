@@ -511,6 +511,62 @@ describe("native held plugin operation protocol", () => {
   });
 });
 
+describe("native BEGIN refusal metadata and idle counter compatibility", () => {
+  it("preserves old status and carries explicit fresh generation without interpreting null", () => {
+    const response = {
+      type: "daemon.maintenance.status.response",
+      payload: {
+        requestId: "status",
+        error: null,
+        result: {
+          schemaVersion: 1,
+          state: "idle",
+          generation: null,
+          transactionId: null,
+          recoveryRequired: false,
+        },
+      },
+    };
+    expect(SessionOutboundMessageSchema.safeParse(response).success).toBe(true);
+    const fresh = {
+      ...response,
+      payload: {
+        ...response.payload,
+        result: { ...response.payload.result, reservationGeneration: 0, ready: true },
+      },
+    };
+    expect(SessionOutboundMessageSchema.parse(fresh)).toEqual(fresh);
+    expect(
+      SessionOutboundMessageSchema.safeParse({
+        ...fresh,
+        payload: {
+          ...fresh.payload,
+          result: { ...fresh.payload.result, reservationGeneration: -1 },
+        },
+      }).success,
+    ).toBe(false);
+  });
+  it("adds only the exact typed known-busy refusal code", () => {
+    const response = {
+      type: "daemon.maintenance.begin.response",
+      payload: { requestId: "begin", result: null, error: "Maintenance reservation refused" },
+    };
+    expect(SessionOutboundMessageSchema.safeParse(response).success).toBe(true);
+    expect(
+      SessionOutboundMessageSchema.safeParse({
+        ...response,
+        payload: { ...response.payload, errorCode: "MAINTENANCE_KNOWN_BUSY" },
+      }).success,
+    ).toBe(true);
+    expect(
+      SessionOutboundMessageSchema.safeParse({
+        ...response,
+        payload: { ...response.payload, errorCode: "BUSY" },
+      }).success,
+    ).toBe(false);
+  });
+});
+
 it("parses strict complete cohort observations without granting authority from unknown fields", () => {
   const request = { type: "plugins.managed.cohort.status.request", requestId: "cohort" };
   expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
@@ -569,4 +625,21 @@ it("parses strict complete cohort observations without granting authority from u
       },
     }),
   ).toMatchObject({ payload: { status: { consistency: "uncertain" } } });
+});
+
+
+describe("maintenance known failed-held additive protocol", () => {
+  const baseline = { path: "/retained/A", snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+  const known = { outcome: "known_failed_held", reason: "initialization_rejected", pluginId: "unit", nativeGeneration: 6,
+    current: { registration: null, loaded: null }, baseline,
+    maintenance: { schemaVersion: 1, state: "recovery-required", generation: 1, transactionId: "native-tx", recoveryRequired: true,
+      reservationGeneration: 1, ready: true, recoveryOnly: { pluginId: "unit", nativeGeneration: 6, baseline, phase: "recover-required" } },
+    serverId: "server", daemonIncarnation: "incarnation" };
+  it("parses a separate completed-held alternative and rejects arbitrary reason/token metadata", () => {
+    const response = { type: "daemon.maintenance.plugin.operation.response", payload: { requestId: "held", result: null, error: null, knownFailedHeld: known } };
+    expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, reason: "timeout" } } }).success).toBe(false);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, ownerToken: "forbidden" } } }).success).toBe(false);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, knownFailedHeld: { ...known, maintenance: { ...known.maintenance, recoveryOnly: { ...known.maintenance.recoveryOnly, phase: "released" } } } } }).success).toBe(false);
+  });
 });

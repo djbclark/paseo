@@ -12,6 +12,7 @@ import {
   compilePlugin,
   compileDirectoryPlugin,
   compileQualifiedDirectoryPlugin,
+  readSettledQualifiedCompilerFailure,
   resolveExistingAsarUnpackedEsbuildBinary,
   unpackedEsbuildBinaryFromPackageDir,
 } from "./compiler.js";
@@ -1238,4 +1239,25 @@ it("refuses forged qualified compiler ownership before opening source or enterin
     }),
   ).rejects.toThrow("Qualified compiler admission unavailable");
   expect(entered).toBe(false);
+});
+
+it("does not recognize a descriptive compiler error as actual settled execution evidence", () => {
+  const owner = {} as import("../execution/daemon-types.js").QualifiedDaemonOwner;
+  const held = {
+    scope: {} as import("../maintenance-operation.js").HeldPluginOperationScope,
+    claim: {
+      generation: 1,
+      transactionId: "forged",
+      operation: "replace" as const,
+      pluginId: "probe",
+      path: "/new",
+      expectedPath: "/old",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
+    },
+  };
+  expect(
+    readSettledQualifiedCompilerFailure(Object.freeze({ outcome: "compiler_error" }), owner, held),
+  ).toBeUndefined();
 });

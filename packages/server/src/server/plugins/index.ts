@@ -1,3 +1,7 @@
+import {
+  runQualifiedPluginInitialization,
+  type QualifiedPluginInitialization,
+} from "./qualified-initialization.js";
 import { assertHeldPluginOperation } from "../maintenance-reservation.js";
 import {
   assertHeldPluginOperationResult,
@@ -146,8 +150,12 @@ interface PluginRuntimePort {
     canPublish: () => boolean,
     operation?: ActivationOperation,
     held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
   ): Promise<void>;
-  startBuiltinPlugin?(plugin: BuiltinPlugin): Promise<void>;
+  startBuiltinPlugin?(
+    plugin: BuiltinPlugin,
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<void>;
   stopPluginById(pluginId: string, held?: PluginHeldOperation): Promise<boolean>;
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
@@ -189,7 +197,7 @@ export class PluginService {
         return Promise.resolve("unknown");
       }
       this.maintenanceIdentity = { ...identity };
-      return this.runtime.maintenance?.begin(identity) ?? Promise.resolve("unknown");
+      return this.beginQualifiedMaintenance(identity);
     },
     end: async (identity) => {
       if (
@@ -206,9 +214,26 @@ export class PluginService {
       this.maintenanceIdentity = null;
     },
   };
+  private async beginQualifiedMaintenance(
+    identity: PluginMaintenanceIdentity,
+  ): Promise<"held" | "known-busy" | "unknown"> {
+    const result = await (this.runtime.maintenance?.begin(identity) ??
+      Promise.resolve("unknown" as const));
+    if (result === "unknown") return result;
+    try {
+      await this.dependencies.activationPolicy?.observeEnrollment();
+      if (!this.runtime.observeQualifiedExecutions) return "unknown";
+      await this.runtime.observeQualifiedExecutions();
+      return result;
+    } catch {
+      return "unknown";
+    }
+  }
+
   private supportsQualifiedMaintenance(): boolean {
     const owner = this.dependencies.qualifiedDaemonOwner;
-    if (!owner || !isQualifiedDaemonOwner(owner) || this.maintenanceUncertain) return false;
+    if (!owner || !isQualifiedDaemonOwner(owner) || this.maintenanceUncertain || this.starting)
+      return false;
     return this.runtime.maintenance?.supportsV1() === true;
   }
 
@@ -269,8 +294,10 @@ export class PluginService {
     if (
       dependencies.qualifiedDaemonOwner &&
       isQualifiedDaemonOwner(dependencies.qualifiedDaemonOwner)
-    )
+    ) {
+      dependencies.activationPolicy?.bindQualifiedAuthority(dependencies.qualifiedDaemonOwner);
       qualifiedServices.set(dependencies.qualifiedDaemonOwner, this);
+    }
     this.runtime.subscribe((pluginId, error) => {
       this.removeProviderRegistrations(pluginId);
       this.removeUsageSources(pluginId);
@@ -359,7 +386,13 @@ export class PluginService {
 
   async start(): Promise<void> {
     // An unsupported restored hold keeps plugin code uninitialized. No early END for startup.
-    if (this.maintenanceIdentity || this.maintenanceUncertain) return;
+    if (this.maintenanceUncertain) return;
+    if (
+      this.maintenanceIdentity &&
+      (!this.dependencies.qualifiedDaemonOwner ||
+        !isQualifiedDaemonOwner(this.dependencies.qualifiedDaemonOwner))
+    )
+      return;
     if (this.started) return;
     this.starting = true;
     try {
@@ -368,21 +401,31 @@ export class PluginService {
       this.globalStartsBlocked = config.pluginsEnabled !== true;
       await this.builtinPlugins.load(async (plugin) => {
         try {
-          await this.runtime.startBuiltinPlugin?.(plugin);
+          await this.startBuiltinDuringBootstrap(plugin);
           await this.publishProviderRegistrations(plugin.id, plugin.directory);
           this.publishUsageSources(plugin.id);
         } catch (error) {
           this.logger.error({ err: error, pluginId: plugin.id }, "Failed to start built-in plugin");
         }
       });
-      if (config.pluginsEnabled === true) {
+      if (
+        config.pluginsEnabled === true &&
+        this.dependencies.qualifiedDaemonOwner &&
+        isQualifiedDaemonOwner(this.dependencies.qualifiedDaemonOwner)
+      ) {
+        for (const [pluginId, source] of Object.entries(config.plugins ?? {})) {
+          if (source.enabled === false) continue;
+          await this.startConfiguredDuringBootstrap(pluginId);
+          this.notify(pluginId);
+        }
+      } else if (config.pluginsEnabled === true) {
         let earlierPublished: Promise<unknown> = Promise.resolve();
         await Promise.all(
           Object.entries(config.plugins ?? {})
             .filter(([, source]) => source.enabled !== false)
             .map(async ([pluginId]) => {
               const publishTurn = earlierPublished;
-              const starting = this.startConfigured(pluginId, publishTurn);
+              const starting = this.startConfiguredDuringBootstrap(pluginId, publishTurn);
               earlierPublished = Promise.all([publishTurn, starting]);
               await starting;
               this.notify(pluginId);
@@ -411,7 +454,12 @@ export class PluginService {
     const runtime = this.runtime.getObservationEpoch?.();
     const compiler = getQualifiedCompilerObservationEpoch(owner);
     if (runtime === undefined || compiler === null) return null;
-    return this.qualifiedEpoch + runtime + compiler;
+    return (
+      this.qualifiedEpoch +
+      runtime +
+      compiler +
+      (this.dependencies.activationPolicy?.getObservationEpoch() ?? 0)
+    );
   }
 
   getManagedPluginCohortStatus(): Promise<ManagedPluginCohortStatus> {
@@ -1280,12 +1328,55 @@ export class PluginService {
     }).catch((error) => this.logger.error({ err: error }, "Failed to enable plugins"));
   }
 
-  private async startConfigured(pluginId: string, publishTurn?: Promise<unknown>): Promise<void> {
+  private async startBuiltinDuringBootstrap(plugin: BuiltinPlugin): Promise<void> {
+    const ticket = await this.dependencies.activationPolicy?.authorize(plugin.id, plugin.directory);
+    if (!ticket?.authorization.passiveProfile) return this.runtime.startBuiltinPlugin?.(plugin);
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const native = this.dependencies.nativeMaintenance;
+    if (!owner || !isQualifiedDaemonOwner(owner) || !native)
+      throw new Error("Qualified builtin initialization unavailable");
+    return runQualifiedPluginInitialization(
+      owner,
+      native,
+      plugin.id,
+      plugin.directory,
+      (initialization) => this.runtime.startBuiltinPlugin!(plugin, initialization),
+    );
+  }
+  private async startConfiguredDuringBootstrap(
+    pluginId: string,
+    publishTurn?: Promise<unknown>,
+  ): Promise<void> {
+    const source = this.requireEnabledSource(pluginId);
+    try {
+      const ticket = await this.dependencies.activationPolicy?.authorize(pluginId, source.path);
+      if (!ticket?.authorization.passiveProfile) return this.startConfigured(pluginId, publishTurn);
+      const owner = this.dependencies.qualifiedDaemonOwner;
+      const native = this.dependencies.nativeMaintenance;
+      if (!owner || !isQualifiedDaemonOwner(owner) || !native)
+        throw new Error("Qualified plugin initialization unavailable");
+      await runQualifiedPluginInitialization(
+        owner,
+        native,
+        pluginId,
+        source.path,
+        (initialization) => this.startConfigured(pluginId, publishTurn, initialization),
+      );
+    } catch (error) {
+      this.recordFailure(pluginId, error);
+    }
+  }
+
+  private async startConfigured(
+    pluginId: string,
+    publishTurn?: Promise<unknown>,
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<void> {
     const source = this.configStore.get().plugins?.[pluginId];
     if (!source || source.enabled === false || !this.canPublish(pluginId)) return;
     this.errors.delete(pluginId);
     try {
-      await this.startPlugin(pluginId, source.path, publishTurn);
+      await this.startPlugin(pluginId, source.path, publishTurn, "activate", initialization);
     } catch (error) {
       if (this.canPublish(pluginId)) this.recordFailure(pluginId, error);
     }
@@ -1341,6 +1432,7 @@ export class PluginService {
     sourcePath: string,
     publishTurn?: Promise<unknown>,
     operation: ActivationOperation = "activate",
+    initialization?: QualifiedPluginInitialization,
   ): Promise<void> {
     await this.dependencies.activationPolicy?.authorize(pluginId, sourcePath, operation);
     await this.runtime.startPlugin(
@@ -1348,6 +1440,8 @@ export class PluginService {
       sourcePath,
       () => this.canPublish(pluginId),
       operation,
+      undefined,
+      initialization,
     );
     await publishTurn;
     try {

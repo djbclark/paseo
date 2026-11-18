@@ -1,4 +1,4 @@
-import { assertHeldPluginOperationResult } from "../../maintenance-operation.js";
+import { assertHeldPluginOperationResult, parseRecoveryOnly } from "../../maintenance-operation.js";
 import type {
   HeldPluginOperationClaim,
   HeldPluginOperationScope,
@@ -18,6 +18,7 @@ import { WorkspaceSetupRuntime } from "../../workspace-setup-runtime.js";
 import { AgentManager } from "../../agent/agent-manager.js";
 import {
   MaintenanceReservation,
+  maintenanceBeginErrorCode,
   guardMaintenanceMethod,
   assertHeldPluginOperation,
 } from "../../maintenance-reservation.js";
@@ -1138,6 +1139,16 @@ describe("protected offline maintenance authority", () => {
       },
     };
   }
+  test("offline authority preserves exact durable recovery restriction without granting release", async () => {
+    const f = await fixture();
+    const recoveryOnly = { pluginId: "unit", nativeGeneration: 6, phase: "recover-required", baseline: { path: "/retained/A", snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) } };
+    try {
+      maintenanceFs.writeFileSync(f.path, JSON.stringify({ ...f.record, recoveryOnly }));
+      expect(await f.verify()).toMatchObject({ state: "recovery-required", recoveryOnly });
+      maintenanceFs.writeFileSync(f.path, JSON.stringify({ ...f.record, recoveryOnly, tokenDigest: null }));
+      await expect(f.verify()).rejects.toThrow();
+    } finally { f.close(); }
+  });
   test("accepts only matching protected persisted hold and returns no digest/token", async () => {
     const f = await fixture();
     try {
@@ -1312,11 +1323,98 @@ describe("native maintenance participant serialization", () => {
       close: () => removeMaintenanceHome(home, { recursive: true, force: true }),
     };
   }
+  test("preflight typed busy acquires no barrier or counter and cannot classify stale or unsupported", async () => {
+    let supported = true;
+    const begin = vi.fn<PluginMaintenancePort["begin"]>(async () => "held");
+    const f = await fixture({ supportsV1: () => supported, begin, end: async () => {} });
+    const release = f.reservation.enter();
+    try {
+      expect(f.reservation.status()).toMatchObject({
+        reservationGeneration: 0,
+        generation: null,
+        ready: true,
+      });
+      const busy = await f.reservation.begin(1, "active").catch((error: unknown) => error);
+      expect(maintenanceBeginErrorCode(busy)).toBe("MAINTENANCE_KNOWN_BUSY");
+      expect(begin).not.toHaveBeenCalled();
+      expect(maintenanceFs.existsSync(maintenanceJoin(f.home, "maintenance-enrollment.json"))).toBe(
+        false,
+      );
+      supported = false;
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(1, "unsupported").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
+      supported = true;
+      release();
+      const held = await f.reservation.begin(1, "quiet");
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(2, "held").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
+      await f.reservation.end(1, held.ownerToken);
+      expect(f.reservation.status()).toMatchObject({
+        reservationGeneration: 1,
+        ready: true,
+        state: "idle",
+      });
+      const finish = f.reservation.enter();
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(1, "stale").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
+      finish();
+      expect(
+        maintenanceBeginErrorCode(
+          Object.assign(new Error("Maintenance reservation refused"), {
+            code: "MAINTENANCE_KNOWN_BUSY",
+          }),
+        ),
+      ).toBeUndefined();
+    } finally {
+      release();
+      f.close();
+    }
+  });
+  test("UNKNOWN during provisional rollback is never typed busy", async () => {
+    let entered!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "known-busy",
+      end: async () => {
+        entered();
+        await gate;
+      },
+    });
+    try {
+      const outcome = f.reservation.begin(1, "rollback").catch((error: unknown) => error);
+      await started;
+      f.reservation.holdForUnknownWork();
+      finish();
+      expect(maintenanceBeginErrorCode(await outcome)).toBeUndefined();
+      expect(f.reservation.status().state).toBe("recovery-required");
+    } finally {
+      finish();
+      await f.reservation.flushStorage();
+      f.close();
+    }
+  });
   test("known participant busy reopens only an unpublished attempt", async () => {
     const end = vi.fn(async () => {});
     const f = await fixture({ supportsV1: () => true, begin: async () => "known-busy", end });
     try {
-      await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
+      const error = await f.reservation.begin(1, "busy").catch((error: unknown) => error);
+      expect(maintenanceBeginErrorCode(error)).toBe("MAINTENANCE_KNOWN_BUSY");
       expect(f.reservation.status().state).toBe("idle");
       expect(end).toHaveBeenCalledWith({ generation: 1, transactionId: "busy" });
       f.reservation.enter()();
@@ -1442,7 +1540,11 @@ describe("native maintenance participant serialization", () => {
       },
     });
     try {
-      await expect(f.reservation.begin(1, "busy-rollback-failed")).rejects.toThrow("rollback");
+      const error = await f.reservation
+        .begin(1, "busy-rollback-failed")
+        .catch((error: unknown) => error);
+      expect(maintenanceBeginErrorCode(error)).toBeUndefined();
+      expect(error).toBeInstanceOf(Error);
       expect(f.reservation.status().state).toBe("recovery-required");
       expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
         "recovery-required",
@@ -1706,5 +1808,93 @@ describe("native maintenance participant serialization", () => {
     }
     expect(rawBegin).toHaveBeenCalledTimes(2);
     expect(rawEnd).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("native durable recovery-only restriction (state unit, not execution qualification)", () => {
+  const baseline = { path: "/retained/A", snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+  const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "same-native-transaction", operation: "recover", pluginId: "unit", path: baseline.path, expectedPath: "/retained/B", expectedGeneration: 6, snapshotSha256: baseline.snapshotSha256, serverBundleSha256: baseline.serverBundleSha256 };
+  function receipt(generation: number) {
+    return { nativeGeneration: generation, plugin: { id: "unit", path: baseline.path, enabled: true, status: "running" as const,
+      promotionState: { generation, phase: "ready" }, loaded: { pluginId: "unit", sourcePath: baseline.path,
+        snapshotSha256: baseline.snapshotSha256, serverBundleSha256: baseline.serverBundleSha256,
+        processStartToken: "state-fixture-only", activationGeneration: generation, startedAt: "fixture" } } };
+  }
+  async function fixture() {
+    const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "native-recovery-restriction-"));
+    const initial = await MaintenanceReservation.create(home, async () => true);
+    const owner = await initial.begin(1, claim.transactionId);
+    const path = maintenanceJoin(home, "maintenance-reservation.json");
+    const record = JSON.parse(readMaintenanceFile(path, "utf8"));
+    // Durable state fixture only: this does not mint the plugin's private known-failure brand.
+    maintenanceFs.writeFileSync(path, JSON.stringify({ ...record, recoveryOnly: { pluginId: "unit", nativeGeneration: 6, phase: "recover-required", baseline } }));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
+    return { home, path, owner, reservation, close: () => removeMaintenanceHome(home, { recursive: true, force: true }) };
+  }
+  test("restart retains restriction; exact recover then separate verify required before END", async () => {
+    const f = await fixture();
+    const refused = vi.fn(async () => receipt(7));
+    try {
+      expect(f.reservation.status()).toMatchObject({ state: "recovery-required", reservationGeneration: 1, recoveryOnly: { phase: "recover-required", nativeGeneration: 6 } });
+      await expect(f.reservation.end(1, f.owner.ownerToken)).rejects.toThrow();
+      await expect(f.reservation.ownerPluginOperation({ ...claim, operation: "replace" }, f.owner.ownerToken, refused)).rejects.toThrow();
+      await expect(f.reservation.ownerPluginOperation({ ...claim, operation: "verify" }, f.owner.ownerToken, refused)).rejects.toThrow();
+      await expect(f.reservation.ownerPluginOperation({ ...claim, path: "/other" }, f.owner.ownerToken, refused)).rejects.toThrow();
+      expect(refused).not.toHaveBeenCalled();
+      await f.reservation.ownerPluginOperation(claim, f.owner.ownerToken, async () => receipt(7));
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8")).recoveryOnly).toMatchObject({ phase: "verify-required", nativeGeneration: 7 });
+      await expect(f.reservation.end(1, f.owner.ownerToken)).rejects.toThrow();
+      await f.reservation.ownerPluginOperation({ ...claim, operation: "verify", expectedPath: baseline.path, expectedGeneration: 7 }, f.owner.ownerToken, async () => receipt(8));
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8")).recoveryOnly).toBeUndefined();
+      expect((await f.reservation.end(1, f.owner.ownerToken)).state).toBe("idle");
+    } finally { f.close(); }
+  });
+  test("forged normal-return failure cannot avoid UNKNOWN or clear an existing restriction", async () => {
+    const f = await fixture();
+    try {
+      await expect(f.reservation.ownerPluginOperation(claim, f.owner.ownerToken, async () => ({ outcome: "known_failed_held", reason: "compiler_error", pluginId: "unit", nativeGeneration: 7, baseline, current: { registration: null, loaded: null } }))).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("recovery-required");
+      const stored = JSON.parse(readMaintenanceFile(f.path, "utf8"));
+      expect(stored.uncertain).toBe(true);
+      expect(stored.recoveryOnly.phase).toBe("recover-required");
+      const never = vi.fn(async () => receipt(7));
+      await expect(f.reservation.ownerPluginOperation(claim, f.owner.ownerToken, never)).rejects.toThrow();
+      expect(never).not.toHaveBeenCalled();
+      const restarted = await MaintenanceReservation.create(f.home, async () => true);
+      await expect(restarted.end(1, f.owner.ownerToken)).rejects.toThrow();
+    } finally { f.close(); }
+  });
+  test("restriction parser rejects malformed, relative or token-bearing metadata", () => {
+    const restriction = { pluginId: "unit", nativeGeneration: 6, phase: "recover-required", baseline };
+    expect(parseRecoveryOnly(restriction)).toEqual(restriction);
+    expect(() => parseRecoveryOnly({ ...restriction, ownerToken: "not-authority" })).toThrow();
+    expect(() => parseRecoveryOnly({ ...restriction, nativeGeneration: -1 })).toThrow();
+    expect(() => parseRecoveryOnly({ ...restriction, baseline: { ...baseline, path: "relative" } })).toThrow();
+    expect(() => parseRecoveryOnly({ ...restriction, baseline: { ...baseline, snapshotSha256: "bad" } })).toThrow();
+  });
+  test.each(["file-fsync", "directory-fsync"])("completed cleanup during %s cannot clear recovery restriction", async (stage) => {
+    const f = await fixture();
+    let reached!: () => void;
+    let resume!: () => void;
+    const started = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    let paused = false;
+    const pause = async (matches: boolean) => { if (matches && !paused) { paused = true; reached(); await gate; } };
+    vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
+      const handle = await unmockedMaintenanceIo.open(...args);
+      if (args[1] === "wx" || args[1] === "r") installAwaitPause(handle, args[1] === "r", stage, pause);
+      return handle;
+    });
+    try {
+      const pending = f.reservation.ownerPluginOperation(claim, f.owner.ownerToken, async () => receipt(7));
+      await started;
+      await f.reservation.runCleanup(async () => {});
+      resume();
+      await expect(pending).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("recovery-required");
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8")).uncertain).toBe(true);
+      await expect(f.reservation.end(1, f.owner.ownerToken)).rejects.toThrow();
+    } finally { resume(); vi.mocked(maintenanceIo.open).mockReset(); await f.reservation.flushStorage(); f.close(); }
   });
 });

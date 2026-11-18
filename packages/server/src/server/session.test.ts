@@ -1,3 +1,4 @@
+import { MaintenanceReservation } from "./maintenance-reservation.js";
 import {
   createWorkspaceRuntimeStore,
   type WorkspaceRuntimeStore,
@@ -6393,4 +6394,58 @@ test("does not publish internal agents' background work to subscribed clients", 
     ],
   });
   expect(messages.some((message) => message.type === "agent.background_work.update")).toBe(false);
+});
+
+describe("native maintenance BEGIN refusal transport", () => {
+  test("binds typed preflight refusal to the prepared server and process identity", async () => {
+    const home = mkdtempSync(join(tmpdir(), "native-begin-rpc-"));
+    const reservation = await MaintenanceReservation.create(home, async () => true);
+    reservation.setReady(false);
+    // Transport unit fixture; this does not qualify a real daemon or executing cohort.
+    reservation.bindTransport("server", {
+      assertQualified() {},
+      refresh: async () => {},
+      incarnation: () => "incarnation",
+      bindTerminalManager() {},
+    });
+    reservation.setReady(true);
+    const messages: unknown[] = [];
+    const session = createSessionForTest({
+      messages,
+      agentManager: { maintenanceReservation: reservation },
+    });
+    const release = reservation.enter();
+    try {
+      const request = {
+        type: "daemon.maintenance.begin.request" as const,
+        requestId: "begin",
+        schemaVersion: 1 as const,
+        generation: 1,
+        transactionId: "tx",
+        expectedServerId: "server",
+        expectedDaemonIncarnation: "incarnation",
+      };
+      await session.handleMessage(request);
+      expect(messages).toContainEqual({
+        type: "daemon.maintenance.begin.response",
+        payload: {
+          requestId: "begin",
+          result: null,
+          error: expect.any(String),
+          errorCode: "MAINTENANCE_KNOWN_BUSY",
+        },
+      });
+      messages.length = 0;
+      await session.handleMessage({ ...request, expectedDaemonIncarnation: "stale" });
+      expect(messages).toContainEqual({
+        type: "daemon.maintenance.begin.response",
+        payload: { requestId: "begin", result: null, error: expect.any(String) },
+      });
+      expect(reservation.status()).toMatchObject({ state: "idle", reservationGeneration: 0 });
+    } finally {
+      release();
+      await session.cleanup();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });

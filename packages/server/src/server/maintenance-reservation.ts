@@ -1,8 +1,11 @@
-import { assertHeldPluginOperationResult } from "./maintenance-operation.js";
+import { isDeepStrictEqual } from "node:util";
+import { assertHeldPluginOperationResult, parseRecoveryOnly, readPrivateKnownFailedHeld, supportsKnownFailedHeld } from "./maintenance-operation.js";
 import type {
   HeldPluginOperationClaim,
   HeldPluginOperationScope,
   HeldPluginOperationDriver,
+  KnownFailedHeldObservation,
+  RecoveryOnlyRestriction,
 } from "./maintenance-operation.js";
 import {
   emptyMaintenanceParticipant,
@@ -27,8 +30,23 @@ export interface MaintenanceStatus {
   schemaVersion: 1;
   state: "idle" | "held" | "recovery-required";
   generation: number | null;
+  reservationGeneration: number;
+  ready: boolean;
   transactionId: string | null;
   recoveryRequired: boolean;
+  recoveryOnly?: RecoveryOnlyRestriction;
+}
+const knownBusyRefusals = new WeakSet<object>();
+function knownBusyRefusal(): Error {
+  const error = new Error("Maintenance reservation refused");
+  knownBusyRefusals.add(error);
+  return error;
+}
+/** Classification is native-private; messages and caller supplied codes never grant it. */
+export function maintenanceBeginErrorCode(error: unknown): "MAINTENANCE_KNOWN_BUSY" | undefined {
+  if (typeof error === "object" && error !== null && knownBusyRefusals.has(error))
+    return "MAINTENANCE_KNOWN_BUSY";
+  return undefined;
 }
 type RecordV1 = MaintenanceRecord;
 const digest = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -51,6 +69,7 @@ interface HeldScopeEntry {
   active: boolean;
 }
 const heldScopes = new WeakMap<object, HeldScopeEntry>();
+const acceptedKnownFailures = new WeakMap<object, KnownFailedHeldObservation>();
 
 /** Only the native owner can mint these entries; duck callbacks and JSON never grant. */
 export function assertHeldPluginOperation(
@@ -209,12 +228,16 @@ export class MaintenanceReservation {
       features: {
         maintenanceReservationV1: supported,
         maintenancePluginOperationV1: supported && this.pluginOperation !== undefined,
+        maintenanceKnownFailedHeldV1: supported && this.pluginOperation !== undefined && supportsKnownFailedHeld(),
       },
     };
   }
 
   supportsPluginOperations(): boolean {
     return this.transportAuthority().features.maintenancePluginOperationV1;
+  }
+  supportsKnownFailedHeld(): boolean {
+    return this.transportAuthority().features.maintenanceKnownFailedHeldV1;
   }
 
   assertTransport(
@@ -276,21 +299,28 @@ export class MaintenanceReservation {
       snapshotSha256: input.snapshotSha256,
       serverBundleSha256: input.serverBundleSha256,
     };
-    return this.ownerPluginOperation(claim, input.ownerToken, async (scope) => {
+    const result = await this.ownerPluginOperation(claim, input.ownerToken, async (scope) => {
       const result = await driver(claim, scope);
       this.assertTransport(input);
       assertHeldPluginOperation(scope, claim);
-      assertHeldPluginOperationResult(claim, result);
-      const authority = this.transportAuthority();
-      if (!authority.qualified || !authority.daemonIncarnation)
-        throw new Error("Maintenance owner unavailable");
-      return {
-        ...result,
-        maintenance: { ...this.status(), authority },
-        serverId: authority.serverId,
-        daemonIncarnation: authority.daemonIncarnation,
-      };
+      if (!readPrivateKnownFailedHeld(result, scope, claim))
+        assertHeldPluginOperationResult(claim, result as import("./maintenance-operation.js").HeldPluginOperationResult);
+      return result;
     });
+    this.assertNoUnknownWork();
+    this.assertTransport(input);
+    const authority = this.transportAuthority();
+    if (!authority.qualified || !authority.daemonIncarnation)
+      throw new Error("Maintenance owner unavailable");
+    const metadata = {
+      maintenance: { ...this.status(), authority },
+      serverId: authority.serverId,
+      daemonIncarnation: authority.daemonIncarnation,
+    };
+    const known = acceptedKnownFailures.get(result);
+    if (known) return { ...known, ...metadata };
+    if ("outcome" in result) throw new Error("Unaccepted held outcome");
+    return { ...result, ...metadata };
   }
 
   isReady(): boolean {
@@ -425,17 +455,20 @@ export class MaintenanceReservation {
   }
 
   status(): MaintenanceStatus {
-    const recoveryRequired = this.failed || this.recovery;
+    const recoveryRequired = this.failed || this.recovery || Boolean(this.record?.recoveryOnly);
     const closed = this.pending || recoveryRequired || Boolean(this.record?.tokenDigest);
     let state: MaintenanceStatus["state"] = "idle";
     if (closed) state = "held";
     if (recoveryRequired) state = "recovery-required";
     return {
       schemaVersion: 1,
+      reservationGeneration: this.record?.generation ?? 0,
+      ready: this.isReady(),
       state,
       generation: this.attempt?.generation ?? (this.record?.generation || null),
       transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
       recoveryRequired,
+      ...(this.record?.recoveryOnly ? { recoveryOnly: structuredClone(this.record.recoveryOnly) } : {}),
     };
   }
 
@@ -504,10 +537,7 @@ export class MaintenanceReservation {
     };
   }
 
-  async begin(
-    generation: number,
-    transactionId: string,
-  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+  private assertBeginRequest(generation: number, transactionId: string): void {
     if (
       !Number.isSafeInteger(generation) ||
       generation <= 0 ||
@@ -519,12 +549,39 @@ export class MaintenanceReservation {
       this.failed ||
       this.pending ||
       this.record?.tokenDigest ||
-      this.inFlight ||
+      this.record?.uncertain ||
+      this.recovery ||
       generation <= (this.record?.generation ?? 0)
     )
       throw new Error("Maintenance busy or stale generation");
-    if (!this.isReady())
-      throw new Error("Maintenance reservation unsupported or startup incomplete");
+  }
+
+  async begin(
+    generation: number,
+    transactionId: string,
+  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+    this.assertBeginRequest(generation, transactionId);
+    let previous = this.record;
+    const readinessRevision = this.readinessRevision;
+    const assertAvailable = () => {
+      this.assertNoUnknownWork();
+      if (!this.isReady())
+        throw new Error("Maintenance reservation unsupported or startup incomplete");
+      this.assertNoUnknownWork();
+      if (
+        !this.ready ||
+        this.readinessRevision !== readinessRevision ||
+        this.record !== previous ||
+        this.record?.tokenDigest ||
+        this.record?.uncertain ||
+        this.recovery ||
+        generation <= (this.record?.generation ?? 0)
+      )
+        throw new Error("Maintenance authority changed");
+    };
+    assertAvailable();
+    // No barrier or authority transition has occurred. Never acquire over admitted work.
+    if (this.inFlight) throw knownBusyRefusal();
     const identity = { generation, transactionId };
     this.pending = true;
     this.attempt = identity;
@@ -532,8 +589,22 @@ export class MaintenanceReservation {
     try {
       await this.storage(() => this.enroll());
       this.assertNoUnknownWork();
-      knownBusy = !(await this.prepareParticipant(identity));
-      if (knownBusy) throw new Error("Maintenance known busy");
+      if (
+        previous === null &&
+        this.record?.generation === 0 &&
+        !this.record.tokenDigest &&
+        this.record.transactionId === null
+      )
+        previous = this.record;
+      const prepared = await this.prepareParticipant(identity);
+      assertAvailable();
+      if (!this.pending || this.attempt !== identity)
+        throw new Error("Maintenance attempt changed");
+      if (!prepared) {
+        // prepareParticipant returned only after every provisional barrier acknowledged rollback.
+        knownBusy = true;
+        throw knownBusyRefusal();
+      }
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
       const next: RecordV1 = {
@@ -567,6 +638,7 @@ export class MaintenanceReservation {
     // Authenticate before any participant call; token is never forwarded.
     if (
       this.failed ||
+      record?.recoveryOnly ||
       this.pending ||
       this.inFlight ||
       !record ||
@@ -657,6 +729,7 @@ export class MaintenanceReservation {
       )
     )
       throw new Error("Maintenance ownership mismatch or busy");
+    this.assertRecoveryClaim(claim);
     if (!this.isReady()) throw new Error("Maintenance participant unsupported");
     const release = this.lease();
     const scope = Object.freeze({}) as HeldPluginOperationScope;
@@ -668,6 +741,8 @@ export class MaintenanceReservation {
       release,
       active: true,
     };
+    const activityRevision = this.activityRevision;
+    const readinessRevision = this.readinessRevision;
     heldScopes.set(scope, entry);
     try {
       const held = await this.participant.begin({
@@ -686,6 +761,16 @@ export class MaintenanceReservation {
       assertHeldPluginOperation(scope, claim);
       if (successor !== "held" || !this.isReady())
         throw new Error("Maintenance successor not safely held");
+      const known = readPrivateKnownFailedHeld(result, scope, claim);
+      await this.commitHeldOutcome(scope, claim, result, known, activityRevision, readinessRevision);
+      assertHeldPluginOperation(scope, claim);
+      if (known) {
+        const fresh = readPrivateKnownFailedHeld(result, scope, claim);
+        if (!fresh || !isDeepStrictEqual(fresh, known))
+          throw new Error("Known held observation changed");
+        if (!result || typeof result !== "object") throw new Error("Invalid held outcome");
+        acceptedKnownFailures.set(result, structuredClone(fresh));
+      }
       return result;
     } catch (error) {
       this.holdForUnknownWork();
@@ -695,6 +780,61 @@ export class MaintenanceReservation {
       entry.active = false;
       release();
     }
+  }
+
+  private assertRecoveryClaim(claim: HeldPluginOperationClaim): void {
+    const restriction = this.record?.recoveryOnly;
+    if (!restriction) return;
+    if (claim.operation === "replace" || claim.pluginId !== restriction.pluginId ||
+      claim.path !== restriction.baseline.path ||
+      claim.snapshotSha256 !== restriction.baseline.snapshotSha256 ||
+      claim.serverBundleSha256 !== restriction.baseline.serverBundleSha256 ||
+      claim.expectedGeneration !== restriction.nativeGeneration ||
+      (claim.operation === "verify" && restriction.phase !== "verify-required"))
+      throw new Error("Maintenance requires exact baseline recovery and separate verification");
+  }
+
+  private async commitHeldOutcome<T>(
+    scope: HeldPluginOperationScope,
+    claim: HeldPluginOperationClaim,
+    result: T,
+    known: KnownFailedHeldObservation | undefined,
+    activityRevision: number,
+    readinessRevision: number,
+  ): Promise<void> {
+    const previous = this.record!;
+    const next: RecordV1 = { ...previous };
+    if (known) {
+      const restriction = parseRecoveryOnly({ pluginId: known.pluginId,
+        nativeGeneration: known.nativeGeneration, baseline: known.baseline, phase: "recover-required" });
+      if (previous.recoveryOnly && !isDeepStrictEqual(restriction.baseline, previous.recoveryOnly.baseline))
+        throw new Error("Recovery baseline changed");
+      next.recoveryOnly = restriction;
+    } else if (previous.recoveryOnly) {
+      assertHeldPluginOperationResult(claim, result as import("./maintenance-operation.js").HeldPluginOperationResult);
+      if (claim.operation === "recover") next.recoveryOnly = { ...previous.recoveryOnly,
+        nativeGeneration: (result as import("./maintenance-operation.js").HeldPluginOperationResult).nativeGeneration,
+        phase: "verify-required" };
+      else if (claim.operation === "verify") delete next.recoveryOnly;
+      else throw new Error("Restricted replacement forbidden");
+    } else return;
+    const validate = (committed: boolean) => {
+      assertHeldPluginOperation(scope, claim);
+      if (this.record !== (committed ? next : previous) || this.inFlight !== 1 ||
+        this.activityRevision !== activityRevision || this.readinessRevision !== readinessRevision || !this.ready)
+        throw new Error("Held outcome authority or activity changed");
+      if (known) {
+        const fresh = readPrivateKnownFailedHeld(result, scope, claim);
+        if (!fresh || !isDeepStrictEqual(fresh, known))
+          throw new Error("Known held certification changed");
+      }
+      this.assertNoUnknownWork();
+    };
+    await this.storage(() => this.persist(next, false, validate));
+    validate(true);
+    const fresh = await this.participant.begin({ generation: claim.generation, transactionId: claim.transactionId });
+    validate(true);
+    if (fresh !== "held") throw new Error("Held outcome cohort unavailable");
   }
 
   private persist(

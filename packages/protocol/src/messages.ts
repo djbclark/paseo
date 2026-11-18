@@ -1542,14 +1542,29 @@ export const MaintenanceTransportAuthoritySchema = z.object({
   features: z.object({
     maintenanceReservationV1: z.boolean(),
     maintenancePluginOperationV1: z.boolean(),
+    maintenanceKnownFailedHeldV1: z.boolean().optional(),
   }),
 });
+export const MaintenanceRecoveryBaselineSchema = z.object({
+  path: z.string().min(1).max(1024),
+  snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  serverBundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export const MaintenanceRecoveryOnlySchema = z.object({
+  pluginId: z.string().min(1).max(256),
+  nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  phase: z.enum(["recover-required", "verify-required"]),
+  baseline: MaintenanceRecoveryBaselineSchema,
+}).strict();
 export const MaintenanceStatusSchema = z.object({
   schemaVersion: z.literal(1),
   state: z.enum(["idle", "held", "recovery-required"]),
   generation: z.number().int().positive().nullable(),
   transactionId: z.string().nullable(),
   recoveryRequired: z.boolean(),
+  reservationGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  ready: z.boolean().optional(),
+  recoveryOnly: MaintenanceRecoveryOnlySchema.optional(),
   authority: MaintenanceTransportAuthoritySchema.optional(),
 });
 export const MaintenanceBeginRequestSchema = z.object({
@@ -1567,6 +1582,7 @@ export const MaintenanceBeginResponseSchema = z.object({
     requestId: z.string(),
     result: MaintenanceStatusSchema.extend({ ownerToken: z.string() }).nullable(),
     error: z.string().nullable(),
+    errorCode: z.literal("MAINTENANCE_KNOWN_BUSY").optional(),
   }),
 });
 export const MaintenanceStatusRequestSchema = z.object({
@@ -4075,6 +4091,7 @@ export const ServerInfoStatusPayloadSchema = z
         daemonConfigReload: z.boolean().optional(),
         maintenanceReservationV1: z.boolean().optional(),
         maintenancePluginOperationV1: z.boolean().optional(),
+        maintenanceKnownFailedHeldV1: z.boolean().optional(),
         // COMPAT(speechSettings): added in v0.12.0, remove gate after 2027-04-18.
         speechSettings: z.boolean().optional(),
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
@@ -7439,6 +7456,20 @@ export const PluginListItemSchema = z.object({
 });
 export type PluginListItem = z.infer<typeof PluginListItemSchema>;
 
+export const MaintenanceKnownFailedHeldSchema = z.object({
+  outcome: z.literal("known_failed_held"),
+  reason: z.enum(["compiler_error", "initialization_rejected"]),
+  pluginId: z.string().min(1).max(256),
+  nativeGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  current: z.object({
+    registration: z.object({ path: z.string(), enabled: z.boolean() }).strict().nullable(),
+    loaded: PluginLoadedReceiptSchema.nullable(),
+  }).strict(),
+  baseline: MaintenanceRecoveryBaselineSchema,
+  maintenance: MaintenanceStatusSchema,
+  serverId: z.string(),
+  daemonIncarnation: z.string(),
+}).strict();
 export const MaintenancePluginOperationResponseSchema = z.object({
   type: z.literal("daemon.maintenance.plugin.operation.response"),
   payload: z.object({
@@ -7452,6 +7483,7 @@ export const MaintenancePluginOperationResponseSchema = z.object({
         daemonIncarnation: z.string(),
       })
       .nullable(),
+    knownFailedHeld: MaintenanceKnownFailedHeldSchema.optional(),
     error: z.string().nullable(),
   }),
 });

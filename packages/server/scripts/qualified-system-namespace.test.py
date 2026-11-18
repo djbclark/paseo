@@ -179,6 +179,128 @@ class SchemaTests(unittest.TestCase):
                 ns.bounded_proc("/proc/self/mountinfo", 10)
 
 
+class LoaderTraversalTests(unittest.TestCase):
+    """Virtual pathname observations; these never prove a real namespace/loader."""
+
+    def setUp(self):
+        self.nodes = {}
+        self.links = {}
+        for path in ("/", "/declared", "/declared/lib", "/usr", "/usr/lib",
+                     "/retained", "/retained/runtime", "/retained/lib", "/other", "/other/inner"):
+            self.directory(path)
+        self.file("/usr/lib/libx-real.so")
+        self.distribution = ns.Distribution.__new__(ns.Distribution)
+        self.distribution.root = "/retained"
+        self.distribution.external = {"/usr/lib/libx-real.so": {"retainedPath": "system-closure/elf/usr/lib/libx-real.so"}}
+        self.distribution.directories = ["/declared/lib", "/retained/lib"]
+        self.distribution.aliases = {}
+        self.distribution.layout_snapshot = {}
+        self.distribution.absent_selection = set()
+        self.distribution.needed = {"libx.so"}
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(ns.os, "lstat", side_effect=self.inspect))
+        stack.enter_context(mock.patch.object(ns.os, "readlink", side_effect=self.links.__getitem__))
+        stack.enter_context(mock.patch.object(ns.os, "scandir", side_effect=lambda path:
+            contextlib.nullcontext(iter(types.SimpleNamespace(name=name) for name in self.children(path)))))
+        stack.enter_context(mock.patch.object(ns.os.path, "lexists", side_effect=lambda path: path in self.nodes))
+
+    def add(self, path, kind, uid=0, mode=0o755):
+        self.nodes[path] = types.SimpleNamespace(st_dev=1, st_ino=len(self.nodes) + 1,
+            st_mode=kind | mode, st_uid=uid, st_gid=0, st_size=0, st_nlink=1,
+            st_mtime_ns=1, st_ctime_ns=1)
+
+    def directory(self, path, uid=0, mode=0o755):
+        self.add(path, stat.S_IFDIR, uid, mode)
+
+    def file(self, path):
+        self.add(path, stat.S_IFREG, mode=0o444)
+
+    def link(self, path, link_text, target, declared=True):
+        self.add(path, stat.S_IFLNK, mode=0o777)
+        self.links[path] = link_text
+        if declared:
+            self.distribution.aliases[path] = {"path": path, "target": target, "linkText": link_text}
+
+    def inspect(self, path):
+        if path not in self.nodes:
+            raise FileNotFoundError(path)
+        return self.nodes[path]
+
+    def children(self, path):
+        prefix = path.rstrip("/") + "/"
+        return [candidate[len(prefix):] for candidate in self.nodes
+                if candidate.startswith(prefix) and "/" not in candidate[len(prefix):]]
+
+    def test_writable_empty_ordinary_hwcaps_child_refuses(self):
+        for variant in ("glibc-hwcaps", "tls"):
+            with self.subTest(variant=variant):
+                base = "/declared/lib/" + variant
+                self.directory(base)
+                self.directory(base + "/ordinary", uid=1001)
+                self.distribution.directories += [base, base + "/ordinary"]
+                with self.assertRaisesRegex(ns.Hold, "unprotected-loader-layout"):
+                    self.distribution.verify_search([])
+                self.nodes[base + "/ordinary"].st_uid = 0
+                self.distribution.layout_snapshot.clear()
+
+    def test_symlinked_hwcaps_base_through_writable_bridge_refuses(self):
+        self.directory("/user", uid=1001)
+        self.directory("/other/hwcaps")
+        self.link("/user/bridge", "/other/hwcaps", "/other/hwcaps", declared=False)
+        self.link("/declared/lib/glibc-hwcaps", "/user/bridge", "/other/hwcaps")
+        self.distribution.directories.append("/other/hwcaps")
+        with self.assertRaisesRegex(ns.Hold, "unprotected-loader-layout"):
+            self.distribution.verify_search([])
+
+    def test_declared_alias_link_text_through_writable_bridge_refuses(self):
+        self.directory("/user", uid=1001)
+        self.link("/user/bridge", "/usr/lib/libx-real.so", "/usr/lib/libx-real.so", declared=False)
+        self.link("/declared/lib/alias.so", "/user/bridge", "/usr/lib/libx-real.so")
+        with self.assertRaisesRegex(ns.Hold, "unprotected-loader-layout"):
+            self.distribution.check_path_aliases("/declared/lib/alias.so")
+
+    def test_unlisted_known_needed_alias_refuses(self):
+        self.link("/declared/lib/libx.so", "/usr/lib/libx-real.so", "/usr/lib/libx-real.so", declared=False)
+        with self.assertRaisesRegex(ns.Hold, "undeclared-path-alias"):
+            self.distribution.verify_search([])
+
+    def test_rpath_symlink_parent_traversal_refuses_before_normalization(self):
+        self.link("/declared/link", "/other/inner", "/other/inner")
+        row = {"member": "runtime/node", "rpath": ["/declared/link/../lib"], "runpath": []}
+        with self.assertRaisesRegex(ns.Hold, "symlink-parent-traversal-unsupported"):
+            self.distribution.verify_search([row])
+
+    def test_protected_layout_recursive_aliases_and_plain_origin_parent_work(self):
+        self.link("/declared/bridge.so", "/usr/lib/libx-real.so", "/usr/lib/libx-real.so")
+        self.link("/declared/lib/libx.so", "../bridge.so", "/usr/lib/libx-real.so")
+        self.directory("/declared/lib/glibc-hwcaps")
+        self.directory("/declared/lib/glibc-hwcaps/ordinary")
+        self.distribution.directories += ["/declared/lib/glibc-hwcaps",
+                                         "/declared/lib/glibc-hwcaps/ordinary"]
+        row = {"member": "runtime/node", "rpath": [], "runpath": ["$ORIGIN/../lib"]}
+        self.distribution.verify_search([row])
+        self.assertEqual(self.distribution.check_path_aliases("/declared/lib/libx.so"), "/usr/lib/libx-real.so")
+        self.distribution.check_layout()
+
+    def test_undeclared_empty_protected_selection_child_refuses(self):
+        self.directory("/declared/lib/tls")
+        self.directory("/declared/lib/tls/ordinary")
+        self.distribution.directories.append("/declared/lib/tls")
+        with self.assertRaisesRegex(ns.Hold, "undeclared-or-cyclic-selection-directory"):
+            self.distribution.verify_search([])
+
+    def test_rechecks_traversed_identity_and_absent_selection_before_exec(self):
+        self.distribution.verify_search([])
+        self.nodes["/declared/lib"].st_ino += 100
+        with self.assertRaisesRegex(ns.Hold, "loader-route-changed-before-exec"):
+            self.distribution.check_layout()
+        self.nodes["/declared/lib"].st_ino -= 100
+        self.file("/declared/lib/libx.so")
+        with self.assertRaisesRegex(ns.Hold, "loader-selection-appeared"):
+            self.distribution.check_layout()
+
+
 class AdministrativeOrderingTests(unittest.TestCase):
     def admin(self):
         value = ns.Admin.__new__(ns.Admin)

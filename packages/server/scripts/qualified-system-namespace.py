@@ -545,6 +545,7 @@ class Distribution:
         self.files = {}
         self.opened = {}
         self.layout_snapshot = {}
+        self.absent_selection = set()
         for row in sequence(manifest["files"], 16384):
             file_row(row)
             require(row["path"] not in self.files, "duplicate-member")
@@ -708,45 +709,119 @@ class Distribution:
             self.check_path_aliases(path)
 
     def check_path_aliases(self, path):
-        current = "/"
-        for part in pathlib.PurePosixPath(path).parts[1:]:
-            current = os.path.join(current, part)
-            info = os.lstat(current)
-            if stat.S_ISLNK(info.st_mode):
-                require(current in self.aliases and
-                        os.readlink(current) == self.aliases[current]["linkText"], "undeclared-path-alias")
+        # Walk literal components and each linkText route. realpath/normpath alone
+        # would erase a writable bridge or a symlink followed by '..'.
+        require(text(path) and path.startswith("/") and not path.startswith("//"), "invalid-loader-route")
+        budget = {"steps": 0, "links": 0}
+        bind_targets = set(self.external) | {"/etc/ld.so.cache"}
+
+        def inspect(current):
+            budget["steps"] += 1
+            require(budget["steps"] <= 512, "loader-route-bound")
+            try:
+                info = os.lstat(current)
+            except OSError as error:
+                raise Hold("missing-loader-component") from error
             require(info.st_uid == 0 and (stat.S_ISLNK(info.st_mode) or not info.st_mode & 0o022),
                     "unprotected-loader-layout")
-            if stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            if current not in bind_targets or not stat.S_ISREG(info.st_mode):
                 previous = self.layout_snapshot.setdefault(current, identity(info))
                 require(previous == identity(info), "loader-ancestor-or-alias-changed")
+            return info
+
+        def walk(raw, active):
+            require(text(raw) and raw.startswith("/"), "invalid-link-route")
+            resolved = []
+            saw_link = False
+            inspect("/")
+            parts = raw.split("/")[1:]
+            for index, part in enumerate(parts):
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    require(not saw_link, "symlink-parent-traversal-unsupported")
+                    if resolved:
+                        resolved.pop()
+                    continue
+                current = "/" + "/".join([*resolved, part])
+                info = inspect(current)
+                if stat.S_ISLNK(info.st_mode):
+                    budget["links"] += 1
+                    require(budget["links"] <= 40 and current not in active, "loader-link-cycle-or-bound")
+                    row = self.aliases.get(current)
+                    require(row is not None and os.readlink(current) == row["linkText"], "undeclared-path-alias")
+                    link = row["linkText"]
+                    require(text(link) and link, "invalid-link-text")
+                    # current's containing directory is already physically resolved.
+                    target_raw = link if link.startswith("/") else os.path.dirname(current) + "/" + link
+                    target = walk(target_raw, {*active, current})
+                    require(target == row["target"], "alias-target-mismatch")
+                    resolved = target.split("/")[1:]
+                    info = inspect(target)
+                    saw_link = True
+                else:
+                    resolved.append(part)
+                if index < len(parts) - 1:
+                    require(stat.S_ISDIR(info.st_mode), "nondirectory-loader-component")
+            return "/" + "/".join(resolved)
+
+        return walk(path, set())
 
     def verify_search(self, metadata):
+        declared_directories = {self.check_path_aliases(directory) for directory in self.directories}
         for row in metadata:
             runtime_path = next((path for path, external in self.external.items()
                                  if external["retainedPath"] == row["member"]), self.root + "/" + row["member"])
             for value in row["rpath"] + row["runpath"]:
                 expanded = re.sub(r"\$\{ORIGIN\}|\$ORIGIN(?=/|$)",
                                   lambda _match: os.path.dirname(runtime_path), value)
-                require("$" not in expanded and os.path.isabs(expanded) and
-                        os.path.normpath(expanded) in self.directories, "undeclared-elf-search")
+                require("$" not in expanded and expanded.startswith("/"), "undeclared-elf-search")
+                # Inspect BEFORE any normalization; the kernel follows symlinks before '..'.
+                require(self.check_path_aliases(expanded) in declared_directories, "undeclared-elf-search")
+
+        visited_entries = 0
+        def selection_tree(path, depth, active):
+            nonlocal visited_entries
+            require(depth <= 8, "selection-tree-depth")
+            canonical = self.check_path_aliases(path)
+            require(canonical in declared_directories and canonical not in active,
+                    "undeclared-or-cyclic-selection-directory")
+            require(stat.S_ISDIR(os.lstat(canonical).st_mode), "invalid-selection-directory")
+            names = []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    visited_entries += 1
+                    require(visited_entries <= 4096 and text(entry.name) and "/" not in entry.name,
+                            "selection-tree-bound")
+                    names.append(entry.name)
+            for name in sorted(names, key=lambda value: value.encode("utf-8")):
+                require(name not in self.needed, "relevant-hwcaps-candidate")
+                child = path + "/" + name
+                # Empty ordinary directories are selection authority too.
+                target = self.check_path_aliases(child)
+                if stat.S_ISDIR(os.lstat(target).st_mode):
+                    selection_tree(child, depth + 1, {*active, canonical})
+
         for directory in self.directories:
             for name in self.needed:
                 if "/" in name:
                     continue
                 candidate = directory + "/" + name
                 if os.path.lexists(candidate):
-                    require(os.path.realpath(candidate) in self.external, "unretained-search-candidate")
-                for variant in ("glibc-hwcaps", "tls"):
-                    base = directory + "/" + variant
-                    if os.path.exists(base):
-                        require(os.path.isdir(base), "invalid-hwcaps-directory")
-                        for ancestor, subdirs, files in os.walk(base, followlinks=False):
-                            require(len(subdirs) + len(files) <= 2048 and
-                                    len(pathlib.Path(ancestor).parts) <= len(pathlib.Path(base).parts) + 4,
-                                    "hwcaps-tree-bound")
-                            require(name not in files and not any(os.path.islink(ancestor + "/" + item)
-                                                                 for item in subdirs), "relevant-hwcaps-candidate")
+                    require(self.check_path_aliases(candidate) in self.external, "unretained-search-candidate")
+                else:
+                    self.absent_selection.add(candidate)
+            for variant in ("glibc-hwcaps", "tls"):
+                base = directory + "/" + variant
+                if os.path.lexists(base):
+                    selection_tree(base, 0, set())
+                else:
+                    self.absent_selection.add(base)
+
+    def check_layout(self):
+        for path, expected in self.layout_snapshot.items():
+            require(identity(os.lstat(path)) == expected, "loader-route-changed-before-exec")
+        require(all(not os.path.lexists(path) for path in self.absent_selection), "loader-selection-appeared")
 
     def check_sources(self):
         for source in self.opened.values():
@@ -836,6 +911,8 @@ def execute_namespace(distribution, admin, caller, checks, executable, arguments
     caller.check_alive()
     admin.seal()
     admin.drop(caller)
+    distribution.check_sources()
+    distribution.check_layout()
     os.chdir(caller.home)
     os.umask(0o077)
     # Only stdin/stdout/stderr survive, and no namespace/privileged descriptor leaks.

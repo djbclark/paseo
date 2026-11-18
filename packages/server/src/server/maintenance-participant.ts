@@ -127,21 +127,27 @@ export function qualifiedMaintenanceParticipant(
   authority: QualifiedDaemonAccess,
 ): PluginMaintenancePort {
   return {
-    ...(participant.supportsHeldRecoveryV1 && participant.beginHeldRecoveryV1 ? {
-      supportsHeldRecoveryV1(identity: HeldRecoveryIdentity) {
-        try {
-          authority.assertQualified();
-          return participant.supportsHeldRecoveryV1?.(identity) === true;
-        } catch { return false; }
-      },
-      async beginHeldRecoveryV1(identity: HeldRecoveryIdentity) {
-        await authority.refresh();
-        const result = await participant.beginHeldRecoveryV1!(identity);
-        authority.assertQualified();
-        if (result !== "held") return result;
-        return participant.supportsHeldRecoveryV1?.(identity) === true ? "held" as const : "unknown" as const;
-      },
-    } : {}),
+    ...(participant.supportsHeldRecoveryV1 && participant.beginHeldRecoveryV1
+      ? {
+          supportsHeldRecoveryV1(identity: HeldRecoveryIdentity) {
+            try {
+              authority.assertQualified();
+              return participant.supportsHeldRecoveryV1?.(identity) === true;
+            } catch {
+              return false;
+            }
+          },
+          async beginHeldRecoveryV1(identity: HeldRecoveryIdentity) {
+            await authority.refresh();
+            const result = await participant.beginHeldRecoveryV1!(identity);
+            authority.assertQualified();
+            if (result !== "held") return result;
+            return participant.supportsHeldRecoveryV1?.(identity) === true
+              ? ("held" as const)
+              : ("unknown" as const);
+          },
+        }
+      : {}),
     supportsV1() {
       try {
         authority.assertQualified();

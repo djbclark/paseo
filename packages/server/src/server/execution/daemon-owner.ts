@@ -516,6 +516,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   if (!artifact) return unsupported();
   observations.set(owner, () => {
     assertFresh();
+    if (observers.size > 128) return unsupported();
     const ownedHandles = [...observers.keys()].map((handle) => {
       const record = handles.get(handle);
       if (!record) return unsupported();

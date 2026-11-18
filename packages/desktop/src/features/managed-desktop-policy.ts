@@ -40,6 +40,7 @@ const runtimePlugin = z
     serverBundleSha256: hex,
     activationGeneration: z.number().int().positive(),
   })
+  .strict()
   .refine(
     (value) =>
       value.sourcePath === value.snapshotRoot ||

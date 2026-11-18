@@ -199,6 +199,7 @@ describe("runtime plugin cohort authority", () => {
   });
   it.each([
     { pluginId: "" },
+    { unknownAuthorityField: true },
     { sourcePath: "relative/plugin" },
     { snapshotRoot: "relative" },
     { sourcePath: "/snapshots/qualified/../mutable/plugin" },

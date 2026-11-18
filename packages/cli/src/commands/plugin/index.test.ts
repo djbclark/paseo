@@ -178,7 +178,10 @@ describe("plugin management commands", () => {
     await command.parseAsync(["status"], { from: "user" });
 
     expect(listPlugins).toHaveBeenCalledTimes(1);
-    expect(command.helpInformation()).not.toContain("status");
+    const help = command.helpInformation();
+    expect(help).not.toMatch(/^\s+status(?:\s|$)/m);
+    expect(help).toMatch(/^\s+cohort-status(?:\s|$)/m);
+    expect(help).toMatch(/^\s+cohort-v2-status(?:\s|$)/m);
   });
 
   it("lists runtime state and the installed commit without an upstream commit", async () => {

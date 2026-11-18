@@ -3325,13 +3325,18 @@ export class Session {
       }
     } catch (error) {
       let errorCode: "MAINTENANCE_KNOWN_BUSY" | undefined;
-      if (msg.type === "daemon.maintenance.begin.request" &&
-        msg.expectedServerId !== undefined && msg.expectedDaemonIncarnation !== undefined &&
-        maintenanceBeginErrorCode(error)) {
+      if (
+        msg.type === "daemon.maintenance.begin.request" &&
+        msg.expectedServerId !== undefined &&
+        msg.expectedDaemonIncarnation !== undefined &&
+        maintenanceBeginErrorCode(error)
+      ) {
         try {
           maintenance?.assertTransport(msg);
           if (maintenance) errorCode = maintenanceBeginErrorCode(error);
-        } catch { /* Changed or unknown identity cannot grant a typed refusal. */ }
+        } catch {
+          /* Changed or unknown identity cannot grant a typed refusal. */
+        }
       }
       // Do not echo requests or errors: the end payload contains a bearer token.
       this.emit({

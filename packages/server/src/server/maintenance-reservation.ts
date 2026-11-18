@@ -552,10 +552,15 @@ export class MaintenanceReservation {
         throw new Error("Maintenance reservation unsupported or startup incomplete");
       this.assertNoUnknownWork();
       if (
-        !this.ready || this.readinessRevision !== readinessRevision ||
-        this.record !== previous || this.record?.tokenDigest || this.record?.uncertain ||
-        this.recovery || generation <= (this.record?.generation ?? 0)
-      ) throw new Error("Maintenance authority changed");
+        !this.ready ||
+        this.readinessRevision !== readinessRevision ||
+        this.record !== previous ||
+        this.record?.tokenDigest ||
+        this.record?.uncertain ||
+        this.recovery ||
+        generation <= (this.record?.generation ?? 0)
+      )
+        throw new Error("Maintenance authority changed");
     };
     assertAvailable();
     // No barrier or authority transition has occurred. Never acquire over admitted work.
@@ -567,8 +572,13 @@ export class MaintenanceReservation {
     try {
       await this.storage(() => this.enroll());
       this.assertNoUnknownWork();
-      if (previous === null && this.record?.generation === 0 && !this.record.tokenDigest &&
-        this.record.transactionId === null) previous = this.record;
+      if (
+        previous === null &&
+        this.record?.generation === 0 &&
+        !this.record.tokenDigest &&
+        this.record.transactionId === null
+      )
+        previous = this.record;
       const prepared = await this.prepareParticipant(identity);
       assertAvailable();
       if (!this.pending || this.attempt !== identity)

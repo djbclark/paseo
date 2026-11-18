@@ -1319,31 +1319,73 @@ describe("native maintenance participant serialization", () => {
     const f = await fixture({ supportsV1: () => supported, begin, end: async () => {} });
     const release = f.reservation.enter();
     try {
-      expect(f.reservation.status()).toMatchObject({ reservationGeneration: 0, generation: null, ready: true });
+      expect(f.reservation.status()).toMatchObject({
+        reservationGeneration: 0,
+        generation: null,
+        ready: true,
+      });
       const busy = await f.reservation.begin(1, "active").catch((error: unknown) => error);
       expect(maintenanceBeginErrorCode(busy)).toBe("MAINTENANCE_KNOWN_BUSY");
       expect(begin).not.toHaveBeenCalled();
-      expect(maintenanceFs.existsSync(maintenanceJoin(f.home, "maintenance-enrollment.json"))).toBe(false);
+      expect(maintenanceFs.existsSync(maintenanceJoin(f.home, "maintenance-enrollment.json"))).toBe(
+        false,
+      );
       supported = false;
-      expect(maintenanceBeginErrorCode(await f.reservation.begin(1, "unsupported").catch((error: unknown) => error))).toBeUndefined();
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(1, "unsupported").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
       supported = true;
       release();
       const held = await f.reservation.begin(1, "quiet");
-      expect(maintenanceBeginErrorCode(await f.reservation.begin(2, "held").catch((error: unknown) => error))).toBeUndefined();
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(2, "held").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
       await f.reservation.end(1, held.ownerToken);
-      expect(f.reservation.status()).toMatchObject({ reservationGeneration: 1, ready: true, state: "idle" });
+      expect(f.reservation.status()).toMatchObject({
+        reservationGeneration: 1,
+        ready: true,
+        state: "idle",
+      });
       const finish = f.reservation.enter();
-      expect(maintenanceBeginErrorCode(await f.reservation.begin(1, "stale").catch((error: unknown) => error))).toBeUndefined();
+      expect(
+        maintenanceBeginErrorCode(
+          await f.reservation.begin(1, "stale").catch((error: unknown) => error),
+        ),
+      ).toBeUndefined();
       finish();
-      expect(maintenanceBeginErrorCode(Object.assign(new Error("Maintenance reservation refused"), { code: "MAINTENANCE_KNOWN_BUSY" }))).toBeUndefined();
-    } finally { release(); f.close(); }
+      expect(
+        maintenanceBeginErrorCode(
+          Object.assign(new Error("Maintenance reservation refused"), {
+            code: "MAINTENANCE_KNOWN_BUSY",
+          }),
+        ),
+      ).toBeUndefined();
+    } finally {
+      release();
+      f.close();
+    }
   });
   test("UNKNOWN during provisional rollback is never typed busy", async () => {
     let entered!: () => void;
     let finish!: () => void;
-    const started = new Promise<void>((resolve) => { entered = resolve; });
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const f = await fixture({ supportsV1: () => true, begin: async () => "known-busy", end: async () => { entered(); await gate; } });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "known-busy",
+      end: async () => {
+        entered();
+        await gate;
+      },
+    });
     try {
       const outcome = f.reservation.begin(1, "rollback").catch((error: unknown) => error);
       await started;
@@ -1351,7 +1393,11 @@ describe("native maintenance participant serialization", () => {
       finish();
       expect(maintenanceBeginErrorCode(await outcome)).toBeUndefined();
       expect(f.reservation.status().state).toBe("recovery-required");
-    } finally { finish(); await f.reservation.flushStorage(); f.close(); }
+    } finally {
+      finish();
+      await f.reservation.flushStorage();
+      f.close();
+    }
   });
   test("known participant busy reopens only an unpublished attempt", async () => {
     const end = vi.fn(async () => {});
@@ -1484,7 +1530,9 @@ describe("native maintenance participant serialization", () => {
       },
     });
     try {
-      const error = await f.reservation.begin(1, "busy-rollback-failed").catch((error: unknown) => error);
+      const error = await f.reservation
+        .begin(1, "busy-rollback-failed")
+        .catch((error: unknown) => error);
       expect(maintenanceBeginErrorCode(error)).toBeUndefined();
       expect(error).toBeInstanceOf(Error);
       expect(f.reservation.status().state).toBe("recovery-required");

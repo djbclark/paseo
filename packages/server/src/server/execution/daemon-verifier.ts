@@ -1,3 +1,4 @@
+import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, lstat, readdir, readFile, realpath } from "node:fs/promises";
@@ -86,9 +87,7 @@ async function verifyFile(root: string, file: FileIdentity): Promise<void> {
   )
     return unsupported();
 }
-async function enrollment(
-  root: string,
-): Promise<{
+async function enrollment(root: string): Promise<{
   manifestSha256: string;
   distributionBuildId: string;
   qualificationSha256: string;
@@ -262,6 +261,8 @@ export async function verifyEnclosingProcess(root: string) {
     process.env.ESBUILD_BINARY_PATH !== path.join(root, "runtime/esbuild")
   )
     return unsupported();
+  const managedPolicy = await readFixedManagedPluginPolicy();
+  if (process.env.PASEO_MANAGED_PLUGIN_POLICY !== managedPolicy.path) return unsupported();
   const distribution = await verifyEnclosingDistribution(root);
   const observed = await observeLinuxProcess(process.pid);
   if (observed.executable !== path.join(root, "runtime/node")) return unsupported();

@@ -13,7 +13,7 @@ function sudo(args) {
   const result = spawnSync("sudo", ["-n", ...args], { encoding: "utf8", timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
 }
-function probe(root, race) {
+function probe(root, race, ambient = {}) {
   const instrumentation = race
     ? `
     import fs from "node:fs";
@@ -42,7 +42,7 @@ function probe(root, race) {
   return spawnSync(process.execPath, ["--input-type=module", "-e", source], {
     encoding: "utf8",
     timeout: 20000,
-    env: { PATH: "/usr/bin:/bin" },
+    env: { PATH: "/usr/bin:/bin", ...ambient },
   });
 }
 
@@ -66,6 +66,12 @@ test(
       ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json",
     );
     const prior = (await exists(policyPath)) ? await readFile(policyPath) : null;
+    const managedPath = path.join(path.dirname(policyPath), "paseo-managed-plugins.json");
+    const priorManaged = (await exists(managedPath)) ? await readFile(managedPath) : null;
+    const provisionManaged = async () => {
+      await writeFile(managedPath, JSON.stringify({ version: 1, plugins: {} }), { mode: 0o600 });
+      await chmod(managedPath, 0o600);
+    };
     await mkdir(path.dirname(policyPath), { recursive: true, mode: 0o700 });
     const raw = await readFile(`${staged}.manifest.json`);
     const manifest = JSON.parse(raw);
@@ -90,6 +96,7 @@ test(
       sudo(["chown", "-R", "root:root", root, `${root}.manifest.json`]);
       sudo(["chmod", "0444", `${root}.manifest.json`]);
       await enroll();
+      await provisionManaged();
       const baseline = probe(root);
       assert.equal(baseline.status, 0, baseline.stderr);
       const invocation = JSON.parse(baseline.stdout);
@@ -97,6 +104,40 @@ test(
       assert.equal(invocation.closure.helperClosureSha256, manifest.helperClosureSha256);
       assert.equal(invocation.closure.qualificationSha256, enrollment.qualificationSha256);
       assert.deepEqual(invocation.args, [`${root}/role.cjs`]);
+      assert.deepEqual(invocation.env, {
+        PATH: "/usr/bin:/bin",
+        PASEO_HOME: "/disposable/home",
+        PASEO_MANAGED_PLUGIN_POLICY: managedPath,
+      });
+      const ambientIgnored = probe(root, undefined, {
+        PASEO_MANAGED_PLUGIN_POLICY: "/caller/not-authority.json",
+      });
+      assert.equal(ambientIgnored.status, 0, ambientIgnored.stderr);
+      assert.equal(JSON.parse(ambientIgnored.stdout).env.PASEO_MANAGED_PLUGIN_POLICY, managedPath);
+      for (const mutation of ["missing", "public-mode", "invalid-json", "hardlink", "fifo"]) {
+        await provisionManaged();
+        assert.equal(probe(root).status, 0, "restore valid fixed private policy before negative");
+        if (mutation === "missing") await rm(managedPath);
+        if (mutation === "public-mode") await chmod(managedPath, 0o644);
+        if (mutation === "invalid-json") await writeFile(managedPath, "{");
+        if (mutation === "fifo") {
+          await rm(managedPath);
+          const made = spawnSync("mkfifo", [managedPath], { timeout: 1000 });
+          assert.equal(made.status, 0);
+        }
+        if (mutation === "hardlink") {
+          const alias = `${managedPath}.fixture-link`;
+          const linked = spawnSync("ln", [managedPath, alias], { timeout: 1000 });
+          assert.equal(linked.status, 0);
+        }
+        const denied = probe(root);
+        assert.equal(denied.error, undefined);
+        assert.notEqual(denied.status, 0, mutation);
+        if (mutation === "fifo") await rm(managedPath);
+        await rm(`${managedPath}.fixture-link`, { force: true });
+      }
+      await provisionManaged();
+      assert.equal(probe(root).status, 0, "restore fixed policy after negatives");
       await writeFile(policyPath, JSON.stringify({ schemaVersion: 1, qualifications: [] }));
       assert.notEqual(probe(root).status, 0, "missing enrollment must hold");
       await enroll();
@@ -148,6 +189,9 @@ test(
     } finally {
       await rm(policyPath, { force: true });
       if (prior) await writeFile(policyPath, prior, { mode: 0o600 });
+      await rm(managedPath, { force: true });
+      await rm(`${managedPath}.fixture-link`, { force: true });
+      if (priorManaged) await writeFile(managedPath, priorManaged, { mode: 0o600 });
       sudo(["rm", "-rf", root, `${root}.manifest.json`]);
     }
   },

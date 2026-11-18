@@ -1,3 +1,4 @@
+import { qualifiedManagedEnvironment } from "./managed-policy-environment.js";
 import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
 import {
@@ -215,7 +216,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       const child = spawn(
         path.join(root, "runtime/node"),
         [path.join(root, "plugin-child-entry.mjs")],
-        { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
+        { env: await qualifiedManagedEnvironment(), stdio: ["ignore", "pipe", "pipe", "ipc"] },
       );
       child.once("error", () => {
         failed = true;
@@ -303,7 +304,10 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           "--runtime",
           root,
         ],
-        { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"] },
+        {
+          env: await qualifiedManagedEnvironment(),
+          stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"],
+        },
       );
       try {
         const ready = await new Promise<string>((resolve, reject) => {
@@ -385,7 +389,10 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       const { port1, port2 } = new MessageChannel();
       const worker = new Worker(path.join(root, "compiler-entry.mjs"), {
         execArgv: [],
-        env: { PATH: "/usr/bin:/bin", ESBUILD_BINARY_PATH: path.join(root, "runtime/esbuild") },
+        env: {
+          ...(await qualifiedManagedEnvironment()),
+          ESBUILD_BINARY_PATH: path.join(root, "runtime/esbuild"),
+        },
         workerData: { qualificationPort: port2 },
         transferList: [port2],
       });

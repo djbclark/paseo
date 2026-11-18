@@ -278,7 +278,11 @@ retained tree; a copied or adopted worker cannot supply this proof. Existing wor
 records hold qualified startup before any adoption or reaping.
 
 Finalizers write a manifest beside the distribution, outside its hashed files. They
-do not write authority. The controller must qualify the final artifact before adding
+do not write authority. Qualified daemon and CLI launchers bind native plugin policy
+only to the real account home's `.local/state/djbclark-ade/forks/paseo-managed-plugins.json`.
+The controller owns this private account-owned single-link file (0600 or stricter).
+Missing or invalid authority holds activation; ambient policy paths are never forwarded.
+The controller must qualify the final artifact before adding
 its canonical retained root, manifest/build identity and separate qualification recipe
 digest to the real account home's protected
 `.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` qualifications array.

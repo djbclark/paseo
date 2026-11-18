@@ -77,8 +77,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
       (header.length < 20 ||
         header.readUInt32BE(0) !== 0x7f454c46 ||
         header[5] !== 1 ||
-        header.readUInt16LE(18) !==
-          (process.arch === "x64" ? 62 : process.arch === "arm64" ? 183 : -1))
+        header.readUInt16LE(18) !== (process.arch === "x64" ? 62 : 183))
     )
       continue;
     const result = spawnSync("ldd", [path.join(root, file.path)], {

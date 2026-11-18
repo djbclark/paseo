@@ -46,6 +46,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
       .then((actual) => {
         if (actual.executable !== executable) return unsupported();
         identities.set(child, actual);
+        return undefined;
       })
       .catch(hold)
       .finally(() => {

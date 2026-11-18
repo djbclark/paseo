@@ -95,7 +95,9 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
             metadataPath = path.join(current, "package.json");
             break;
           }
-        } catch {}
+        } catch {
+          /* Continue to the enclosing package boundary. */
+        }
         if (current === path.dirname(current)) throw new Error(`Missing package root: ${name}`);
         current = path.dirname(current);
       }

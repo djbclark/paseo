@@ -24,7 +24,7 @@ port.on("message", (raw: unknown) => {
       .stop()
       .then(() => {
         (port as MessagePort).postMessage({ type: "qualified.execution.stopped" });
-        process.exit(0);
+        return process.exit(0);
       })
       .catch(() => {
         (port as MessagePort).postMessage({ type: "qualified.execution.unknown" });

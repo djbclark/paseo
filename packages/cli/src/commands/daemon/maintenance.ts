@@ -95,6 +95,10 @@ function knownFailureIdentityValid(
     known.maintenance.recoveryRequired === true
   );
 }
+function knownFailureAPIAvailable(known: NonNullable<MaintenanceOperationPayload["knownFailedHeld"]>): boolean {
+  const features = known.maintenance.authority?.features;
+  return features?.maintenanceKnownFailedHeldV1 === true || features?.maintenanceHeldRecoveryV1 === true;
+}
 export function maintenancePluginOutput(payload: MaintenanceOperationPayload, supported: boolean) {
   if (payload.error) throw { code: "UNKNOWN_ERROR", message: "Maintenance operation refused" };
   if (payload.knownFailedHeld) {
@@ -103,7 +107,7 @@ export function maintenancePluginOutput(payload: MaintenanceOperationPayload, su
       payload.result ||
       !supported ||
       !knownFailureIdentityValid(known) ||
-      known.maintenance.authority?.features.maintenanceKnownFailedHeldV1 !== true ||
+      !knownFailureAPIAvailable(known) ||
       !known.maintenance.recoveryOnly ||
       known.maintenance.state === "idle" ||
       known.maintenance.recoveryOnly.phase !== "recover-required" ||
@@ -233,7 +237,8 @@ export function daemonMaintenanceCommand(): Command {
           const result = maintenancePluginOutput(
             payload,
             options.json === true &&
-              client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true,
+              (client.getLastServerInfoMessage()?.features?.maintenanceKnownFailedHeldV1 === true ||
+                client.getLastServerInfoMessage()?.features?.maintenanceHeldRecoveryV1 === true),
           );
           // AnyCommandResult distributes its union: retain each result's schema correlation.
           if ("outcome" in result) return operationOutput(result);

@@ -237,7 +237,18 @@ export function acquirePluginHelper(operation: PluginHelperOperation): PluginHel
     bind(child) {
       if (bound || released) throw new Error("Plugin helper handle already bound or settled");
       bound = true;
-      permit?.bind(child);
+      try {
+        permit?.bind(child);
+      } catch (error) {
+        // The command already exists: preserve its original handle/work, never retry
+        // it or turn a postlaunch observation failure into ordinary cancellation.
+        lease?.owner.markUnknown();
+        try {
+          permit?.failed(error);
+        } catch {
+          lease?.owner.markUnknown();
+        }
+      }
     },
     failed(error) {
       if (failed) return;

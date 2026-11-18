@@ -67,6 +67,8 @@ async function validateSourceDirectory(directory: string): Promise<string> {
   return canonical;
 }
 
+class HostInitializationRejection extends Error {}
+
 export function createPluginWorker(
   options: { channel: PluginWorkerChannel } & (
     | { contribute: PluginServerContribution }
@@ -80,6 +82,15 @@ export function createPluginWorker(
   let hostInstanceId = "legacy-unbound";
   let qualifiedPassive = false;
   let initializationStarted = false;
+  let initializationRejected = false;
+  const initializationErrors = new WeakSet<object>();
+  let registrationPhase = false;
+  let deferredInitializationError: Error | undefined;
+  function rejectInitialization(message: string): Error {
+    const error = new HostInitializationRejection(message);
+    initializationErrors.add(error);
+    return error;
+  }
   let settingsStore: PluginSettingsStore | null = null;
   function registerSettings<Schema extends ZodType>(definition: SettingsDefinition<Schema>) {
     if (!settingsStore) throw new Error("Plugin settings storage is unavailable");
@@ -170,13 +181,21 @@ export function createPluginWorker(
     return JSON.parse(encoded) as Value;
   }
 
-  function validateMethod(method: string): string {
+  function rejectRegistration(message: string): undefined {
+    const error = rejectInitialization(message);
+    if (!qualifiedPassive || !registrationPhase) throw error;
+    // Defer fixed registration validation until the contribution returns its VALID
+    // cleanup. A malformed/missing cleanup or arbitrary throw is always fatal.
+    deferredInitializationError ??= error;
+    return undefined;
+  }
+  function validateMethod(method: string): string | undefined {
     const normalized = method.trim();
     if (!/^[a-z][a-z0-9._-]*$/.test(normalized)) {
-      throw new Error(`Invalid plugin RPC method: ${method}`);
+      return rejectRegistration(`Invalid plugin RPC method: ${method}`);
     }
     if (handlers.has(normalized) || subscriptions.has(normalized)) {
-      throw new Error(`Duplicate plugin RPC method: ${normalized}`);
+      return rejectRegistration(`Duplicate plugin RPC method: ${normalized}`);
     }
     return normalized;
   }
@@ -186,9 +205,10 @@ export function createPluginWorker(
     handler: PluginSubscriptionHandler,
   ): void {
     if (typeof handler !== "function") {
-      throw new Error(`Plugin subscription ${contract.name} must provide a handler`);
+      return rejectRegistration(`Plugin subscription ${contract.name} must provide a handler`);
     }
     const method = validateMethod(contract.name);
+    if (method === undefined) return;
     subscriptions.register({ ...contract, name: method }, handler);
   }
 
@@ -207,9 +227,10 @@ export function createPluginWorker(
 
   function register(contract: PluginRpcContract, handler: RpcHandler): void {
     if (typeof handler !== "function") {
-      throw new Error(`Plugin RPC ${contract.name} must provide a handler`);
+      return rejectRegistration(`Plugin RPC ${contract.name} must provide a handler`);
     }
     const method = validateMethod(contract.name);
+    if (method === undefined) return;
     handlers.set(method, { contract: { ...contract, name: method }, handler });
   }
 
@@ -436,11 +457,14 @@ export function createPluginWorker(
       const contribute = initializationActivity.run(() =>
         "contribute" in options ? options.contribute : options.loadContribution(message.bundle),
       );
+      registrationPhase = true;
       const contributedCleanup = initializationActivity.run(() => contribute(context));
+      registrationPhase = false;
       if (typeof contributedCleanup !== "function") {
         throw new Error("Plugin contribution must return a cleanup function");
       }
       cleanup = contributedCleanup;
+      if (deferredInitializationError) throw deferredInitializationError;
       const usageSourceMetadata = await Promise.all(
         [...usageSources.values()]
           .sort((a, b) => a.id.localeCompare(b.id))
@@ -463,6 +487,7 @@ export function createPluginWorker(
         usageSources: usageSourceMetadata,
       });
     } finally {
+      registrationPhase = false;
       initializationActivity.release();
     }
   }
@@ -474,7 +499,7 @@ export function createPluginWorker(
     shutdownCompletion = finishShutdown();
     return shutdownCompletion;
   }
-  async function finishShutdown(): Promise<void> {
+  async function finishShutdown(disconnect = true): Promise<void> {
     const retirement = activity.retirementCleanup();
     try {
       await retirement.run(async () => {
@@ -501,7 +526,7 @@ export function createPluginWorker(
     await sendAndWait({ type: "paseo_close" });
     daemonClient = null;
     paseo = null;
-    channel.disconnect();
+    if (disconnect) channel.disconnect();
   }
 
   function rejectRoot(message: PluginExecutionRoot, error: unknown): void {
@@ -663,6 +688,30 @@ export function createPluginWorker(
     return true;
   }
 
+  async function retireRejectedInitialization(
+    message: Extract<PluginProcessRequest, { type: "initialization.retire" }>,
+  ): Promise<void> {
+    if (
+      !initializationRejected ||
+      !qualifiedPassive ||
+      message.instanceId !== hostInstanceId ||
+      stopping ||
+      activity.begin(message) !== "held"
+    )
+      throw new Error("Initialization retirement is uncertain");
+    stopping = true;
+    shutdownCompletion = finishShutdown(false);
+    await shutdownCompletion;
+    await sendAndWait({
+      type: "initialization.retired",
+      requestId: message.requestId,
+      instanceId: hostInstanceId,
+      generation: message.generation,
+      transactionId: message.transactionId,
+    });
+    channel.disconnect();
+  }
+
   function handleMessage(rawMessage: unknown): void {
     const parsed = PluginProcessRequestSchema.safeParse(rawMessage);
     if (!parsed.success) {
@@ -683,11 +732,27 @@ export function createPluginWorker(
     switch (message.type) {
       case "initialize":
         void initialize(message).catch(async (error) => {
+          if (
+            qualifiedPassive &&
+            cleanup !== null &&
+            error instanceof HostInitializationRejection &&
+            initializationErrors.has(error)
+          ) {
+            initializationRejected = true;
+            send({ type: "initialization.rejected", instanceId: hostInstanceId });
+            return;
+          }
           send({ type: "fatal", error: describeError(error) });
           await paseo
             ?.dispose()
             .catch((failure) => console.error("Plugin API cleanup failed", failure));
           await daemonClient?.close().catch(() => undefined);
+        });
+        return;
+      case "initialization.retire":
+        void retireRejectedInitialization(message).catch((error) => {
+          activity.markUnknown();
+          send({ type: "fatal", error: describeError(error) });
         });
         return;
       case "shutdown":

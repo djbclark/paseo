@@ -3117,6 +3117,10 @@ it("holds complete cohort observation and measurement without genuine executing 
     reason: "authority-unavailable",
   });
   expect(await getQualifiedRuntimeMeasurementV2(forged)).toBeNull();
+  const identity = { generation: 1, transactionId: "forged-held", pluginId: "missing" };
+  expect(service.maintenance.supportsHeldRecoveryV1?.(identity)).toBe(false);
+  expect(await service.maintenance.beginHeldRecoveryV1?.(identity)).toBe("unknown");
+  expect(service.maintenance.supportsV1()).toBe(false);
 });
 
 it("rejects a forged held plugin mutation scope before source preparation or lifecycle changes", async () => {

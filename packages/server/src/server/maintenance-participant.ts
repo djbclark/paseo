@@ -9,8 +9,13 @@ export interface MaintenanceIdentity {
   generation: number;
   transactionId: string;
 }
+export interface HeldRecoveryIdentity extends MaintenanceIdentity {
+  pluginId: string;
+}
 export interface PluginMaintenancePort {
   supportsV1(): boolean;
+  supportsHeldRecoveryV1?(identity: HeldRecoveryIdentity): boolean;
+  beginHeldRecoveryV1?(identity: HeldRecoveryIdentity): Promise<"held" | "known-busy" | "unknown">;
   begin(identity: MaintenanceIdentity): Promise<"held" | "known-busy" | "unknown">;
   /** Qualified release, or confirmed rollback of every unpublished provisional barrier. */
   end(identity: MaintenanceIdentity): Promise<void>;
@@ -122,6 +127,21 @@ export function qualifiedMaintenanceParticipant(
   authority: QualifiedDaemonAccess,
 ): PluginMaintenancePort {
   return {
+    ...(participant.supportsHeldRecoveryV1 && participant.beginHeldRecoveryV1 ? {
+      supportsHeldRecoveryV1(identity: HeldRecoveryIdentity) {
+        try {
+          authority.assertQualified();
+          return participant.supportsHeldRecoveryV1?.(identity) === true;
+        } catch { return false; }
+      },
+      async beginHeldRecoveryV1(identity: HeldRecoveryIdentity) {
+        await authority.refresh();
+        const result = await participant.beginHeldRecoveryV1!(identity);
+        authority.assertQualified();
+        if (result !== "held") return result;
+        return participant.supportsHeldRecoveryV1?.(identity) === true ? "held" as const : "unknown" as const;
+      },
+    } : {}),
     supportsV1() {
       try {
         authority.assertQualified();

@@ -262,6 +262,10 @@ describe("maintenance confirmed failed-held serialization (wire unit)", () => {
       ),
     ).toThrow();
     expect(() => maintenancePluginOutput(payload, false)).toThrow();
+    const scopedOnly = { ...known, maintenance: { ...known.maintenance, authority: { ...known.maintenance.authority,
+      features: { maintenanceReservationV1: false, maintenancePluginOperationV1: false,
+        maintenanceKnownFailedHeldV1: false, maintenanceHeldRecoveryV1: true } } } };
+    expect(maintenancePluginOutput({ ...payload, knownFailedHeld: scopedOnly }, true)).toEqual(scopedOnly);
     expect(() => maintenancePluginOutput({ ...payload, error: "lost" }, true)).toThrow();
     expect(() =>
       maintenancePluginOutput(

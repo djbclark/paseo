@@ -419,7 +419,7 @@ export class PluginRuntime {
   async startBuiltinPlugin(input: { id: string; directory: string }): Promise<void> {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
-    const directory = path.resolve(input.directory);
+    const directory = await realpath(path.resolve(input.directory));
     const bundles = await compileDirectoryPlugin(directory, this.daemonVersion, input.id);
     const { manifest } = bundles;
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);

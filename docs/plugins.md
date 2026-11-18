@@ -4,6 +4,16 @@ Local plugins contribute daemon RPCs, native app surfaces, workspace panels, Com
 client slash commands, timeline items, header buttons, composer pills, app themes, composer attachment sources, and settings screens.
 Paseo executes `index.server.ts` in a subprocess and `index.client.tsx` in every connected app.
 
+Server contributions receive `context.sourceDirectory`: the canonical absolute directory of the source
+being initialized. It comes directly from the daemon's initialize message and is read-only in both the
+SDK type and its runtime property descriptor. During replacement it names candidate B while the saved
+registration still names A. Use it during contribution setup to bind helpers; do not infer the loaded
+source from registration, environment, cwd, or a CommonJS `import.meta.url` fallback. Bundle module
+evaluation happens before contribution setup, so defer source-root resolution until you receive this
+context. The directory is identity, not authorization; managed policy, snapshot/bundle hash checks and
+external dependency qualification still apply. The worker rejects relative, noncanonical or nondirectory
+initialize paths before invoking the contribution. Contribution cleanup remains synchronous and required.
+
 > **Trust every plugin you add.** `paseo plugin add` and `paseo plugin install` mean “I trust this codebase.” Plugins are unsandboxed: server code and preparation commands run with the daemon user's access on the daemon host, and client contributions run inside Paseo. The repository's dependencies and future updates are part of that trust decision. With `--host`, preparation runs on that remote daemon host.
 
 ## Managed activation policy (fork)

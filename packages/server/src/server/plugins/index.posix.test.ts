@@ -2637,4 +2637,57 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   }, 30_000);
+  it("binds readonly CJS candidate sourceDirectory to B while persisted registration still names A", async () => {
+    const f = await fixture();
+    const old = await createPlugin(
+      "managed",
+      "export default function contribute() { return () => {}; }",
+    );
+    const observed = path.join(f.home, "candidate-source.json");
+    const config = path.join(f.home, "config.json");
+    const cleanupMarker = path.join(f.home, "candidate-cleanup");
+    const candidate = await createPlugin(
+      "managed",
+      `import { readFileSync, writeFileSync } from 'node:fs';
+      import type { PluginServerContext } from '@getpaseo/plugin/server';
+      export default function contribute(context: PluginServerContext) {
+        const descriptor = Object.getOwnPropertyDescriptor(context, 'sourceDirectory');
+        const changed = Reflect.set(context, 'sourceDirectory', '/incorrect');
+        const redefined = Reflect.defineProperty(context, 'sourceDirectory', { value: '/incorrect' });
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ sourceDirectory: context.sourceDirectory,
+          registeredPath: JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8')).plugins.managed.path,
+          writable: descriptor?.writable, configurable: descriptor?.configurable, enumerable: descriptor?.enumerable, changed, redefined }));
+        return () => writeFileSync(${JSON.stringify(cleanupMarker)}, 'cleaned');
+      }`,
+    );
+    await allow(f.policyFile, [await authorization(old, 0)]);
+    const service = createService(f.home, {}, { activationPolicy: f.policy });
+    try {
+      await service.start();
+      const baseline = await service.installDirectory({ path: old });
+      expect(baseline.loaded?.sourcePath).toBe(await realpath(old));
+      await allow(f.policyFile, [await authorization(candidate, 1)]);
+      const promoted = await service.replaceDirectory({
+        pluginId: "managed",
+        path: candidate,
+        expectedPath: old,
+        expectedGeneration: 1,
+      });
+      expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
+        sourceDirectory: await realpath(candidate),
+        registeredPath: old,
+        writable: false,
+        configurable: false,
+        enumerable: true,
+        changed: false,
+        redefined: false,
+      });
+      expect(promoted.path).toBe(candidate);
+      expect(promoted.loaded?.sourcePath).toBe(await realpath(candidate));
+      await service.disablePlugin("managed");
+      expect(await readFile(cleanupMarker, "utf8")).toBe("cleaned");
+    } finally {
+      await service.stopAllPlugins();
+    }
+  });
 });

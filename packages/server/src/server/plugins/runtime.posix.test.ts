@@ -1,6 +1,6 @@
 import { ManagedPluginActivationPolicy, hashPluginSnapshot } from "./activation-policy.js";
 import { compileDirectoryPlugin } from "./compiler.js";
-import { realpath } from "node:fs/promises";
+import { realpath, symlink } from "node:fs/promises";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fork } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2327,3 +2327,50 @@ it("loads arrow default server exports with their live CommonJS binding", async 
     await runtime.stopAll();
   }
 });
+
+it.each(["relative", "symlink", "file"])(
+  "rejects %s initialize sourceDirectory before contribution setup",
+  async (kind) => {
+    const directory = await createPlugin(
+      "source-validation",
+      "export default function contribute() { return () => {}; }",
+    );
+    const bundle = await compileDirectoryPlugin(directory, "0.4.0");
+    if (!bundle.serverBundle) throw new Error("Expected source-validation server bundle");
+    const alias = path.join(directory, "alias");
+    await symlink(directory, alias, "dir");
+    let supplied = path.relative(process.cwd(), directory);
+    if (kind === "symlink") supplied = alias;
+    if (kind === "file") supplied = path.join(directory, "index.server.ts");
+    const child = spawnObservedPluginProcess(() => {});
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    const fatal = new Promise<string>((resolve) =>
+      child.on("message", (message) => {
+        if (
+          message &&
+          typeof message === "object" &&
+          "type" in message &&
+          message.type === "fatal" &&
+          "error" in message &&
+          typeof message.error === "string"
+        )
+          resolve(message.error);
+      }),
+    );
+    try {
+      child.send({
+        type: "initialize",
+        pluginId: "source-validation",
+        bundle: bundle.serverBundle,
+        appVersion: "0.4.0",
+        pluginDirectory: supplied,
+      });
+      const message = await fatal;
+      expect(message).toContain(kind === "file" ? "must be a directory" : "absolute and canonical");
+    } finally {
+      child.kill();
+      await closed;
+    }
+  },
+  15_000,
+);

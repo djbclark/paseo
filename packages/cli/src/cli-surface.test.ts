@@ -108,6 +108,8 @@ describe("canonical CLI surface", () => {
     const plugin = createCli().commands.find((command) => command.name() === "plugin");
 
     expect(plugin?.commands.map((command) => command.name())).toEqual([
+      "recover",
+      "replace",
       "init",
       "ls",
       "status",
@@ -119,6 +121,11 @@ describe("canonical CLI surface", () => {
       "disable",
       "remove",
     ]);
+    for (const name of ["recover", "replace"]) {
+      const help = plugin?.commands.find((command) => command.name() === name)?.helpInformation();
+      expect(help).toContain("--expected-path <path>");
+      expect(help).toContain("--expected-generation <generation>");
+    }
     expect(
       plugin?.commands.find((command) => command.name() === "init")?.helpInformation(),
     ).toContain("--id <id>");

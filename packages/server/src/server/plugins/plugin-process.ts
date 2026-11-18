@@ -1,3 +1,5 @@
+import path from "node:path";
+import { realpath, stat } from "node:fs/promises";
 import { PluginAgentTools } from "./agent-tools.js";
 import { PluginHookHandlers } from "./lifecycle/index.js";
 import { evaluateBundle } from "./bundle-evaluator.js";
@@ -46,6 +48,17 @@ export interface PluginWorkerChannel {
   send(message: PluginProcessMessage, callback?: () => void): void;
   onMessage(handler: (message: PluginProcessRequest) => void): () => void;
   disconnect(): void;
+}
+
+async function validateSourceDirectory(directory: string): Promise<string> {
+  if (!path.isAbsolute(directory))
+    throw new Error("Plugin source directory must be absolute and canonical");
+  const canonical = await realpath(directory);
+  if (canonical !== directory)
+    throw new Error("Plugin source directory must be absolute and canonical");
+  if (!(await stat(canonical)).isDirectory())
+    throw new Error("Plugin source directory must be a directory");
+  return canonical;
 }
 
 export function createPluginWorker(options: {
@@ -305,6 +318,7 @@ export function createPluginWorker(options: {
   });
 
   async function initialize(message: Extract<PluginProcessRequest, { type: "initialize" }>) {
+    const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
     daemonClient = new DaemonClient({
       url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
       clientId: createPluginClientId(message.pluginId),
@@ -321,7 +335,8 @@ export function createPluginWorker(options: {
           send({ type: "settings.changed", settingsId }),
         )
       : null;
-    const contributedCleanup = contribute({
+    const context: PluginServerContext = {
+      sourceDirectory,
       handle,
       registerProvider,
       registerUsageSource,
@@ -329,7 +344,14 @@ export function createPluginWorker(options: {
       addHook: hooks.addHook,
       on: hooks.on,
       before: hooks.before,
+    };
+    Object.defineProperty(context, "sourceDirectory", {
+      value: sourceDirectory,
+      writable: false,
+      configurable: false,
+      enumerable: true,
     });
+    const contributedCleanup = contribute(context);
     if (typeof contributedCleanup !== "function") {
       throw new Error("Plugin contribution must return a cleanup function");
     }

@@ -1795,6 +1795,10 @@ export class PluginRuntime {
               settled = true;
               clearTimeout(timeout);
               resolve(message);
+            } else if (message.type === "initialization.rejected") {
+              // The ordinary path cannot certify recovery from a rejection message.
+              // The held attempt path must additionally prove actual retirement.
+              fail(new Error("Plugin initialization rejected by host validation"));
             } else if (message.type === "fatal") {
               fail(new Error(message.error));
             } else if (loaded) {

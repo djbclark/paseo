@@ -1487,7 +1487,11 @@ test.each(["reject", "stall"] as const)(
       finishStream = resolve;
     });
     const never = new Promise<never>(() => {});
+    const claudeRuntimeSettings = {
+      command: { mode: "replace" as const, argv: [process.execPath] },
+    };
     const claude = new ClaudeAgentClient({
+      runtimeSettings: claudeRuntimeSettings,
       logger: pino({ level: "silent" }),
       resolveBinary: async () => process.execPath,
       queryFactory: ({ options }) => {
@@ -1555,7 +1559,10 @@ test.each(["reject", "stall"] as const)(
         await never;
       },
     });
-    const handle = await createTestPaseoDaemon({ agentClients: { claude, codex: peers.codex } });
+    const handle = await createTestPaseoDaemon({
+      agentClients: { claude, codex: peers.codex },
+      providerOverrides: { claude: claudeRuntimeSettings },
+    });
     let stopped = false;
     let run: Promise<unknown> | undefined;
     let peerRun: Promise<unknown> | undefined;

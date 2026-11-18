@@ -736,6 +736,19 @@ privately; status never returns it. End with `paseo daemon maintenance end --gen
 Never put the token in argv or diagnostic logs. A lost begin response requires operator recovery;
 there is no second token read or automatic expiry.
 
+Before allocating an attempt, read qualified idle status with `ready: true` and no recovery hold.
+Require its explicit `reservationGeneration` counter (zero for a validated fresh home); legacy
+`generation: null` does not establish zero. The next native generation is this counter plus one,
+independent of the installer transaction sequence and plugin journal CAS. Bind BEGIN to the same
+`--expected-server-id` and `--expected-daemon-incarnation`; stale identity or authority stays uncertain.
+
+Only a definitive identity-bound BEGIN refusal with `MAINTENANCE_KNOWN_BUSY` proves no grant:
+known admitted work before any barrier, or confirmed rollback of every provisional barrier. With
+`--json`, this exits nonzero with empty stdout and bounded stderr
+`{"error":{"code":"MAINTENANCE_KNOWN_BUSY","message":"Maintenance reservation refused"}}`.
+All other failures, including lost replies and failed rollback, require a hold; do not infer busy
+from error text or later idle status, reuse an uncertain attempt, or issue automatic END.
+
 Production capability requires the trusted plugin maintenance port and a producer-private binding
 for the actual enclosing retained daemon, its owned compiler worker and plugin children. External
 Electron/supervisor relaunch remains outside this Linux profile. Source/dev launches and the initial

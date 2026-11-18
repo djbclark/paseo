@@ -27,8 +27,22 @@ export interface MaintenanceStatus {
   schemaVersion: 1;
   state: "idle" | "held" | "recovery-required";
   generation: number | null;
+  reservationGeneration: number;
+  ready: boolean;
   transactionId: string | null;
   recoveryRequired: boolean;
+}
+const knownBusyRefusals = new WeakSet<object>();
+function knownBusyRefusal(): Error {
+  const error = new Error("Maintenance reservation refused");
+  knownBusyRefusals.add(error);
+  return error;
+}
+/** Classification is native-private; messages and caller supplied codes never grant it. */
+export function maintenanceBeginErrorCode(error: unknown): "MAINTENANCE_KNOWN_BUSY" | undefined {
+  if (typeof error === "object" && error !== null && knownBusyRefusals.has(error))
+    return "MAINTENANCE_KNOWN_BUSY";
+  return undefined;
 }
 type RecordV1 = MaintenanceRecord;
 const digest = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -432,6 +446,8 @@ export class MaintenanceReservation {
     if (recoveryRequired) state = "recovery-required";
     return {
       schemaVersion: 1,
+      reservationGeneration: this.record?.generation ?? 0,
+      ready: this.isReady(),
       state,
       generation: this.attempt?.generation ?? (this.record?.generation || null),
       transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
@@ -504,10 +520,7 @@ export class MaintenanceReservation {
     };
   }
 
-  async begin(
-    generation: number,
-    transactionId: string,
-  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+  private assertBeginRequest(generation: number, transactionId: string): void {
     if (
       !Number.isSafeInteger(generation) ||
       generation <= 0 ||
@@ -519,12 +532,39 @@ export class MaintenanceReservation {
       this.failed ||
       this.pending ||
       this.record?.tokenDigest ||
-      this.inFlight ||
+      this.record?.uncertain ||
+      this.recovery ||
       generation <= (this.record?.generation ?? 0)
     )
       throw new Error("Maintenance busy or stale generation");
-    if (!this.isReady())
-      throw new Error("Maintenance reservation unsupported or startup incomplete");
+  }
+
+  async begin(
+    generation: number,
+    transactionId: string,
+  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+    this.assertBeginRequest(generation, transactionId);
+    let previous = this.record;
+    const readinessRevision = this.readinessRevision;
+    const assertAvailable = () => {
+      this.assertNoUnknownWork();
+      if (!this.isReady())
+        throw new Error("Maintenance reservation unsupported or startup incomplete");
+      this.assertNoUnknownWork();
+      if (
+        !this.ready ||
+        this.readinessRevision !== readinessRevision ||
+        this.record !== previous ||
+        this.record?.tokenDigest ||
+        this.record?.uncertain ||
+        this.recovery ||
+        generation <= (this.record?.generation ?? 0)
+      )
+        throw new Error("Maintenance authority changed");
+    };
+    assertAvailable();
+    // No barrier or authority transition has occurred. Never acquire over admitted work.
+    if (this.inFlight) throw knownBusyRefusal();
     const identity = { generation, transactionId };
     this.pending = true;
     this.attempt = identity;
@@ -532,8 +572,22 @@ export class MaintenanceReservation {
     try {
       await this.storage(() => this.enroll());
       this.assertNoUnknownWork();
-      knownBusy = !(await this.prepareParticipant(identity));
-      if (knownBusy) throw new Error("Maintenance known busy");
+      if (
+        previous === null &&
+        this.record?.generation === 0 &&
+        !this.record.tokenDigest &&
+        this.record.transactionId === null
+      )
+        previous = this.record;
+      const prepared = await this.prepareParticipant(identity);
+      assertAvailable();
+      if (!this.pending || this.attempt !== identity)
+        throw new Error("Maintenance attempt changed");
+      if (!prepared) {
+        // prepareParticipant returned only after every provisional barrier acknowledged rollback.
+        knownBusy = true;
+        throw knownBusyRefusal();
+      }
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
       const next: RecordV1 = {

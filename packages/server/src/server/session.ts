@@ -1,3 +1,4 @@
+import { maintenanceBeginErrorCode } from "./maintenance-reservation.js";
 import { DiffSession } from "./diff/index.js";
 import { type WorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import type { AgentMessageDelivery } from "./agent/agent-messages/index.js";
@@ -3322,7 +3323,21 @@ export class Session {
           },
         });
       }
-    } catch {
+    } catch (error) {
+      let errorCode: "MAINTENANCE_KNOWN_BUSY" | undefined;
+      if (
+        msg.type === "daemon.maintenance.begin.request" &&
+        msg.expectedServerId !== undefined &&
+        msg.expectedDaemonIncarnation !== undefined &&
+        maintenanceBeginErrorCode(error)
+      ) {
+        try {
+          maintenance?.assertTransport(msg);
+          if (maintenance) errorCode = maintenanceBeginErrorCode(error);
+        } catch {
+          /* Changed or unknown identity cannot grant a typed refusal. */
+        }
+      }
       // Do not echo requests or errors: the end payload contains a bearer token.
       this.emit({
         type: msg.type.replace(".request", ".response") as
@@ -3332,6 +3347,7 @@ export class Session {
           | "daemon.maintenance.plugin.operation.response",
         payload: {
           requestId: msg.requestId,
+          ...(errorCode ? { errorCode } : {}),
           result: null,
           error: "Maintenance unavailable, busy, or ownership mismatch",
         },

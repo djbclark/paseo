@@ -3,7 +3,12 @@ import { Command } from "commander";
 import { verifyOfflineMaintenance } from "@getpaseo/server/maintenance-offline";
 import { connectToDaemon } from "../../utils/client.js";
 import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-options.js";
-import { withOutput, type CommandOptions, type OutputSchema } from "../../output/index.js";
+import {
+  withOutput,
+  type CommandOptions,
+  type OutputSchema,
+  type CommandError,
+} from "../../output/index.js";
 
 type Status =
   | Awaited<ReturnType<typeof verifyOfflineMaintenance>>
@@ -21,6 +26,24 @@ const schema: OutputSchema<Status> = {
   // A token is returned only in the explicit JSON result of successful begin.
   renderHuman: (result) => (result.type === "single" ? `Maintenance ${result.data.state}` : ""),
 };
+const knownBusyErrors = new WeakSet<object>();
+export function maintenanceBeginRefusal(payload: {
+  result: unknown;
+  error: unknown;
+  errorCode?: unknown;
+}): CommandError {
+  const knownBusy =
+    payload.result === null &&
+    typeof payload.error === "string" &&
+    payload.error.length > 0 &&
+    payload.errorCode === "MAINTENANCE_KNOWN_BUSY";
+  const error = {
+    code: knownBusy ? "MAINTENANCE_KNOWN_BUSY" : "UNKNOWN_ERROR",
+    message: "Maintenance reservation refused",
+  };
+  if (knownBusy) knownBusyErrors.add(error);
+  return error;
+}
 function generation(value: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error("Invalid generation");
@@ -72,32 +95,42 @@ export function daemonMaintenanceCommand(): Command {
     }
     sub.action(
       withOutput(async (options: CommandOptions, _command: Command) => {
-        if (operation === "begin" && !options.json)
-          throw new Error("Begin requires --json to receive the owner token once");
-        const token =
-          operation === "end" ? readMaintenanceOwnerToken(Number(options.ownerTokenFd)) : "";
-        const client = await connectToDaemon({ target: options.daemonTarget });
         try {
-          let payload;
-          if (operation === "begin")
-            payload = await client.maintenanceBegin({
-              generation: generation(String(options.generation ?? "")),
-              transactionId: String(options.transactionId ?? ""),
-              ...identity(options),
-            });
-          else if (operation === "end")
-            payload = await client.maintenanceEnd({
-              generation: generation(String(options.generation ?? "")),
-              ownerToken: token,
-              transactionId:
-                options.transactionId === undefined ? undefined : String(options.transactionId),
-              ...identity(options),
-            });
-          else payload = await client.maintenanceStatus();
-          if (payload.error || !payload.result) throw new Error("Maintenance request refused");
-          return { type: "single" as const, data: payload.result, schema };
-        } finally {
-          await client.close();
+          if (operation === "begin" && !options.json)
+            throw new Error("Begin requires --json to receive the owner token once");
+          const token =
+            operation === "end" ? readMaintenanceOwnerToken(Number(options.ownerTokenFd)) : "";
+          const client = await connectToDaemon({ target: options.daemonTarget });
+          try {
+            let payload;
+            if (operation === "begin")
+              payload = await client.maintenanceBegin({
+                generation: generation(String(options.generation ?? "")),
+                transactionId: String(options.transactionId ?? ""),
+                ...identity(options),
+              });
+            else if (operation === "end")
+              payload = await client.maintenanceEnd({
+                generation: generation(String(options.generation ?? "")),
+                ownerToken: token,
+                transactionId:
+                  options.transactionId === undefined ? undefined : String(options.transactionId),
+                ...identity(options),
+              });
+            else payload = await client.maintenanceStatus();
+            if (payload.error || !payload.result) {
+              if (operation === "begin") throw maintenanceBeginRefusal(payload);
+              throw new Error("Maintenance request refused");
+            }
+            return { type: "single" as const, data: payload.result, schema };
+          } finally {
+            await client.close();
+          }
+        } catch (error) {
+          if (operation !== "begin") throw error;
+          if (typeof error === "object" && error !== null && knownBusyErrors.has(error))
+            throw error;
+          throw { code: "UNKNOWN_ERROR", message: "Maintenance reservation refused" };
         }
       }),
     );

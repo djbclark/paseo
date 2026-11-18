@@ -1,8 +1,14 @@
+import { connectToDaemon } from "../../utils/client.js";
+vi.mock("../../utils/client.js", () => ({ connectToDaemon: vi.fn() }));
 import { mkdtempSync, writeFileSync, openSync, closeSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { daemonMaintenanceCommand, readMaintenanceOwnerToken } from "./maintenance.js";
-import { describe, expect, test } from "vitest";
+import {
+  daemonMaintenanceCommand,
+  readMaintenanceOwnerToken,
+  maintenanceBeginRefusal,
+} from "./maintenance.js";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { render } from "../../output/render.js";
 import { daemonReloadSchema, type DaemonReloadResult } from "./reload.js";
 
@@ -109,4 +115,78 @@ describe("maintenance private owner token FD", () => {
       }
     },
   );
+});
+
+describe("maintenance BEGIN authoritative refusal output", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(connectToDaemon).mockReset();
+  });
+  test.each(["known", "generic", "contradictory", "lost", "close-failed"])(
+    "%s response never logs bearer or guesses busy",
+    async (mode) => {
+      const token = "x".repeat(43);
+      const maintenanceBegin = vi.fn(async () => {
+        if (mode === "lost")
+          throw Object.assign(new Error(token), { code: "MAINTENANCE_KNOWN_BUSY" });
+        return {
+          requestId: "begin",
+          error: "refused " + token,
+          result: mode === "contradictory" ? { ownerToken: token } : null,
+          ...(mode !== "generic" ? { errorCode: "MAINTENANCE_KNOWN_BUSY" } : {}),
+        };
+      });
+      const close = vi.fn(async () => {
+        if (mode === "close-failed") throw new Error(token);
+      });
+      vi.mocked(connectToDaemon).mockResolvedValue({
+        maintenanceBegin,
+        close,
+      } as unknown as Awaited<ReturnType<typeof connectToDaemon>>);
+      const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+      const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+        throw new Error("test exit");
+      });
+      await expect(
+        daemonMaintenanceCommand().parseAsync(
+          [
+            "begin",
+            "--generation",
+            "1",
+            "--transaction-id",
+            "tx",
+            "--expected-server-id",
+            "server",
+            "--expected-daemon-incarnation",
+            "incarnation",
+            "--json",
+          ],
+          { from: "user" },
+        ),
+      ).rejects.toThrow("test exit");
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledTimes(1);
+      const output = JSON.parse(String(stderr.mock.calls[0][0]));
+      expect(output).toEqual({
+        error: {
+          code: mode === "known" ? "MAINTENANCE_KNOWN_BUSY" : "UNKNOWN_ERROR",
+          message: "Maintenance reservation refused",
+        },
+      });
+      expect(JSON.stringify(output)).not.toContain(token);
+      expect(maintenanceBegin).toHaveBeenCalledWith({
+        generation: 1,
+        transactionId: "tx",
+        expectedServerId: "server",
+        expectedDaemonIncarnation: "incarnation",
+      });
+    },
+  );
+  test("text-only refusal cannot produce typed busy", () => {
+    expect(maintenanceBeginRefusal({ result: null, error: "MAINTENANCE_KNOWN_BUSY" }).code).toBe(
+      "UNKNOWN_ERROR",
+    );
+  });
 });

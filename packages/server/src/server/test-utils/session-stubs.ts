@@ -35,6 +35,9 @@ export function asAgentManager(stub: {
   [K in keyof SessionOptions["agentManager"]]?: unknown;
 }): SessionOptions["agentManager"] {
   return createStub<SessionOptions["agentManager"]>({
+    // Transport-only stubs match an unbootstrapped manager; reservation tests
+    // override this property with the real owner rather than a fake execute method.
+    maintenanceReservation: undefined,
     listProviderSubagentActivity: () => [],
     getRetiredInternalAgent: () => null,
     effectiveOptionsFor: (_provider: string, own?: Record<string, unknown>) => own ?? {},

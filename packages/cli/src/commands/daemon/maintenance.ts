@@ -39,7 +39,7 @@ export function daemonMaintenanceCommand(): Command {
     if (operation === "end")
       sub.requiredOption("--owner-token-fd <fd>", "Private input FD (0 for stdin)");
     sub.action(
-      withOutput(async (options: CommandOptions) => {
+      withOutput(async (options: CommandOptions, _command: Command) => {
         if (operation === "begin" && !options.json)
           throw new Error("Begin requires --json to receive the owner token once");
         let token = "";
@@ -79,7 +79,7 @@ export function daemonMaintenanceCommand(): Command {
       .requiredOption("--generation <number>", "Expected controller generation")
       .requiredOption("--transaction-id <id>", "Expected controller transaction"),
   ).action(
-    withOutput(async (options: CommandOptions) => {
+    withOutput(async (options: CommandOptions, _command: Command) => {
       try {
         return {
           type: "single" as const,

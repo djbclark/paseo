@@ -736,6 +736,18 @@ privately; status never returns it. End with `paseo daemon maintenance end --gen
 Never put the token in argv or diagnostic logs. A lost begin response requires operator recovery;
 there is no second token read or automatic expiry.
 
+Production capability also requires the trusted plugin maintenance port and genuine executing
+supervisor, daemon and compiler qualifications, plus each plugin host's reviewed passive closure.
+Source/dev launches and the initial plugin-host-only producer remain unsupported. Parsed receipts,
+disk hashes and caller-supplied callbacks cannot grant qualification. The persistent plugin transport
+is not foreground work: its participant closes admission, accounts actual execution and helpers,
+and acknowledges the child barrier. Unknown or unqualified activity keeps admission held.
+
+A restored hold closes the participant barrier before plugin startup. Only independently qualified
+passive initialization may obtain fresh loaded evidence; settlement and a fresh child acknowledgment
+precede owner-authorized release. There is no automatic end or forced plugin shutdown during recovery.
+The native source slice does not qualify Cafe or other unreviewed background plugins.
+
 Begin closes admission before observing work. It refuses in-flight operations, open terminals,
 and all live provider sessions (including idle sessions whose autonomous work cannot be proved
 quiet), discovery children, and remaining provider-process ledger entries. It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,

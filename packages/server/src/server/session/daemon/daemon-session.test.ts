@@ -1,3 +1,4 @@
+import { qualifiedMaintenanceParticipant, qualifiedParentExecutionAssertion, type PluginMaintenancePort, type QualifiedParentExecution } from "../../maintenance-participant.js";
 import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import * as maintenanceFs from "node:fs";
 import * as maintenanceOs from "node:os";
@@ -568,9 +569,9 @@ describe("maintenance reservation admission", () => {
       const restarted = new MaintenanceReservation(f.home, async () => true);
       expect(restarted.status().state).toBe("recovery-required");
       expect(() => restarted.enter()).toThrow();
-      expect(() => restarted.end(2, held.ownerToken)).toThrow();
-      expect(() => restarted.end(1, "wrong")).toThrow();
-      expect(restarted.end(1, held.ownerToken).state).toBe("idle");
+      await expect(restarted.end(2, held.ownerToken)).rejects.toThrow();
+      await expect(restarted.end(1, "wrong")).rejects.toThrow();
+      expect((await restarted.end(1, held.ownerToken)).state).toBe("idle");
       await expect(restarted.begin(1, "reused")).rejects.toThrow();
       expect((await restarted.begin(2, "new")).state).toBe("held");
     } finally {
@@ -727,7 +728,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
       try {
         const reservation = new MaintenanceReservation(home, async () => true);
         const previous = await reservation.begin(1, "previous");
-        reservation.end(1, previous.ownerToken);
+        await reservation.end(1, previous.ownerToken);
         inject(stage);
         await expect(reservation.begin(2, "failed-begin")).rejects.toThrow("injected");
         expect(reservation.status()).toMatchObject({
@@ -754,7 +755,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
         const reservation = new MaintenanceReservation(home, async () => true);
         const held = await reservation.begin(1, "held");
         inject(stage);
-        expect(() => reservation.end(1, held.ownerToken)).toThrow("injected");
+        await expect(reservation.end(1, held.ownerToken)).rejects.toThrow("injected");
         expect(reservation.status()).toMatchObject({
           state: "recovery-required",
           recoveryRequired: true,
@@ -1044,5 +1045,118 @@ describe("shared workspace setup maintenance admission", () => {
       await setup.stop("workspace");
       removeMaintenanceHome(home, { recursive: true, force: true });
     }
+  });
+});
+
+// Participant mechanism units only. These stubs are never production qualification evidence.
+describe("native maintenance participant serialization", () => {
+  function fixture(port: PluginMaintenancePort, quiet = async () => true) {
+    const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "participant-"));
+    return { home, reservation: new MaintenanceReservation(home, quiet, port), close: () => removeMaintenanceHome(home, { recursive: true, force: true }) };
+  }
+  test("known participant busy reopens only an unpublished attempt", async () => {
+    const end = vi.fn(async () => {});
+    const f = fixture({ supportsV1: () => true, begin: async () => "known-busy", end });
+    try {
+      await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("idle");
+      expect(end).not.toHaveBeenCalled();
+      f.reservation.enter()();
+    } finally { f.close(); }
+  });
+  test("authoritative busy rolls back provisional barrier; rollback uncertainty stays held", async () => {
+    let fail = false;
+    const end = vi.fn(async () => { if (fail) throw new Error("lost rollback ACK"); });
+    const f = fixture({ supportsV1: () => true, begin: async () => "held", end }, async () => false);
+    try {
+      await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
+      expect(end).toHaveBeenCalledWith({ generation: 1, transactionId: "busy" });
+      expect(f.reservation.status().state).toBe("idle");
+      fail = true;
+      await expect(f.reservation.begin(1, "uncertain")).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("recovery-required");
+      expect(() => f.reservation.enter()).toThrow();
+      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("recovery-required");
+    } finally { f.close(); }
+  });
+  test("unknown/late cohort acknowledgement never returns an owner token or releases the barrier", async () => {
+    const begin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValueOnce("held").mockResolvedValueOnce("unknown");
+    const end = vi.fn(async () => {});
+    const f = fixture({ supportsV1: () => true, begin, end });
+    try {
+      await expect(f.reservation.begin(1, "changed-cohort")).rejects.toThrow();
+      expect(end).not.toHaveBeenCalled();
+      expect(f.reservation.status()).toMatchObject({ state: "recovery-required", recoveryRequired: true });
+    } finally { f.close(); }
+  });
+  test("owner END serializes fresh cohort check, idle commit and participant release without leaking token", async () => {
+    const calls: unknown[] = [];
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const port: PluginMaintenancePort = {
+      supportsV1: () => true,
+      begin: async identity => { calls.push({ begin: identity }); return "held"; },
+      end: async identity => { calls.push({ end: identity }); await gate; },
+    };
+    const f = fixture(port);
+    try {
+      const held = await f.reservation.begin(1, "owner");
+      const count = calls.length;
+      await expect(f.reservation.end(2, held.ownerToken)).rejects.toThrow();
+      await expect(f.reservation.end(1, "wrong")).rejects.toThrow();
+      expect(calls).toHaveLength(count);
+      const releasing = f.reservation.end(1, held.ownerToken);
+      await Promise.resolve(); await Promise.resolve();
+      expect(f.reservation.status().state).toBe("held");
+      await expect(f.reservation.begin(2, "racing-begin")).rejects.toThrow();
+      expect(JSON.stringify(calls)).not.toContain(held.ownerToken);
+      finish(); expect((await releasing).state).toBe("idle");
+    } finally { finish(); f.close(); }
+  });
+  test("participant END uncertainty closes current process; restart honors actual authorized idle commit", async () => {
+    const f = fixture({ supportsV1: () => true, begin: async () => "held", end: async () => { throw new Error("release ACK lost"); } });
+    try {
+      const held = await f.reservation.begin(1, "end-unknown");
+      await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow();
+      expect(f.reservation.status().state).toBe("recovery-required");
+      expect(() => f.reservation.enter()).toThrow();
+      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("idle");
+    } finally { f.close(); }
+  });
+  test("restored hold installs barrier before initialization and never automatically ENDs", async () => {
+    const calls: string[] = [];
+    const port: PluginMaintenancePort = { supportsV1: () => true, begin: async () => { calls.push("barrier"); return "held"; }, end: async () => { calls.push("end"); } };
+    const f = fixture(port);
+    try {
+      const owner = await f.reservation.begin(1, "restart");
+      calls.length = 0;
+      const restored = new MaintenanceReservation(f.home, async () => true, port);
+      restored.setReady(false);
+      await restored.restoreParticipantBeforeStart();
+      await restored.runQualifiedInitialization(async () => {
+        calls.push("init"); expect(() => restored.enter()).toThrow();
+      });
+      await restored.recheckRestoredParticipant();
+      expect(calls).toEqual(["barrier", "init", "barrier"]);
+      restored.setReady(true);
+      await restored.end(1, owner.ownerToken);
+      expect(calls.at(-1)).toBe("end");
+    } finally { f.close(); }
+  });
+  test("missing/fake parent capability is unsupported while raw restore barrier still installs", async () => {
+    const rawBegin = vi.fn<PluginMaintenancePort["begin"]>().mockResolvedValue("held");
+    const rawEnd = vi.fn(async () => {});
+    const raw = { supportsV1: () => true, begin: rawBegin, end: rawEnd };
+    const fakeBinding = { capability: { assertQualifiedExecution: () => {}, evidenceDigest: "candidate" }, expectedClosure: "candidate", expectedIncarnation: "candidate" };
+    const fake: QualifiedParentExecution = { supervisor: fakeBinding, daemon: fakeBinding, compiler: fakeBinding };
+    for (const chain of [undefined, fake]) {
+      const assert = await qualifiedParentExecutionAssertion(chain);
+      const participant = qualifiedMaintenanceParticipant(raw, assert);
+      expect(participant.supportsV1()).toBe(false);
+      expect(await participant.begin({ generation: 1, transactionId: "restore" })).toBe("unknown");
+      await expect(participant.end({ generation: 1, transactionId: "restore" })).rejects.toThrow();
+    }
+    expect(rawBegin).toHaveBeenCalledTimes(2);
+    expect(rawEnd).not.toHaveBeenCalled();
   });
 });

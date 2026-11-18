@@ -9630,7 +9630,7 @@ test.each(["archive", "unarchive"] as const)(
       expect(client.archivedHandles).toHaveLength(archived);
       expect(client.unarchivedHandles).toHaveLength(unarchived);
       expect((await storage.get(agent.id))?.archivedAt).toBe(before?.archivedAt);
-      reservation.end(1, held.ownerToken);
+      await reservation.end(1, held.ownerToken);
     } finally {
       armed = false;
       finish();

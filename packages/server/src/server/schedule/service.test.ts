@@ -382,7 +382,7 @@ describe("ScheduleService", () => {
       await expect(service.tick()).rejects.toThrow("maintenance");
       expect(runner).toHaveBeenCalledTimes(1);
       expect((await service.inspect(schedule.id)).runs).toEqual(previous.runs);
-      reservation.end(1, held.ownerToken);
+      await reservation.end(1, held.ownerToken);
     } finally {
       finish();
       await running;

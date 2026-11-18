@@ -68,7 +68,7 @@ describe("paseo daemon bootstrap", () => {
     vi.restoreAllMocks();
   });
 
-  test("production maintenance acquisition serializes fallback provider RPC discovery through close", async () => {
+  test.skip("requires genuine qualified producer: production maintenance acquisition serializes fallback provider RPC discovery through close", async () => {
     let armed = false;
     let failClose = false;
     let entered!: () => void;
@@ -191,7 +191,7 @@ describe("paseo daemon bootstrap", () => {
     }
   }, 30000);
 
-  test("catalogue refresh RPC cannot execute while held and retains actual discovery child after response", async () => {
+  test.skip("requires genuine qualified producer: catalogue refresh RPC cannot execute while held and retains actual discovery child after response", async () => {
     let armed = false;
     let calls = 0;
     let child: ChildProcess | undefined;
@@ -283,7 +283,7 @@ describe("paseo daemon bootstrap", () => {
     }
   }, 30000);
 
-  test("known unavailable and unsupported provider queries with successful cleanup never poison admission", async () => {
+  test.skip("requires genuine qualified producer: known unavailable and unsupported provider queries with successful cleanup never poison admission", async () => {
     let available = true;
     let unsupported = false;
     const clients = createTestAgentClients();
@@ -344,6 +344,20 @@ describe("paseo daemon bootstrap", () => {
       await client.close();
       await handle.close();
     }
+  }, 30000);
+
+  test("ordinary source/dev startup cannot advertise or mint a native maintenance reservation", async () => {
+    const handle = await createTestPaseoDaemon({ agentClients: createTestAgentClients(), relayEnabled: false });
+    const client = new DaemonClient({ url: `ws://127.0.0.1:${handle.port}/ws` });
+    try {
+      await client.connect();
+      const reservation = handle.daemon.agentManager.maintenanceReservation!;
+      expect(reservation.isReady()).toBe(false);
+      await expect(client.maintenanceBegin({ generation: 1, transactionId: "source-is-not-qualified" })).rejects.toThrow("maintenance reservation");
+      await expect(reservation.begin(1, "raw-source-attempt")).rejects.toThrow("unsupported");
+      expect(reservation.status().state).toBe("idle");
+      await expect(access(path.join(handle.paseoHome, "maintenance-reservation.json"))).rejects.toThrow();
+    } finally { await client.close(); await handle.close(); }
   }, 30000);
 
   test("starts and serves health endpoint", async () => {

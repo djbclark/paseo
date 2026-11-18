@@ -1,3 +1,9 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { MaintenanceReservation } from "../../maintenance-reservation.js";
+import { AgentManager } from "../../agent/agent-manager.js";
+import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import { describe, expect, it, vi } from "vitest";
 import pino from "pino";
 import {
@@ -737,3 +743,34 @@ it.each(["full", "embedded", "references"])(
     client.subsystem.dispose();
   },
 );
+
+it("ordinary unavailable/unsupported discovery with confirmed cleanup does not manufacture an uncertain hold", async () => {
+  // RPC-handler/mechanism unit, not a qualified production bootstrap or artifact grant.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "provider-known-refusal-")));
+  let available = false;
+  let closes = 0;
+  const clients = createTestAgentClients({ closeSession: async () => { closes++; } });
+  clients.codex!.isAvailable = async () => available;
+  Object.defineProperty(clients.codex, "listCommands", { value: undefined, configurable: true });
+  const create = clients.codex!.createSession.bind(clients.codex);
+  clients.codex!.createSession = async (...args) => {
+    const session = await create(...args);
+    Object.defineProperty(session, "listCommands", { value: undefined, configurable: true });
+    return session;
+  };
+  const manager = new AgentManager({ clients, logger: pino({ level: "silent" }) });
+  const reservation = new MaintenanceReservation(home, async () => manager.isMaintenanceQuiet());
+  manager.installMaintenanceReservation(reservation);
+  const { subsystem, emitted } = makeSubsystem({ host: { listDraftControls: config => manager.listDraftControls(config) } });
+  try {
+    await subsystem.handleProviderControlsListRequest({ type: "provider.controls.list.request", requestId: "known-unavailable", draftConfig: { provider: "codex", cwd: home, model: "test-model" } });
+    expect(findByType(emitted, "provider.controls.list.response")?.payload.error).toContain("not available");
+    expect(reservation.status().state).toBe("idle");
+    available = true;
+    await expect(manager.listDraftCommands({ provider: "codex", cwd: home, model: "test-model" })).rejects.toThrow("does not support");
+    expect(closes).toBe(1);
+    expect(reservation.status().state).toBe("idle");
+    const held = await reservation.begin(1, "unit-after-known-refusal");
+    await reservation.end(1, held.ownerToken);
+  } finally { await manager.flush(); rmSync(home, { recursive: true, force: true }); }
+});

@@ -3261,7 +3261,7 @@ export class Session {
       } else {
         const result =
           msg.type === "daemon.maintenance.end.request"
-            ? maintenance.end(msg.generation, msg.ownerToken)
+            ? await maintenance.end(msg.generation, msg.ownerToken)
             : maintenance.status();
         this.emit({
           type:

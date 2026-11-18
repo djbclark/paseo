@@ -479,7 +479,7 @@ describe("runWorktreeAutoTerminals", () => {
       const held = await reservation.begin(1, "script-exited");
       await expect(spawnWorkspaceScript(options)).rejects.toThrow("maintenance");
       expect(calls).toHaveLength(1);
-      reservation.end(1, held.ownerToken);
+      await reservation.end(1, held.ownerToken);
     } finally {
       finish();
       await spawning;

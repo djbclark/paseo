@@ -11,7 +11,13 @@
 
 extern char **environ;
 static volatile sig_atomic_t requested_signal;
-static void request_signal(int signal_number) { requested_signal = signal_number; }
+static volatile sig_atomic_t owned_leader;
+static void request_signal(int signal_number) {
+  int saved = errno;
+  if (owned_leader > 0) (void)kill((pid_t)owned_leader, signal_number);
+  else requested_signal = signal_number;
+  errno = saved;
+}
 
 static int protected_elf(int fd) {
   struct stat info;
@@ -86,6 +92,8 @@ int main(int argc, char **argv) {
   pid_t child = fork();
   if (child < 0) return 126;
   if (child == 0) execute_git(argv[1], argv[2], ready[1], control[0]);
+  owned_leader = child;
+  (void)forward_request(child);
   close(ready[1]);
   close(control[0]);
   char record[256];
@@ -95,13 +103,24 @@ int main(int argc, char **argv) {
   int leader_status = 0, have_leader = 0, unexpected = 0, drained = 0;
   for (;;) {
     if (!have_leader && !forward_request(child)) observed = 0;
-    int status;
-    pid_t result = waitpid(-1, &status, __WALL);
-    if (result < 0) {
+    siginfo_t terminal = {0};
+    if (waitid(P_ALL, 0, &terminal, WEXITED | WNOWAIT | __WALL) < 0) {
       if (errno == EINTR) continue;
       drained = errno == ECHILD;
       break;
     }
+    /* Leave the kernel child unreaped until signal forwarding no longer names
+     * it. No signal handler may kill a PID after it could have been reused. */
+    sigset_t blocked, previous;
+    sigemptyset(&blocked);
+    for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++)
+      sigaddset(&blocked, signals[i]);
+    if (sigprocmask(SIG_BLOCK, &blocked, &previous) < 0) { observed = 0; break; }
+    if (terminal.si_pid == child) owned_leader = 0;
+    int status;
+    pid_t result = waitpid(terminal.si_pid, &status, __WALL);
+    (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+    if (result != terminal.si_pid) { observed = 0; break; }
     if (result == child) {
       leader_status = status;
       have_leader = 1;

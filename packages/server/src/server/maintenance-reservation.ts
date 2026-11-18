@@ -778,12 +778,13 @@ export class MaintenanceReservation {
         throw new Error("Maintenance successor not safely held");
       const known = readPrivateKnownFailedHeld(result, scope, claim);
       await this.commitHeldOutcome(scope, claim, result, known, activityRevision, readinessRevision);
-      assertHeldPluginOperation(scope, claim);
+      this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
       if (known) {
         const fresh = readPrivateKnownFailedHeld(result, scope, claim);
         if (!fresh || !isDeepStrictEqual(fresh, known))
           throw new Error("Known held observation changed");
         if (!result || typeof result !== "object") throw new Error("Invalid held outcome");
+        this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
         acceptedKnownFailures.set(result, structuredClone(fresh));
       }
       return result;
@@ -795,6 +796,19 @@ export class MaintenanceReservation {
       entry.active = false;
       release();
     }
+  }
+
+  private assertHeldActivity(
+    scope: HeldPluginOperationScope,
+    claim: HeldPluginOperationClaim,
+    activityRevision: number,
+    readinessRevision: number,
+  ): void {
+    assertHeldPluginOperation(scope, claim);
+    if (this.inFlight !== 1 || this.activityRevision !== activityRevision ||
+      this.readinessRevision !== readinessRevision || !this.ready)
+      throw new Error("Held outcome work or readiness changed");
+    this.assertNoUnknownWork();
   }
 
   private assertRecoveryClaim(claim: HeldPluginOperationClaim): void {
@@ -834,10 +848,9 @@ export class MaintenanceReservation {
       else throw new Error("Restricted replacement forbidden");
     } else return;
     const validate = (committed: boolean) => {
-      assertHeldPluginOperation(scope, claim);
-      if (this.record !== (committed ? next : previous) || this.inFlight !== 1 ||
-        this.activityRevision !== activityRevision || this.readinessRevision !== readinessRevision || !this.ready)
-        throw new Error("Held outcome authority or activity changed");
+      this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
+      if (this.record !== (committed ? next : previous))
+        throw new Error("Held outcome authority changed");
       if (known) {
         const fresh = readPrivateKnownFailedHeld(result, scope, claim);
         if (!fresh || !isDeepStrictEqual(fresh, known))

@@ -45,9 +45,9 @@ These observations do not enable maintenance support by themselves.
 
 ## Passive maintenance prototype (fork)
 
-`PluginService.maintenance` exposes the native V1 port. This source slice always
-returns `supportsV1() === false`: the executing daemon and child closure producer
-has not been integrated. An administrator passive profile is an expectation;
+`PluginService.maintenance` exposes the native V1 port. Support requires the
+original producer-owned daemon and every actual loaded plugin host to have a
+fresh bound passive closure. Missing producer or runtime evidence returns false. An administrator passive profile is an expectation;
 it cannot qualify a running host by itself. A restored `begin({ generation,
 transactionId })` closes normal and lifecycle admission synchronously and returns
 `unknown`. Repeating the same identity retains the hold. `end` refuses release
@@ -77,7 +77,7 @@ An externally qualified passive closure must exclude autonomous/unowned work,
 raw helper launches, and detached descendants outside these owners. Source/dev
 launches, arbitrary plugins, Cafe, and retrospective disk hashes cannot grant
 maintenance. No production or coupled positive qualification is claimed by these
-unit tests. The genuine role producer and native bootstrap integration must verify
+unit tests. The genuine producer and native bootstrap integration must verify
 actual executing bindings, immutable artifacts, incarnation, and fresh child ACK
 before enabling support or restricted initialization.
 

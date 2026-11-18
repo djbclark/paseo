@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
 import { spawnSync } from "node:child_process";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -12,7 +14,7 @@ import builtinPlugins from "../src/server/execution/builtin-inventory.json" with
 // native/plugin/controller A-B-A acceptance is owned by the coupled fixture.
 const enabled = process.platform === "linux" && process.env.GITHUB_ACTIONS === "true";
 function sudo(args) {
-  const result = spawnSync("sudo", ["-n", ...args], { encoding: "utf8", timeout: 30000 });
+  const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);
 }
 function probe(root, race, ambient = {}) {
@@ -38,14 +40,81 @@ function probe(root, race, ambient = {}) {
   `
     : "";
   const source = `${instrumentation}
+    Object.assign(process.env,${JSON.stringify(ambient)});
     const {createQualifiedDaemonInvocation}=await import(${JSON.stringify(`${root}/daemon-launcher.mjs`)});
     const result=await createQualifiedDaemonInvocation(${JSON.stringify(root)},"/disposable/home"); console.log(JSON.stringify(result));`;
-  // Separate bounded process makes FIFO regressions fail instead of hanging CI.
-  return spawnSync(process.execPath, ["--input-type=module", "-e", source], {
-    encoding: "utf8",
-    timeout: 20000,
-    env: { PATH: "/usr/bin:/bin", ...ambient },
-  });
+  // Host remains the original unprivileged caller. Root-owned preparation and
+  // cleanup stay OUTSIDE the namespace; the child probe has caps cleared/NNP.
+  const manifestPath = `${root}.manifest.json`;
+  const manifestRaw = readFileSync(manifestPath);
+  const manifest = JSON.parse(manifestRaw);
+  const bootstrap = manifest.files.find(
+    (row) => row.path === "system-closure/namespace-bootstrap.py",
+  );
+  assert.ok(bootstrap, "Actual packaged namespace helper missing");
+  assert.equal(
+    bootstrap.sha256,
+    "605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7",
+    "Administrative helper must match independently reviewed tracked source",
+  );
+  assert.equal(bootstrap.size, 52756);
+  const script = `${root}.probe.mjs`,
+    recipe = `${root}.launch-recipe.json`;
+  const temporary = mkdtempSync(path.join(tmpdir(), "paseo-system-probe-"));
+  const sourceFile = path.join(temporary, "probe.mjs"),
+    recipeFile = path.join(temporary, "recipe.json");
+  writeFileSync(sourceFile, source);
+  const manifestSha256 = createHash("sha256").update(manifestRaw).digest("hex");
+  writeFileSync(
+    recipeFile,
+    JSON.stringify({
+      schemaVersion: 1,
+      profile: "linux-ci-qualified-system-namespace-v1",
+      distributionRoot: root,
+      manifestSha256,
+      bootstrap: {
+        path: path.join(root, bootstrap.path),
+        sha256: bootstrap.sha256,
+        size: bootstrap.size,
+      },
+      harness: {
+        path: script,
+        sha256: createHash("sha256").update(source).digest("hex"),
+        size: Buffer.byteLength(source),
+      },
+      arguments: [],
+      environment: { PATH: "/usr/bin:/bin", GITHUB_ACTIONS: "true", CI: "true" },
+    }),
+  );
+  sudo(["install", "-o", "root", "-g", "root", "-m", "0444", sourceFile, script]);
+  sudo(["install", "-o", "root", "-g", "root", "-m", "0444", recipeFile, recipe]);
+  try {
+    const result = spawnSync(
+      "sudo",
+      [
+        "-k",
+        "-n",
+        "/usr/bin/python3",
+        "-I",
+        path.join(root, bootstrap.path),
+        "--distribution",
+        root,
+        "--expected-manifest",
+        manifestPath,
+        "--expected-manifest-sha256",
+        manifestSha256,
+        "--launch-recipe",
+        recipe,
+        "--caller-pid",
+        String(process.pid),
+      ],
+      { encoding: "utf8", timeout: 20000, env: { PATH: "/usr/bin:/bin", ...ambient } },
+    );
+    return result;
+  } finally {
+    sudo(["rm", "-f", script, recipe]);
+    rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 async function exists(file) {

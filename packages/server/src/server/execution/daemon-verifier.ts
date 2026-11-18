@@ -1,10 +1,19 @@
+import { verifySystemClosure, verifySystemMappings } from "./system-closure.js";
 import { readBuiltinProfiles } from "./builtin-profile.js";
 import { canonicalBuiltinJson } from "./builtin-format.js";
 import builtinBindingsRecipe from "./builtin-bindings-recipe.json" with { type: "json" };
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import {
+  constants,
+  openSync,
+  closeSync,
+  readSync,
+  fstatSync,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
 import { open, lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
@@ -127,6 +136,71 @@ export async function assertEnclosingAuthorityUnchanged(observed: {
   const current = await enrollment(observed.root);
   if (current.authorityIdentity !== observed.authorityIdentity) return unsupported();
 }
+/** Bounded final CAS for the SDK's synchronous ChildProcess launch contract. */
+export function assertEnclosingAuthorityUnchangedSync(observed: {
+  root: string;
+  authorityIdentity: string;
+}): void {
+  const account = userInfo(),
+    home = realpathSync(account.homedir);
+  const file = path.join(home, ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json");
+  for (let current = file; ; current = path.dirname(current)) {
+    const info = lstatSync(current);
+    if (info.isSymbolicLink() || (info.uid !== account.uid && info.uid !== 0) || info.mode & 0o022)
+      return unsupported();
+    if (current === home) break;
+    if (current === path.dirname(current)) return unsupported();
+  }
+  if (snapshotAuthoritySync(file) !== observed.authorityIdentity) return unsupported();
+}
+function snapshotAuthoritySync(file: string): string {
+  const descriptor = openSync(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.size > 65536n) return unsupported();
+    const buffer = Buffer.alloc(65537);
+    let total = 0;
+    for (;;) {
+      const count = readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (!count) break;
+      total += count;
+      if (total > 65536 || BigInt(total) > before.size) return unsupported();
+    }
+    const after = fstatSync(descriptor, { bigint: true }),
+      current = lstatSync(file, { bigint: true });
+    for (const key of [
+      "dev",
+      "ino",
+      "mode",
+      "uid",
+      "gid",
+      "nlink",
+      "size",
+      "mtimeNs",
+      "ctimeNs",
+    ] as const)
+      if (before[key] !== after[key] || before[key] !== current[key]) return unsupported();
+    const identity = [
+      before.dev,
+      before.ino,
+      before.mode,
+      before.uid,
+      before.gid,
+      before.size,
+      before.mtimeNs,
+      before.ctimeNs,
+    ]
+      .map(String)
+      .join(":");
+    if (BigInt(total) !== before.size) return unsupported();
+    return `${identity}:${digest(buffer.subarray(0, total))}`;
+  } finally {
+    closeSync(descriptor);
+  }
+}
 export async function observeLinuxProcess(pid: number) {
   const text = await readFile(`/proc/${pid}/stat`, "utf8");
   const start = text.slice(text.lastIndexOf(")") + 2).split(" ")[19];
@@ -183,6 +257,7 @@ function assertBuiltinModuleTable(manifest: DaemonManifest): void {
     runtimeSha256: manifest.runtime.sha256,
     daemonSha256: manifest.files.find((file) => file.path === "daemon.mjs")?.sha256,
     externalLibraries: manifest.externalLibraries,
+    systemClosureSha256: manifest.systemClosureSha256,
   };
   if (
     JSON.stringify(manifest.builtinModuleTable) !== JSON.stringify(expectedTable) ||
@@ -286,6 +361,7 @@ export async function verifyEnclosingDistribution(root: string) {
   const helperInventory = [
     ...manifest.files.filter(
       (file) =>
+        file.path.startsWith("system-closure/") ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||
@@ -305,6 +381,7 @@ export async function verifyEnclosingDistribution(root: string) {
     JSON.stringify(manifest.helperInventory) !== JSON.stringify(helperInventory)
   )
     return unsupported();
+  await verifySystemClosure(root, manifest);
   await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });
   return {
     root,
@@ -323,7 +400,7 @@ export async function verifyEnclosingProcess(root: string) {
   if (
     process.execArgv.length ||
     Object.keys(process.env).some((key) =>
-      /^(NODE_OPTIONS|NODE_PATH|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
+      /^(NODE_OPTIONS|NODE_PATH|GLIBC_TUNABLES|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
     )
   )
     return unsupported();
@@ -337,16 +414,7 @@ export async function verifyEnclosingProcess(root: string) {
   const distribution = await verifyEnclosingDistribution(root);
   const observed = await observeLinuxProcess(process.pid);
   if (observed.executable !== path.join(root, "runtime/node")) return unsupported();
-  const maps = (await readFile("/proc/self/maps", "utf8")).split("\n");
-  const permitted = new Set([
-    observed.executable,
-    ...distribution.manifest.externalLibraries.map((file) => file.path),
-    ...distribution.manifest.files.map((file) => path.join(root, file.path)),
-  ]);
-  for (const line of maps) {
-    const match = line.match(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +(\/.*)$/);
-    if (match && !permitted.has(await realpath(match[1]!))) return unsupported();
-  }
+  const systemObservation = await verifySystemMappings(root, distribution.manifest, process.pid);
   await assertEnclosingAuthorityUnchanged(distribution);
-  return { ...distribution, observed };
+  return { ...distribution, observed, systemObservation };
 }

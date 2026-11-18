@@ -1,3 +1,4 @@
+import { readFiniteGitProfile, type FiniteGitProfile } from "./finite-git-profile.js";
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 export interface QualifiedBuiltinProfile {
   id: string;
@@ -6,6 +7,7 @@ export interface QualifiedBuiltinProfile {
   moduleTableSha256: string;
   activityContract: "builtin-in-process-v1";
   profileSha256: string;
+  finiteGit?: FiniteGitProfile;
 }
 /** Missing/invalid external profile never prevents ordinary builtin registration. */
 export function readBuiltinProfiles(value: unknown): QualifiedBuiltinProfile[] | null {
@@ -18,6 +20,7 @@ export function readBuiltinProfiles(value: unknown): QualifiedBuiltinProfile[] |
       JSON.stringify(Object.keys(row).sort()) !==
       JSON.stringify([
         "activityContract",
+        ...(Object.hasOwn(row, "finiteGit") ? ["finiteGit"] : []),
         "id",
         "moduleTableSha256",
         "profileSha256",
@@ -34,8 +37,11 @@ export function readBuiltinProfiles(value: unknown): QualifiedBuiltinProfile[] |
       return null;
     for (const key of ["moduleTableSha256", "profileSha256", "serverBundleSha256", "sourceSha256"])
       if (typeof row[key] !== "string" || !/^[a-f0-9]{64}$/.test(row[key])) return null;
+    const finiteGit = Object.hasOwn(row, "finiteGit") ? readFiniteGitProfile(row.finiteGit) : null;
+    if (Object.hasOwn(row, "finiteGit") && (row.id !== "worktree-include" || !finiteGit))
+      return null;
     ids.add(row.id);
-    result.push({ ...row });
+    result.push({ ...row, ...(finiteGit ? { finiteGit } : {}) });
   }
   return result;
 }

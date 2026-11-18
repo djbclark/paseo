@@ -135,12 +135,9 @@ function applyDynamic(
     if (entry.tag === 15n) result.rpath.push(...value.split(":"));
     if (entry.tag === 29n) result.runpath.push(...value.split(":"));
   }
-  if (
-    result.needed.length > 128 ||
-    result.rpath.some((row) => !row) ||
-    result.runpath.some((row) => !row)
-  )
-    return fail();
+  if (result.needed.length > 128) return fail();
+  if (result.rpath.some((row) => !row) || result.runpath.some((row) => !row))
+    throw new Error("Unsupported ELF current-directory search entry");
 }
 export interface LoaderCacheEntry {
   soname: string;
@@ -169,7 +166,7 @@ export function describeLoaderCache(bytes: Buffer, machine: number): LoaderCache
   for (let i = 0; i < count; i++) {
     const start = 48 + i * 24;
     const flags = bytes.readInt32LE(start);
-    if ((flags & 0xff00) !== required) continue;
+    if (flags !== (required | 3)) continue;
     const key = bytes.readUInt32LE(start + 4),
       value = bytes.readUInt32LE(start + 8);
     if (key < 48 + count * 24 || value < 48 + count * 24) return fail();

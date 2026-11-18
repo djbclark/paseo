@@ -92,9 +92,97 @@ test("descriptive builtin data and wrong role cannot mint an original instance",
     refresh: async () => {},
   };
   assert.throws(() => producer.assertQualifiedBuiltinInstance({}, fakeOwner, "worktree-include"));
+  const runtime = await import("../dist/server/server/execution/finite-git-runtime.js");
+  assert.throws(() => runtime.assertPreparedQualifiedBuiltinGit({}, fakeOwner));
+  assert.equal(runtime.qualifiedBuiltinGitPermit({}, fakeOwner, {}), null);
   await assert.rejects(() =>
     producer.createQualifiedBuiltinInstance(fakeOwner, "worktree-include"),
   );
+});
+
+test("finite Git C1 data preserves ordered includes and rejects extensions without granting execution", async () => {
+  const { readBuiltinProfiles } =
+    await import("../dist/server/server/execution/builtin-profile.js");
+  const { readFiniteGitProfile } =
+    await import("../dist/server/server/execution/finite-git-profile.js");
+  const { canonicalBuiltinJson } =
+    await import("../dist/server/server/execution/builtin-format.js");
+  const { createHash } = await import("node:crypto");
+  const recipe = {
+    contract: "worktree-include-git-config-v1",
+    distributionManifestSha256: "a".repeat(64),
+    systemClosureSha256: "b".repeat(64),
+    tools: { git: "runtime/git", observer: "runtime/git-observer", gate: "runtime/git-gate.so" },
+    argv: {
+      lsFiles: ["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude", "-z"],
+      checkIgnore: ["check-ignore", "--stdin", "-z"],
+    },
+    repository: {
+      cwd: "/protected/repository",
+      gitDirectory: "/protected/repository/.git",
+      layout: "direct-dotgit-v1",
+    },
+    environment: {
+      HOME: "/home/account",
+      GIT_CONFIG_SYSTEM: "/protected/config/system",
+      GIT_CONFIG_GLOBAL: "/protected/config/global",
+    },
+    configRoots: {
+      system: "/protected/config/system",
+      global: "/protected/config/global",
+      local: "/protected/repository/.git/config",
+    },
+    includes: [
+      { from: "/protected/config/system", to: "/protected/config/include" },
+      { from: "/protected/config/system", to: "/protected/config/include" },
+    ],
+    files: [
+      "/protected/config/global",
+      "/protected/config/include",
+      "/protected/config/system",
+      "/protected/repository/.git/config",
+    ].map((file) => ({ path: file, mode: 292, size: 32, sha256: "c".repeat(64) })),
+    protectedAbsent: [
+      "/protected/repository/.git/commondir",
+      "/protected/repository/.git/config.worktree",
+    ],
+  };
+  const encoded = (value) => ({
+    schemaVersion: 1,
+    recipeSha256: createHash("sha256").update(canonicalBuiltinJson(value)).digest("hex"),
+    recipe: value,
+  });
+  const finiteGit = encoded(recipe);
+  const row = {
+    id: "worktree-include",
+    sourceSha256: "a".repeat(64),
+    serverBundleSha256: "b".repeat(64),
+    moduleTableSha256: "c".repeat(64),
+    profileSha256: "d".repeat(64),
+    activityContract: "builtin-in-process-v1",
+    finiteGit,
+  };
+  assert.deepEqual(readBuiltinProfiles([row]), [row]);
+  assert.equal(readFiniteGitProfile(finiteGit).recipe.includes.length, 2);
+  for (const changed of [
+    { ...recipe, permission: true },
+    { ...recipe, tools: { ...recipe.tools, git: "candidate/git" } },
+    { ...recipe, argv: { ...recipe.argv, checkIgnore: ["config", "--list"] } },
+    { ...recipe, repository: { ...recipe.repository, gitDirectory: "/other/.git" } },
+    { ...recipe, includes: [{ from: "/missing", to: "/protected/config/include" }] },
+    { ...recipe, files: [...recipe.files, recipe.files[0]] },
+    { ...recipe, protectedAbsent: [recipe.files[0].path] },
+    { ...recipe, environment: { ...recipe.environment, GIT_CONFIG_GLOBAL: "/other" } },
+  ])
+    assert.equal(readFiniteGitProfile(encoded(changed)), null);
+  assert.equal(readFiniteGitProfile({ ...finiteGit, recipeSha256: "0".repeat(64) }), null);
+  const other = { ...row, id: "claude-usage-source" };
+  delete other.finiteGit;
+  assert.deepEqual(readBuiltinProfiles([other]), [other]);
+  assert.equal(readBuiltinProfiles([{ ...other, finiteGit }]), null);
+  const { assertQualifiedBuiltinInstance } =
+    await import("../dist/server/server/execution/builtin-instance.js");
+  assert.throws(() => assertQualifiedBuiltinInstance(row, { recipe: finiteGit }, row.id));
 });
 
 test("measurement explicitly requests V2 without adding selectors or coercing V1", () => {
@@ -145,4 +233,19 @@ test("finite ELF/cache parser derives actual Linux runtime inputs and rejects ma
   assert.ok(entries.length > 0);
   assert.ok(entries.every((row) => row.path.startsWith("/")));
   assert.throws(() => describeLoaderCache(cache.subarray(0, 48), elf.machine));
+});
+
+test("retained system metadata refuses old missing-payload manifests and unknown loader fields", async () => {
+  const { SystemClosureSchema, assertSystemClosureMetadata } =
+    await import("../dist/server/server/execution/system-closure.js");
+  assert.equal(SystemClosureSchema.safeParse(undefined).success, false);
+  assert.throws(() => assertSystemClosureMetadata({ files: [], externalLibraries: [] }));
+  assert.equal(
+    SystemClosureSchema.safeParse({
+      schemaVersion: 1,
+      profile: "linux-retained-system-closure-v1",
+      mountCommand: "override",
+    }).success,
+    false,
+  );
 });

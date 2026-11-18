@@ -1,10 +1,9 @@
 import { build } from "esbuild";
-import { builtinModules } from "node:module";
+import { isBuiltin } from "node:module";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 export async function buildQualifiedHost({ outDir, distributionBuildId, roleBuildId }) {
   if (!distributionBuildId || !roleBuildId) throw new Error("CI build identities required");
   await mkdir(outDir, { recursive: true });
@@ -43,7 +42,7 @@ export async function buildQualifiedHost({ outDir, distributionBuildId, roleBuil
   });
   for (const output of Object.values(host.metafile.outputs))
     for (const imported of output.imports) {
-      if (imported.external && !builtins.has(imported.path))
+      if (imported.external && !isBuiltin(imported.path))
         throw new Error(`Unqualified host external: ${imported.path}`);
     }
   await build({

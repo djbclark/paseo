@@ -30,6 +30,11 @@ import {
 import type { QualifiedBuiltinArtifact, QualifiedDaemonOwner } from "./daemon-types.js";
 import type { QualifiedBuiltinProfile } from "./builtin-profile.js";
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
+import {
+  prepareQualifiedBuiltinGit,
+  assertPreparedQualifiedBuiltinGit,
+  qualifiedBuiltinGitPermit,
+} from "./finite-git-runtime.js";
 interface InstanceRecord {
   owner: QualifiedDaemonOwner;
   id: string;
@@ -104,7 +109,7 @@ function actualRecord(instance: unknown, owner: unknown, id?: string): InstanceR
   assertBuiltinBindings();
   return record;
 }
-function profileFor(record: InstanceRecord): QualifiedBuiltinProfile | null {
+function enrolledProfile(record: InstanceRecord): QualifiedBuiltinProfile | null {
   const profiles = readQualifiedBuiltinContext(record.owner).profiles;
   const row = profiles?.find((item) => item.id === record.id);
   if (
@@ -116,6 +121,25 @@ function profileFor(record: InstanceRecord): QualifiedBuiltinProfile | null {
   )
     return null;
   return row;
+}
+function profileFor(record: InstanceRecord): QualifiedBuiltinProfile | null {
+  if (record.id === "worktree-include") {
+    try {
+      assertPreparedQualifiedBuiltinGit(record.child, record.owner);
+    } catch {
+      return null;
+    }
+  }
+  return enrolledProfile(record);
+}
+/** Internal original-instance witness; descriptive profile data alone cannot produce it. */
+export function readQualifiedBuiltinHelperContext(instance: unknown, owner: unknown) {
+  const record = actualRecord(instance, owner);
+  return {
+    id: record.id,
+    activityOwner: record.execution.activityOwner,
+    profile: enrolledProfile(record),
+  };
 }
 /** Only this fixed factory constructs and records the ORIGINAL internal worker. */
 export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner, id: string) {
@@ -182,6 +206,12 @@ export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner
   child.once("close", () => {
     if (record) record.closed = true;
   });
+  await prepareQualifiedBuiltinGit(child, owner);
+  await assertEnclosingAuthorityUnchanged({
+    root: owner.root,
+    authorityIdentity: context.authorityIdentity,
+  });
+  owner.assertFresh();
   return Object.freeze({ child, manifest, serverBundle, clientBundle: null });
 }
 export function assertQualifiedBuiltinInstance(
@@ -190,8 +220,9 @@ export function assertQualifiedBuiltinInstance(
   id?: string,
 ): void {
   const record = actualRecord(instance, owner, id);
-  if (!profileFor(record) || [...record.helpers.values()].some((helper) => !helper.settled))
-    throw new Error("Builtin maintenance profile unsupported");
+  // Contract identity remains supported while the SAME real activity is BUSY.
+  // SDK/native roots and actual barriers decide quiet, never this predicate.
+  if (!profileFor(record)) throw new Error("Builtin maintenance profile unsupported");
 }
 export function getQualifiedBuiltinObservation(instance: unknown, owner: unknown) {
   const record = actualRecord(instance, owner);
@@ -225,6 +256,37 @@ export function admitBuiltinHelper(request: BuiltinHelperRequest): PluginHelperA
   if (!record || record.closed) throw new Error("Missing original builtin helper activity");
   if (!request.root) throw new Error("Missing live builtin activity root");
   record.execution.activityOwner.assertLiveRoot(request.root);
+  const finite = qualifiedBuiltinGitPermit(record.child, record.owner, request);
+  if (finite) {
+    return {
+      settled: finite.settled,
+      builtinExecFile: finite.builtinExecFile,
+      bind(child: ChildProcess): void {
+        finite.bind(child);
+        const helper: HelperRecord = {
+          leaderClosed: false,
+          settled: false,
+          observation: null,
+          observed: Promise.resolve(),
+          operation: null,
+        };
+        Object.defineProperty(helper, "operation", { get: finite.observation });
+        record.helpers.set(child, helper);
+        child.once("close", () => {
+          helper.leaderClosed = true;
+        });
+        helper.observed = finite.observed.then((observation) => {
+          helper.observation = observation;
+          return undefined;
+        });
+        void finite.settled.then(() => {
+          helper.settled = true;
+          return undefined;
+        });
+      },
+      failed: finite.failed,
+    };
+  }
   // A profile digest cannot prove an arbitrary provider's descendant closure. Until
   // a finite observed helper family is implemented, the builtin loses maintenance
   // eligibility while its ordinary work continues under the SAME SDK/native lease.

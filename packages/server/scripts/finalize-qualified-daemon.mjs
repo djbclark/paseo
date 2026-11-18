@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertSystemClosureMetadata } from "../dist/server/server/execution/system-closure.js";
 import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
 import {
   chmod,
@@ -11,7 +12,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { retainSystemClosure } from "./retain-system-closure.mjs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import builtinBindingsRecipe from "../src/server/execution/builtin-bindings-recipe.json" with { type: "json" };
@@ -49,6 +50,8 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     await cp(source, destination);
     await chmod(destination, 0o555);
   }
+  const { externalLibraries, systemClosure } = await retainSystemClosure(root);
+  const systemClosureSha256 = digest(canonicalBuiltinJson(systemClosure));
   const files = [];
   async function visit(directory) {
     for (const name of await readdir(directory)) {
@@ -71,38 +74,10 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     if (a.path > b.path) return 1;
     return 0;
   });
-  const libraries = new Set();
-  for (const file of files.filter(
-    (row) => row.path === "runtime/node" || row.path.endsWith(".node"),
-  )) {
-    const header = await readFile(path.join(root, file.path));
-    // Only this target's ELF addons can be loaded by the retained Linux Node.
-    if (
-      file.path.endsWith(".node") &&
-      (header.length < 20 ||
-        header.readUInt32BE(0) !== 0x7f454c46 ||
-        header[5] !== 1 ||
-        header.readUInt16LE(18) !== (process.arch === "x64" ? 62 : 183))
-    )
-      continue;
-    const result = spawnSync("ldd", [path.join(root, file.path)], {
-      encoding: "utf8",
-      timeout: 10000,
-      env: { PATH: "/usr/bin:/bin" },
-    });
-    if (result.status !== 0) throw new Error("Native library inventory unavailable");
-    for (const line of result.stdout.split("\n")) {
-      if (line.includes("not found")) throw new Error("Native library unresolved");
-      const match = line.match(/(?:=>\s+|^\s*)(\/[^ ]+)/);
-      if (match) libraries.add(await realpath(match[1]));
-    }
-  }
-  const externalLibraries = [];
-  for (const file of [...libraries].sort())
-    if (!file.startsWith(`${root}/`)) externalLibraries.push(await identity(file));
   const helperInventory = [
     ...files.filter(
       (file) =>
+        file.path.startsWith("system-closure/") ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||
@@ -122,11 +97,14 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     runtimeSha256: files.find((file) => file.path === "runtime/node").sha256,
     daemonSha256: files.find((file) => file.path === "daemon.mjs").sha256,
     externalLibraries,
+    systemClosureSha256,
   };
   const moduleTableSha256 = digest(canonicalBuiltinJson(builtinModuleTable));
   const manifest = {
     schemaVersion: 2,
     profile: "enclosing-daemon-v2",
+    systemClosure,
+    systemClosureSha256,
     builtinPlugins,
     builtinModuleTable,
     moduleTableSha256,
@@ -158,6 +136,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
       "zod",
     ].sort(),
   };
+  assertSystemClosureMetadata(manifest);
   const raw = JSON.stringify(manifest);
   await writeFile(`${root}.manifest.json`, raw);
   return {

@@ -89,8 +89,12 @@ async function main() {
   const scripts = {};
   for (const name of [
     "build-qualified-daemon.mjs",
+    "build-qualified-git.mjs",
+    "qualified-git.test.mjs",
     "qualified-builtin-sources.mjs",
     "build-qualified-builtins.mjs",
+    "retain-system-closure.mjs",
+    "qualified-system-namespace.py",
     "finalize-qualified-daemon.mjs",
     "archive-qualified-daemon.mjs",
   ])

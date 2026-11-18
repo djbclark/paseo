@@ -199,14 +199,18 @@ export async function retainSystemClosure(root) {
     try {
       description = describeElf(row.bytes);
     } catch (error) {
-      const diagnostic = spawnSync("/usr/bin/readelf", ["--dynamic", "--wide", row.file], {
-        encoding: "utf8",
-        timeout: 10000,
-        maxBuffer: 32768,
-        env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-      });
+      const diagnostic = spawnSync(
+        "/usr/bin/readelf",
+        ["--dynamic", "--wide", "--program-headers", row.file],
+        {
+          encoding: "utf8",
+          timeout: 10000,
+          maxBuffer: 32768,
+          env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+        },
+      );
       throw new Error(
-        `ELF inventory refused member ${row.member}\n${diagnostic.stdout ?? "Dynamic metadata unavailable"}`,
+        `ELF inventory refused member ${row.member} sha256=${digest(row.bytes)} size=${row.bytes.length}\n${diagnostic.stdout ?? "Dynamic metadata unavailable"}`,
         { cause: error },
       );
     }

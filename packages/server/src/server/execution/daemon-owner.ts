@@ -400,6 +400,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         settlementUnknown = true;
       }
       worker.once("error", markUnknown);
+      port1.on("messageerror", markUnknown);
       worker.once("exit", (code) => {
         workerExited = true;
         if (code !== 0 || !stopRequested) markUnknown();

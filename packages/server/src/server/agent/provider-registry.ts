@@ -738,17 +738,23 @@ function createResolvedProviderClient(
   // Constructor-created callbacks inherit the owner too; static metadata construction
   // remains available during recovery, while any actual spawn checks admission.
   const create = () => resolved.createBaseClient(logger);
-  const inner = guardProviderClient(maintenance ? maintenance.execute(create) : create(), maintenance);
+  const inner = guardProviderClient(
+    maintenance ? maintenance.execute(create) : create(),
+    maintenance,
+  );
   const profileModels = resolveConfiguredModels(provider, inner, resolved.profileModels);
   const additionalModels = resolveConfiguredModels(provider, inner, resolved.additionalModels);
-  return guardProviderClient(wrapClientProvider(
-    provider,
-    inner,
-    profileModels,
-    additionalModels,
-    resolved.profileModelsAreAdditive,
-    resolved.providerOptions,
-  ), maintenance);
+  return guardProviderClient(
+    wrapClientProvider(
+      provider,
+      inner,
+      profileModels,
+      additionalModels,
+      resolved.profileModelsAreAdditive,
+      resolved.providerOptions,
+    ),
+    maintenance,
+  );
 }
 
 interface RegisteredProvider {

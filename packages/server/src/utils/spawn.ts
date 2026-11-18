@@ -50,11 +50,15 @@ export function spawnProcess(
   const reservation = currentMaintenanceExecution();
   const release = reservation?.enterProcess();
   try {
-    const spawn = () => spawnCli(command, args, { ...spawnOptions, env: childEnv, signal: options?.signal });
+    const spawn = () =>
+      spawnCli(command, args, { ...spawnOptions, env: childEnv, signal: options?.signal });
     const child = reservation && release ? reservation.executeAdmitted(release, spawn) : spawn();
     child.once("close", () => release?.());
     return child;
-  } catch (error) { release?.(); throw error; }
+  } catch (error) {
+    release?.();
+    throw error;
+  }
 }
 
 export async function execCommand(
@@ -79,11 +83,18 @@ export async function execCommand(
     let attached = false;
     try {
       // Keep the child lease beyond an AbortError/timeout callback until actual close.
-      const running = reservation.executeAdmitted(release, () => execFileWithChild(command, args, {
-        cwd: options?.cwd, env: childEnv, shell: options?.shell,
-        encoding: options?.encoding ?? "utf8", signal: options?.signal,
-        killSignal: options?.killSignal, timeout: options?.timeout, maxBuffer: options?.maxBuffer,
-      })) as Promise<ExecCommandResult> & { child: ChildProcess };
+      const running = reservation.executeAdmitted(release, () =>
+        execFileWithChild(command, args, {
+          cwd: options?.cwd,
+          env: childEnv,
+          shell: options?.shell,
+          encoding: options?.encoding ?? "utf8",
+          signal: options?.signal,
+          killSignal: options?.killSignal,
+          timeout: options?.timeout,
+          maxBuffer: options?.maxBuffer,
+        }),
+      ) as Promise<ExecCommandResult> & { child: ChildProcess };
       running.child.once("close", release);
       attached = true;
       return await running;
@@ -92,15 +103,16 @@ export async function execCommand(
       throw error;
     }
   }
-  const execute = () => execCli(command, args, {
-    cwd: options?.cwd,
-    env: childEnv,
-    shell: options?.shell,
-    encoding: options?.encoding ?? "utf8",
-    signal: options?.signal,
-    killSignal: options?.killSignal,
-    timeout: options?.timeout,
-    maxBuffer: options?.maxBuffer,
-  }) as Promise<ExecCommandResult>;
+  const execute = () =>
+    execCli(command, args, {
+      cwd: options?.cwd,
+      env: childEnv,
+      shell: options?.shell,
+      encoding: options?.encoding ?? "utf8",
+      signal: options?.signal,
+      killSignal: options?.killSignal,
+      timeout: options?.timeout,
+      maxBuffer: options?.maxBuffer,
+    }) as Promise<ExecCommandResult>;
   return reservation ? reservation.run(execute) : execute();
 }

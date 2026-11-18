@@ -269,7 +269,12 @@ export class ProviderSnapshotManager {
     this.managedProcesses = options.managedProcesses;
     this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
-    this.extraClients = Object.fromEntries(Object.entries(options.extraClients ?? {}).map(([id, client]) => [id, guardProviderClient(client!, this.maintenance)]));
+    this.extraClients = Object.fromEntries(
+      Object.entries(options.extraClients ?? {}).map(([id, client]) => [
+        id,
+        guardProviderClient(client!, this.maintenance),
+      ]),
+    );
     this.runtimeSettings = options.runtimeSettings;
     this.providerOverrides = options.providerOverrides;
     this.baseProviderOverrides = options.providerOverrides;
@@ -289,7 +294,12 @@ export class ProviderSnapshotManager {
     if (this.maintenance) {
       // Workflow leases include queueing and sequential refresh targets. The exhaustive
       // client boundary and actual-child leases enforce execution for every provider caller.
-      for (const key of ["refreshSnapshotForCwd", "refreshSettingsSnapshot", "warmUpSnapshotForCwd", "getProviderDiagnostic"] as const) {
+      for (const key of [
+        "refreshSnapshotForCwd",
+        "refreshSettingsSnapshot",
+        "warmUpSnapshotForCwd",
+        "getProviderDiagnostic",
+      ] as const) {
         guardMaintenanceMethod(this, key, this.maintenance);
       }
     }
@@ -468,7 +478,10 @@ export class ProviderSnapshotManager {
       return existing;
     }
     const create = () => definition.createClient(this.logger);
-    const client = guardProviderClient(this.maintenance ? this.maintenance.execute(create) : create(), this.maintenance);
+    const client = guardProviderClient(
+      this.maintenance ? this.maintenance.execute(create) : create(),
+      this.maintenance,
+    );
     clients[provider] = client;
     this.ownedClients.add(client);
     return client;

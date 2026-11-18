@@ -628,10 +628,16 @@ export async function createPaseoDaemon(
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
   await mkdir(config.paseoHome, { recursive: true, mode: 0o700 });
-  let observe: () => Promise<boolean> = async () => { throw new Error("Maintenance startup incomplete"); };
+  let observe: () => Promise<boolean> = async () => {
+    throw new Error("Maintenance startup incomplete");
+  };
   const maintenance = new MaintenanceReservation(config.paseoHome, () => observe());
   maintenance.setReady(false);
-  return maintenance.execute(() => createPaseoDaemonInExecutionContext(config, rootLogger, dependencies, maintenance, next => { observe = next; }));
+  return maintenance.execute(() =>
+    createPaseoDaemonInExecutionContext(config, rootLogger, dependencies, maintenance, (next) => {
+      observe = next;
+    }),
+  );
 }
 
 async function createPaseoDaemonInExecutionContext(

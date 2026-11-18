@@ -224,18 +224,36 @@ describe("maintenance process execution boundary", () => {
     const home = realpathSync(mkdtempSync(path.join(tmpdir(), "spawn-maintenance-")));
     const reservation = new MaintenanceReservation(home, async () => true);
     const child = await reservation.run(async () => {
-      const launched = spawnProcess(process.execPath, ["-e", "process.send('ready'); process.on('message',()=>process.exit(0)); setTimeout(()=>process.exit(0),10000)"], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
-      await once(launched, "message"); return launched;
+      const launched = spawnProcess(
+        process.execPath,
+        [
+          "-e",
+          "process.send('ready'); process.on('message',()=>process.exit(0)); setTimeout(()=>process.exit(0),10000)",
+        ],
+        { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+      );
+      await once(launched, "message");
+      return launched;
     });
     try {
       await expect(reservation.begin(1, "caller-done-child-alive")).rejects.toThrow();
-      const closed = once(child, "close"); child.send!("finish"); await closed;
+      const closed = once(child, "close");
+      child.send!("finish");
+      await closed;
       const held = await reservation.begin(1, "child-closed");
-      expect(() => reservation.execute(() => spawnProcess(process.execPath, ["-e", "process.exit(99)"]))).toThrow("maintenance");
-      await expect(reservation.execute(() => execCommand(process.execPath, ["-e", "process.exit(99)"]))).rejects.toThrow("maintenance");
+      expect(() =>
+        reservation.execute(() => spawnProcess(process.execPath, ["-e", "process.exit(99)"])),
+      ).toThrow("maintenance");
+      await expect(
+        reservation.execute(() => execCommand(process.execPath, ["-e", "process.exit(99)"])),
+      ).rejects.toThrow("maintenance");
       reservation.end(1, held.ownerToken);
     } finally {
-      if (child.exitCode === null && child.connected) { const closed = once(child, "close"); child.send!("finish"); await closed; }
+      if (child.exitCode === null && child.connected) {
+        const closed = once(child, "close");
+        child.send!("finish");
+        await closed;
+      }
       rmSync(home, { recursive: true, force: true });
     }
   }, 20000);

@@ -9567,52 +9567,82 @@ test("fires onAgentArchived for archived parent and cascaded children", async ()
   expect([...archivedIds].sort()).toEqual([liveChild.id, liveParent.id].sort());
 });
 
-test.each(["archive", "unarchive"] as const)("stored-only native %s shares lifecycle admission through provider acquisition", async kind => {
-  const workdir = mkdtempSync(join(tmpdir(), "stored-maintenance-"));
-  const storage = new AgentStorage(join(workdir, "agents"), logger);
-  let armed = false;
-  let started!: () => void;
-  const began = new Promise<void>(resolve => { started = resolve; });
-  let finish!: () => void;
-  const gate = new Promise<void>(resolve => { finish = resolve; });
-  class ControlledNativeClient extends NativeArchiveRecordingClient {
-    override async archiveNativeSession(handle: AgentPersistenceHandle) {
-      if (armed && kind === "archive") { started(); await gate; }
-      return super.archiveNativeSession(handle);
+test.each(["archive", "unarchive"] as const)(
+  "stored-only native %s shares lifecycle admission through provider acquisition",
+  async (kind) => {
+    const workdir = mkdtempSync(join(tmpdir(), "stored-maintenance-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    let armed = false;
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    class ControlledNativeClient extends NativeArchiveRecordingClient {
+      override async archiveNativeSession(handle: AgentPersistenceHandle) {
+        if (armed && kind === "archive") {
+          started();
+          await gate;
+        }
+        return super.archiveNativeSession(handle);
+      }
+      override async unarchiveNativeSession(handle: AgentPersistenceHandle) {
+        if (armed && kind === "unarchive") {
+          started();
+          await gate;
+        }
+        return super.unarchiveNativeSession(handle);
+      }
     }
-    override async unarchiveNativeSession(handle: AgentPersistenceHandle) {
-      if (armed && kind === "unarchive") { started(); await gate; }
-      return super.unarchiveNativeSession(handle);
+    const client = new ControlledNativeClient();
+    const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
+    const reservation = new MaintenanceReservation(workdir, async () =>
+      manager.isMaintenanceQuiet(),
+    );
+    manager.installMaintenanceReservation(reservation);
+    try {
+      const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
+      await manager.closeAgent(agent.id);
+      if (kind === "unarchive") await manager.archiveSnapshot(agent.id, new Date().toISOString());
+      armed = true;
+      const mutate = () =>
+        kind === "archive"
+          ? manager.archiveSnapshot(agent.id, new Date().toISOString())
+          : manager.unarchiveSnapshot(agent.id);
+      const active = mutate();
+      await began;
+      await expect(reservation.begin(1, "native-transition-running")).rejects.toThrow();
+      finish();
+      await active;
+      armed = false;
+      // Restore the opposite metadata state before proving held refusal.
+      if (kind === "archive") await manager.unarchiveSnapshot(agent.id);
+      else await manager.archiveSnapshot(agent.id, new Date().toISOString());
+      await manager.flush();
+      const held = await reservation.begin(1, "native-transition-held");
+      const archived = client.archivedHandles.length,
+        unarchived = client.unarchivedHandles.length;
+      const before = await storage.get(agent.id);
+      await expect(mutate()).rejects.toThrow("maintenance");
+      expect(client.archivedHandles).toHaveLength(archived);
+      expect(client.unarchivedHandles).toHaveLength(unarchived);
+      expect((await storage.get(agent.id))?.archivedAt).toBe(before?.archivedAt);
+      reservation.end(1, held.ownerToken);
+    } finally {
+      armed = false;
+      finish();
+      await Promise.all(
+        manager.listAgents({ includeInternal: true }).map((agent) => manager.closeAgent(agent.id)),
+      );
+      await manager.flush();
+      await storage.flush();
+      rmSync(workdir, { recursive: true, force: true });
     }
-  }
-  const client = new ControlledNativeClient();
-  const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
-  const reservation = new MaintenanceReservation(workdir, async () => manager.isMaintenanceQuiet());
-  manager.installMaintenanceReservation(reservation);
-  try {
-    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});
-    await manager.closeAgent(agent.id);
-    if (kind === "unarchive") await manager.archiveSnapshot(agent.id, new Date().toISOString());
-    armed = true;
-    const mutate = () => kind === "archive" ? manager.archiveSnapshot(agent.id, new Date().toISOString()) : manager.unarchiveSnapshot(agent.id);
-    const active = mutate(); await began;
-    await expect(reservation.begin(1, "native-transition-running")).rejects.toThrow();
-    finish(); await active;
-    armed = false;
-    // Restore the opposite metadata state before proving held refusal.
-    if (kind === "archive") await manager.unarchiveSnapshot(agent.id);
-    else await manager.archiveSnapshot(agent.id, new Date().toISOString());
-    await manager.flush();
-    const held = await reservation.begin(1, "native-transition-held");
-    const archived = client.archivedHandles.length, unarchived = client.unarchivedHandles.length;
-    const before = await storage.get(agent.id);
-    await expect(mutate()).rejects.toThrow("maintenance");
-    expect(client.archivedHandles).toHaveLength(archived);
-    expect(client.unarchivedHandles).toHaveLength(unarchived);
-    expect((await storage.get(agent.id))?.archivedAt).toBe(before?.archivedAt);
-    reservation.end(1, held.ownerToken);
-  } finally { armed = false; finish(); await Promise.all(manager.listAgents({ includeInternal: true }).map(agent => manager.closeAgent(agent.id))); await manager.flush(); await storage.flush(); rmSync(workdir, { recursive: true, force: true }); }
-});
+  },
+);
 
 test("fires onAgentArchived for stored-only snapshot archives", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archived-hook-snapshot-"));

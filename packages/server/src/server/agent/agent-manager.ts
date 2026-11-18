@@ -2184,10 +2184,14 @@ export class AgentManager {
       return existing;
     }
 
-    const close = this.runLifecycleMutation(agentId, async () => {
-      // A preceding reload or archive may already have closed the durable agent.
-      if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
-    }, true);
+    const close = this.runLifecycleMutation(
+      agentId,
+      async () => {
+        // A preceding reload or archive may already have closed the durable agent.
+        if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
+      },
+      true,
+    );
     this.inFlightAgentCloses.set(agentId, close);
     const clearClose = () => {
       if (this.inFlightAgentCloses.get(agentId) === close) {
@@ -3014,14 +3018,23 @@ export class AgentManager {
     await this.writeStoredMetadata(agentId, updates);
   }
 
-  private runLifecycleMutation<T>(agentId: string, mutation: () => Promise<T>, cleanup = false): Promise<T> {
+  private runLifecycleMutation<T>(
+    agentId: string,
+    mutation: () => Promise<T>,
+    cleanup = false,
+  ): Promise<T> {
     const run = () => this.runLifecycleMutationAdmitted(agentId, mutation);
     return this.maintenanceReservation
-      ? cleanup ? this.maintenanceReservation.runCleanup(run) : this.maintenanceReservation.run(run)
+      ? cleanup
+        ? this.maintenanceReservation.runCleanup(run)
+        : this.maintenanceReservation.run(run)
       : run();
   }
 
-  private async runLifecycleMutationAdmitted<T>(agentId: string, mutation: () => Promise<T>): Promise<T> {
+  private async runLifecycleMutationAdmitted<T>(
+    agentId: string,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
     // Parent cascade classifies a child inside the same lane used by open-tab
     // label writes, so a received ownership update cannot be overtaken.
     const previous = this.lifecycleMutationTails.get(agentId) ?? Promise.resolve();

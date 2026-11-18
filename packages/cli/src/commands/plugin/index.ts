@@ -5,6 +5,7 @@ import { reviewPluginUpdates, type UpdateOutcome } from "./update.js";
 import { Command } from "commander";
 import type {
   ManagedPluginStatus,
+  ManagedPluginCohortStatus,
   PluginListItem,
   PluginLogEntry,
 } from "@getpaseo/protocol/messages";
@@ -26,6 +27,7 @@ import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
 import {
   withManagedPluginClient,
   withManagedPluginStatusClient,
+  withManagedPluginCohortClient,
   withPluginLogsClient,
   withPluginUpdateClient,
   withPluginManagementClient,
@@ -312,8 +314,39 @@ export async function runManagedPluginStatusCommand(
   return managedStatusResult(data);
 }
 
+function cohortStatusResult<T extends ManagedPluginCohortStatus>(data: T): SingleResult<T> {
+  const schema: OutputSchema<T> = {
+    idField: "consistency",
+    columns: [
+      { header: "CONSISTENCY", field: "consistency", width: 16 },
+      {
+        header: "COHORT",
+        field: (status) =>
+          status.consistency === "coherent" ? String(status.entries.length) : status.reason,
+        width: 22,
+      },
+    ],
+  };
+  return { type: "single", data, schema };
+}
+export async function runManagedPluginCohortStatusCommand(
+  options: PluginOptions,
+  _command: Command,
+): Promise<AnyCommandResult<ManagedPluginCohortStatus>> {
+  const data = await withManagedPluginCohortClient(options.daemonTarget, (client) =>
+    client.getManagedPluginCohortStatus(),
+  );
+  if (data.consistency === "coherent") return cohortStatusResult(data);
+  return cohortStatusResult(data);
+}
+
 export function createPluginCommand(): Command {
   const plugin = new Command("plugin").description("Manage trusted, unsandboxed plugins");
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("cohort-status")
+      .description("Read the complete qualified managed plugin cohort"),
+  ).action(withOutput<ManagedPluginCohortStatus, []>(runManagedPluginCohortStatusCommand));
   addJsonAndDaemonHostOptions(
     plugin
       .command("managed-status")

@@ -1,5 +1,9 @@
 import { constants } from "node:fs";
-import { PluginLoadedReceiptSchema, type PluginLoadedReceipt } from "@getpaseo/protocol/messages";
+import {
+  PluginIdSchema,
+  PluginLoadedReceiptSchema,
+  type PluginLoadedReceipt,
+} from "@getpaseo/protocol/messages";
 import { PluginSourceSchema, type PluginSource } from "@getpaseo/protocol/plugin-config";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -263,6 +267,76 @@ export class ManagedPluginActivationPolicy {
     }
     if (entries.length || this.enrolled.size)
       throw new Error("Managed history requires an explicit runtime ID before native acquisition");
+  }
+
+  async observeEnrollment(): Promise<{ ids: string[]; identity: string }> {
+    if (!this.policyFile) throw new Error("Managed policy unavailable");
+    const raw = await readFile(this.policyFile, "utf8");
+    const policy = ManagedPluginPolicySchema.parse(JSON.parse(raw));
+    let names: string[] = [];
+    let directoryIdentity = "missing";
+    try {
+      const info = await lstat(this.stateDirectory);
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new Error("Invalid journal directory");
+      names = (await readdir(this.stateDirectory)).filter((name) => name.endsWith(".json")).sort();
+      directoryIdentity = `${info.dev}:${info.ino}:${info.mtimeMs}:${info.ctimeMs}`;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+    const ids = [
+      ...new Set([
+        ...Object.keys(policy.plugins),
+        ...names.map((name) => {
+          const id = decodeURIComponent(name.slice(0, -5));
+          if (`${encodeURIComponent(id)}.json` !== name) throw new Error("Invalid journal name");
+          return id;
+        }),
+        ...this.enrolled,
+      ]),
+    ].sort();
+    for (const id of ids) PluginIdSchema.parse(id);
+    return {
+      ids,
+      identity: createHash("sha256")
+        .update(JSON.stringify([raw, names, directoryIdentity]))
+        .digest("hex"),
+    };
+  }
+
+  async observeLoadedQualification(
+    id: string,
+    receipt: PluginLoadedReceipt,
+    ticket: ActivationTicket,
+  ): Promise<string> {
+    if (!this.policyFile || !ticket.authorization.passiveProfile)
+      throw new Error("Loaded passive authority unavailable");
+    const raw = await readFile(this.policyFile, "utf8");
+    const policy = ManagedPluginPolicySchema.parse(JSON.parse(raw));
+    const matching = policy.plugins[id]?.authorizations.filter(
+      (authorization) => JSON.stringify(authorization) === JSON.stringify(ticket.authorization),
+    );
+    if (
+      matching?.length !== 1 ||
+      receipt.activationGeneration !== ticket.generation ||
+      receipt.sourcePath !== ticket.authorization.sourcePath ||
+      receipt.serverBundleSha256 !== ticket.authorization.serverBundleSha256 ||
+      receipt.snapshotSha256 !== ticket.authorization.snapshotSha256 ||
+      receipt.snapshotRoot !== ticket.authorization.snapshotRoot
+    )
+      throw new Error("Loaded passive authority revoked or ambiguous");
+    await verifyAuthorizedArtifact({
+      id,
+      canonical: receipt.sourcePath,
+      authorization: ticket.authorization,
+    });
+    const current = await this.observeStatus(id);
+    if (
+      JSON.stringify(current.state.currentReceipt) !== JSON.stringify(receipt) ||
+      (await readFile(this.policyFile, "utf8")) !== raw
+    )
+      throw new Error("Loaded passive authority changed");
+    return createHash("sha256").update(raw).digest("hex");
   }
 
   async dispatchAuthorized(input: PluginDispatch): Promise<void> {

@@ -1542,28 +1542,46 @@ export const MaintenanceStatusSchema = z.object({
   recoveryRequired: z.boolean(),
 });
 export const MaintenanceBeginRequestSchema = z.object({
- type: z.literal("daemon.maintenance.begin.request"), requestId: z.string(), schemaVersion: z.literal(1), generation: z.number().int().positive(), transactionId: z.string().min(1).max(256),
+  type: z.literal("daemon.maintenance.begin.request"),
+  requestId: z.string(),
+  schemaVersion: z.literal(1),
+  generation: z.number().int().positive(),
+  transactionId: z.string().min(1).max(256),
 });
 export const MaintenanceBeginResponseSchema = z.object({
- type: z.literal("daemon.maintenance.begin.response"), payload: z.object({
- requestId: z.string(), result: MaintenanceStatusSchema.extend({ ownerToken: z.string() }).nullable(), error: z.string().nullable(),
- })
+  type: z.literal("daemon.maintenance.begin.response"),
+  payload: z.object({
+    requestId: z.string(),
+    result: MaintenanceStatusSchema.extend({ ownerToken: z.string() }).nullable(),
+    error: z.string().nullable(),
+  }),
 });
 export const MaintenanceStatusRequestSchema = z.object({
- type: z.literal("daemon.maintenance.status.request"), requestId: z.string(),
+  type: z.literal("daemon.maintenance.status.request"),
+  requestId: z.string(),
 });
 export const MaintenanceStatusResponseSchema = z.object({
- type: z.literal("daemon.maintenance.status.response"), payload: z.object({
- requestId: z.string(), result: MaintenanceStatusSchema.nullable(), error: z.string().nullable(),
- })
+  type: z.literal("daemon.maintenance.status.response"),
+  payload: z.object({
+    requestId: z.string(),
+    result: MaintenanceStatusSchema.nullable(),
+    error: z.string().nullable(),
+  }),
 });
 export const MaintenanceEndRequestSchema = z.object({
- type: z.literal("daemon.maintenance.end.request"), requestId: z.string(), schemaVersion: z.literal(1), generation: z.number().int().positive(), ownerToken: z.string().min(1).max(256),
+  type: z.literal("daemon.maintenance.end.request"),
+  requestId: z.string(),
+  schemaVersion: z.literal(1),
+  generation: z.number().int().positive(),
+  ownerToken: z.string().min(1).max(256),
 });
 export const MaintenanceEndResponseSchema = z.object({
- type: z.literal("daemon.maintenance.end.response"), payload: z.object({
- requestId: z.string(), result: MaintenanceStatusSchema.nullable(), error: z.string().nullable(),
- })
+  type: z.literal("daemon.maintenance.end.response"),
+  payload: z.object({
+    requestId: z.string(),
+    result: MaintenanceStatusSchema.nullable(),
+    error: z.string().nullable(),
+  }),
 });
 export const DaemonConfigReloadRequestSchema = z.object({
   type: z.literal("daemon.config.reload.request"),

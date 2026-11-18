@@ -1,4 +1,8 @@
-import { type MaintenanceReservation, guardMaintenanceMethod, guardMaintenanceStream } from "../maintenance-reservation.js";
+import {
+  type MaintenanceReservation,
+  guardMaintenanceMethod,
+  guardMaintenanceStream,
+} from "../maintenance-reservation.js";
 import type { AttachedAgentTool, PluginAgentToolsRuntime } from "../plugins/agent-tools.js";
 import { ProviderOptionsValidationError } from "./provider-options.js";
 import type { AgentToolResult } from "@getpaseo/plugin/server";
@@ -1119,9 +1123,22 @@ export class AgentManager {
   installMaintenanceReservation(reservation: MaintenanceReservation): void {
     if (this.maintenanceReservation) throw new Error("Maintenance already installed");
     this.maintenanceReservation = reservation;
-    for (const key of ["createAgent", "createAgentFromRecord", "resumeAgentFromPersistence",
-      "importProviderSession", "reloadAgentSession", "runAgent", "tryRunOutOfBand",
-      "replaceAgentRun", "steerAgentRun", "steerOrReplaceActiveTurn", "reloadStalePluginSession", "respondToPermission", "rewind", "executePluginTool"] as const) {
+    for (const key of [
+      "createAgent",
+      "createAgentFromRecord",
+      "resumeAgentFromPersistence",
+      "importProviderSession",
+      "reloadAgentSession",
+      "runAgent",
+      "tryRunOutOfBand",
+      "replaceAgentRun",
+      "steerAgentRun",
+      "steerOrReplaceActiveTurn",
+      "reloadStalePluginSession",
+      "respondToPermission",
+      "rewind",
+      "executePluginTool",
+    ] as const) {
       guardMaintenanceMethod(this, key, reservation);
     }
     guardMaintenanceStream(this, "streamAgent", reservation);
@@ -1130,9 +1147,13 @@ export class AgentManager {
   isMaintenanceQuiet(): boolean {
     // An idle provider session may launch autonomous background work. Until every provider
     // has an authoritative drain contract, live sessions are unknown, not proof of quiet.
-    return this.backgroundTasks.size === 0 && this.collectingRuntimes.size === 0 &&
-      this.lifecycleMutationTails.size === 0 && this.foregroundMutationTails.size === 0 &&
-      Array.from(this.agents.values()).every(agent => agent.lifecycle === "closed");
+    return (
+      this.backgroundTasks.size === 0 &&
+      this.collectingRuntimes.size === 0 &&
+      this.lifecycleMutationTails.size === 0 &&
+      this.foregroundMutationTails.size === 0 &&
+      Array.from(this.agents.values()).every((agent) => agent.lifecycle === "closed")
+    );
   }
 
   hasInFlightRun(agentId: string): boolean {
@@ -1315,8 +1336,12 @@ export class AgentManager {
     const reservation = this.maintenanceReservation;
     if (!reservation) return operation();
     return reservation.run(async () => {
-      try { return await operation(); }
-      catch (error) { reservation.holdForUnknownWork(); throw error; }
+      try {
+        return await operation();
+      } catch (error) {
+        reservation.holdForUnknownWork();
+        throw error;
+      }
     });
   }
 
@@ -1327,38 +1352,38 @@ export class AgentManager {
       return [];
     }
     return this.withDiscoveryAdmission(async () => {
-    const available = await client.isAvailable();
-    if (!available) {
-      throw new Error(
-        `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
-      );
-    }
-
-    if (client.listCommands) {
-      return await client.listCommands(normalizedConfig);
-    }
-
-    const session = await client.createSession(normalizedConfig);
-    try {
-      if (!session.listCommands) {
+      const available = await client.isAvailable();
+      if (!available) {
         throw new Error(
-          `Provider '${normalizedConfig.provider}' does not support listing commands`,
+          `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
         );
       }
-      return await session.listCommands();
-    } finally {
+
+      if (client.listCommands) {
+        return await client.listCommands(normalizedConfig);
+      }
+
+      const session = await client.createSession(normalizedConfig);
       try {
-        await session.close();
-      } catch (error) {
-        this.logger.warn(
-          { err: error, provider: normalizedConfig.provider },
-          "Failed to close draft command listing session",
-        );
-        if (this.maintenanceReservation) {
-          throw error;
+        if (!session.listCommands) {
+          throw new Error(
+            `Provider '${normalizedConfig.provider}' does not support listing commands`,
+          );
+        }
+        return await session.listCommands();
+      } finally {
+        try {
+          await session.close();
+        } catch (error) {
+          this.logger.warn(
+            { err: error, provider: normalizedConfig.provider },
+            "Failed to close draft command listing session",
+          );
+          if (this.maintenanceReservation) {
+            throw error;
+          }
         }
       }
-    }
     });
   }
 
@@ -1373,38 +1398,38 @@ export class AgentManager {
       return { controls: [], options };
     }
     return this.withDiscoveryAdmission(async () => {
-    const available = await client.isAvailable();
-    if (!available) {
-      throw new Error(
-        `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
-      );
-    }
-
-    if (client.listControls) {
-      return await client.listControls(normalizedConfig);
-    }
-
-    const session = await client.createSession(normalizedConfig);
-    try {
-      // The options a session opens with, as create would report them, so the controls'
-      // selection matches what the first turn runs with.
-      return {
-        controls: session.controls ?? [],
-        options: this.openedEffectiveOptions({ session, launchedOptions: options }),
-      };
-    } finally {
-      try {
-        await session.close();
-      } catch (error) {
-        this.logger.warn(
-          { err: error, provider: normalizedConfig.provider },
-          "Failed to close draft feature listing session",
+      const available = await client.isAvailable();
+      if (!available) {
+        throw new Error(
+          `Provider '${normalizedConfig.provider}' is not available. Please ensure the CLI is installed.`,
         );
-        if (this.maintenanceReservation) {
-          throw error;
+      }
+
+      if (client.listControls) {
+        return await client.listControls(normalizedConfig);
+      }
+
+      const session = await client.createSession(normalizedConfig);
+      try {
+        // The options a session opens with, as create would report them, so the controls'
+        // selection matches what the first turn runs with.
+        return {
+          controls: session.controls ?? [],
+          options: this.openedEffectiveOptions({ session, launchedOptions: options }),
+        };
+      } finally {
+        try {
+          await session.close();
+        } catch (error) {
+          this.logger.warn(
+            { err: error, provider: normalizedConfig.provider },
+            "Failed to close draft feature listing session",
+          );
+          if (this.maintenanceReservation) {
+            throw error;
+          }
         }
       }
-    }
     });
   }
 

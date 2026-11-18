@@ -636,7 +636,8 @@ export async function createPaseoDaemon(
     if (!agentManager.isMaintenanceQuiet()) return false;
     // Open terminals can accept input and run arbitrary commands: treat every one as busy.
     const terminals = await terminalManager.adoptTerminals();
-    if (!Number.isSafeInteger(terminals) || terminals < 0) throw new Error("Unknown terminal observation");
+    if (!Number.isSafeInteger(terminals) || terminals < 0)
+      throw new Error("Unknown terminal observation");
     return terminals === 0 && agentManager.isMaintenanceQuiet();
   });
   maintenance.setReady(false);
@@ -680,9 +681,11 @@ export async function createPaseoDaemon(
     },
   });
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
-  void maintenance.run(() => orchestrationSkills.autoUpdate()).catch((error) => {
-    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
-  });
+  void maintenance
+    .run(() => orchestrationSkills.autoUpdate())
+    .catch((error) => {
+      logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+    });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
   const pluginRuntime: PluginService = new PluginService(logger, daemonConfigStore, daemonVersion, {
@@ -708,9 +711,11 @@ export async function createPaseoDaemon(
   // Reconcile the helper-process ledger in the background so it never blocks the
   // daemon from coming up; terminating a live leftover can take a few seconds.
   // Best-effort, so a failure is logged here rather than crashing startup.
-  void maintenance.run(() => reconcileManagedProcessLedger(managedProcesses, logger)).catch((error) => {
-    logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
-  });
+  void maintenance
+    .run(() => reconcileManagedProcessLedger(managedProcesses, logger))
+    .catch((error) => {
+      logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
+    });
   let relayRuntime: RelayRuntime | null = null;
 
   const staticDir = config.staticDir;

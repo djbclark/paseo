@@ -6044,19 +6044,40 @@ export class DaemonClient {
     });
   }
 
-  async maintenanceBegin(input: { generation: number; transactionId: string }): Promise<Extract<SessionOutboundMessage, { type: "daemon.maintenance.begin.response" }>["payload"]> {
-    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true) throw new Error("Host update required for maintenance reservation");
-    return this.sendNamespacedCorrelatedSessionRequest({ message: { type: "daemon.maintenance.begin.request", schemaVersion: 1, ...input } });
+  async maintenanceBegin(input: {
+    generation: number;
+    transactionId: string;
+  }): Promise<
+    Extract<SessionOutboundMessage, { type: "daemon.maintenance.begin.response" }>["payload"]
+  > {
+    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true)
+      throw new Error("Host update required for maintenance reservation");
+    return this.sendNamespacedCorrelatedSessionRequest({
+      message: { type: "daemon.maintenance.begin.request", schemaVersion: 1, ...input },
+    });
   }
 
-  async maintenanceStatus(): Promise<Extract<SessionOutboundMessage, { type: "daemon.maintenance.status.response" }>["payload"]> {
-    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true) throw new Error("Host update required for maintenance reservation");
-    return this.sendNamespacedCorrelatedSessionRequest({ message: { type: "daemon.maintenance.status.request" } });
+  async maintenanceStatus(): Promise<
+    Extract<SessionOutboundMessage, { type: "daemon.maintenance.status.response" }>["payload"]
+  > {
+    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true)
+      throw new Error("Host update required for maintenance reservation");
+    return this.sendNamespacedCorrelatedSessionRequest({
+      message: { type: "daemon.maintenance.status.request" },
+    });
   }
 
-  async maintenanceEnd(input: { generation: number; ownerToken: string }): Promise<Extract<SessionOutboundMessage, { type: "daemon.maintenance.end.response" }>["payload"]> {
-    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true) throw new Error("Host update required for maintenance reservation");
-    return this.sendNamespacedCorrelatedSessionRequest({ message: { type: "daemon.maintenance.end.request", schemaVersion: 1, ...input } });
+  async maintenanceEnd(input: {
+    generation: number;
+    ownerToken: string;
+  }): Promise<
+    Extract<SessionOutboundMessage, { type: "daemon.maintenance.end.response" }>["payload"]
+  > {
+    if (this.lastServerInfoMessage?.features?.maintenanceReservationV1 !== true)
+      throw new Error("Host update required for maintenance reservation");
+    return this.sendNamespacedCorrelatedSessionRequest({
+      message: { type: "daemon.maintenance.end.request", schemaVersion: 1, ...input },
+    });
   }
 
   async reloadDaemonConfig(requestId?: string): Promise<DaemonConfigReloadResponse["payload"]> {

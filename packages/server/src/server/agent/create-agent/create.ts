@@ -596,7 +596,11 @@ function requireFinishSubscriptions(
   return dependencies.finishSubscriptions;
 }
 
-export function createAgentCommand(...args: Parameters<typeof createAgentCommandUnreserved>): ReturnType<typeof createAgentCommandUnreserved> {
- const reservation = maintenanceFor(args[0].agentManager);
- return reservation ? reservation.run(() => createAgentCommandUnreserved(...args)) : createAgentCommandUnreserved(...args);
+export function createAgentCommand(
+  ...args: Parameters<typeof createAgentCommandUnreserved>
+): ReturnType<typeof createAgentCommandUnreserved> {
+  const reservation = maintenanceFor(args[0].agentManager);
+  return reservation
+    ? reservation.run(() => createAgentCommandUnreserved(...args))
+    : createAgentCommandUnreserved(...args);
 }

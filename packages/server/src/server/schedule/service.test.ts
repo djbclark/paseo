@@ -342,21 +342,39 @@ describe("ScheduleService", () => {
   test("manual and timed schedule execution share admission across runner and persistence", async () => {
     const reservation = new MaintenanceReservation(tempDir, async () => true);
     let started!: () => void;
-    const began = new Promise<void>(resolve => { started = resolve; });
-    let finish!: () => void;
-    const completion = new Promise<void>(resolve => { finish = resolve; });
-    const runner = vi.fn(async () => { started(); await completion; return { agentId: null, output: "done" }; });
-    const service = createScheduleService({
-      paseoHome: tempDir, maintenance: reservation, logger: createTestLogger(),
-      agentManager: new AgentManager({ logger: createTestLogger() }), agentStorage,
-      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY, now: () => now, runner,
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
     });
-    const schedule = await service.create({ prompt: "maintenance", cadence: { type: "every", everyMs: 60_000 }, target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } } });
+    let finish!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const runner = vi.fn(async () => {
+      started();
+      await completion;
+      return { agentId: null, output: "done" };
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      maintenance: reservation,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const schedule = await service.create({
+      prompt: "maintenance",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
     const running = service.runOnce(schedule.id);
     try {
       await began;
       await expect(reservation.begin(1, "running-schedule")).rejects.toThrow();
-      finish(); await running;
+      finish();
+      await running;
       const held = await reservation.begin(1, "quiet-schedule");
       const previous = await service.inspect(schedule.id);
       await expect(service.runOnce(schedule.id)).rejects.toThrow("maintenance");
@@ -365,7 +383,11 @@ describe("ScheduleService", () => {
       expect(runner).toHaveBeenCalledTimes(1);
       expect((await service.inspect(schedule.id)).runs).toEqual(previous.runs);
       reservation.end(1, held.ownerToken);
-    } finally { finish(); await running; await service.stop(); }
+    } finally {
+      finish();
+      await running;
+      await service.stop();
+    }
   });
 
   test("ticks due schedules and records run history on disk", async () => {

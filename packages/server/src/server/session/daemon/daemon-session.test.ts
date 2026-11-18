@@ -5,7 +5,11 @@ import { verifyOfflineMaintenance } from "../../maintenance-offline.js";
 import { WorkspaceSetupRuntime } from "../../workspace-setup-runtime.js";
 import { AgentManager } from "../../agent/agent-manager.js";
 import { MaintenanceReservation, guardMaintenanceMethod } from "../../maintenance-reservation.js";
-import { mkdtempSync as makeMaintenanceHome, readFileSync as readMaintenanceFile, rmSync as removeMaintenanceHome } from "node:fs";
+import {
+  mkdtempSync as makeMaintenanceHome,
+  readFileSync as readMaintenanceFile,
+  rmSync as removeMaintenanceHome,
+} from "node:fs";
 import { tmpdir as maintenanceTmpdir } from "node:os";
 import { join as maintenanceJoin } from "node:path";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -545,13 +549,20 @@ describe("maintenance reservation admission", () => {
   function fixture(quiet: () => Promise<boolean> = async () => true) {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "maintenance-"));
     const reservation = new MaintenanceReservation(home, quiet);
-    return { home, reservation, close: () => removeMaintenanceHome(home, { recursive: true, force: true }) };
+    return {
+      home,
+      reservation,
+      close: () => removeMaintenanceHome(home, { recursive: true, force: true }),
+    };
   }
   test("persists only ownership digest, survives restart indefinitely, requires token and generation", async () => {
     const f = fixture();
     try {
       const held = await f.reservation.begin(1, "transaction");
-      const persisted = readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8");
+      const persisted = readMaintenanceFile(
+        maintenanceJoin(f.home, "maintenance-reservation.json"),
+        "utf8",
+      );
       expect(persisted).not.toContain(held.ownerToken);
       expect(JSON.stringify(f.reservation.status())).not.toContain(held.ownerToken);
       const restarted = new MaintenanceReservation(f.home, async () => true);
@@ -562,24 +573,39 @@ describe("maintenance reservation admission", () => {
       expect(restarted.end(1, held.ownerToken).state).toBe("idle");
       await expect(restarted.begin(1, "reused")).rejects.toThrow();
       expect((await restarted.begin(2, "new")).state).toBe("held");
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("serializes shared internal admission and never cancels existing work", async () => {
     const f = fixture();
     let finish!: () => void;
-    const owner = { execute: () => new Promise<void>(resolve => { finish = resolve; }) };
+    const owner = {
+      execute: () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    };
     guardMaintenanceMethod(owner, "execute", f.reservation);
     try {
       const existing = owner.execute();
       await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
-      finish(); await existing;
+      finish();
+      await existing;
       await f.reservation.begin(1, "quiet");
       await expect(owner.execute()).rejects.toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("closes admission before awaiting observation, rejecting simultaneous begin and new work", async () => {
     let observed!: (quiet: boolean) => void;
-    const f = fixture(() => new Promise(resolve => { observed = resolve; }));
+    const f = fixture(
+      () =>
+        new Promise((resolve) => {
+          observed = resolve;
+        }),
+    );
     try {
       const grant = f.reservation.begin(1, "first");
       expect(() => f.reservation.enter()).toThrow();
@@ -587,24 +613,45 @@ describe("maintenance reservation admission", () => {
       await expect(f.reservation.begin(2, "second")).rejects.toThrow();
       observed(false);
       await expect(grant).rejects.toThrow();
-      const release = f.reservation.enter(); release(); release();
-    } finally { f.close(); }
+      const release = f.reservation.enter();
+      release();
+      release();
+    } finally {
+      f.close();
+    }
   });
   test("direct internal manager calls share the held admission owner", async () => {
     const f = fixture();
-    const manager = new AgentManager({ logger: pino({ level: "silent" }), clients: createTestAgentClients() });
+    const manager = new AgentManager({
+      logger: pino({ level: "silent" }),
+      clients: createTestAgentClients(),
+    });
     manager.installMaintenanceReservation(f.reservation);
     try {
       await f.reservation.begin(1, "internal-call");
-      await expect(manager.createAgent({ provider: "codex", cwd: f.home }, undefined, {})).rejects.toThrow("maintenance");
-      await expect(manager.streamAgent("unloaded-agent", "prompt").next()).rejects.toThrow("maintenance");
-      await expect(manager.steerOrReplaceActiveTurn("unloaded-agent", "prompt")).rejects.toThrow("maintenance");
-      await expect(manager.listDraftCommands({ provider: "codex", cwd: f.home, model: "test-model" })).rejects.toThrow("maintenance");
-      expect(await manager.listDraftControls({ provider: "codex", cwd: f.home })).toMatchObject({ controls: [] });
-    } finally { f.close(); }
+      await expect(
+        manager.createAgent({ provider: "codex", cwd: f.home }, undefined, {}),
+      ).rejects.toThrow("maintenance");
+      await expect(manager.streamAgent("unloaded-agent", "prompt").next()).rejects.toThrow(
+        "maintenance",
+      );
+      await expect(manager.steerOrReplaceActiveTurn("unloaded-agent", "prompt")).rejects.toThrow(
+        "maintenance",
+      );
+      await expect(
+        manager.listDraftCommands({ provider: "codex", cwd: f.home, model: "test-model" }),
+      ).rejects.toThrow("maintenance");
+      expect(await manager.listDraftControls({ provider: "codex", cwd: f.home })).toMatchObject({
+        controls: [],
+      });
+    } finally {
+      f.close();
+    }
   });
   test("unknown observation fails closed without granting or expiring a hold", async () => {
-    const f = fixture(async () => { throw new Error("unknown"); });
+    const f = fixture(async () => {
+      throw new Error("unknown");
+    });
     try {
       await expect(f.reservation.begin(1, "unknown")).rejects.toThrow();
       expect(f.reservation.status().state).toBe("recovery-required");
@@ -612,69 +659,118 @@ describe("maintenance reservation admission", () => {
       const restarted = new MaintenanceReservation(f.home, async () => true);
       expect(restarted.status().state).toBe("recovery-required");
       expect(() => restarted.enter()).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 });
 
 describe("maintenance filesystem failure and restart commit points", () => {
-  const stages = ["temp-open", "write", "file-fsync", "file-close", "rename", "directory-open", "directory-fsync", "directory-close"] as const;
+  const stages = [
+    "temp-open",
+    "write",
+    "file-fsync",
+    "file-close",
+    "rename",
+    "directory-open",
+    "directory-fsync",
+    "directory-close",
+  ] as const;
   function resetFaults() {
-    for (const method of [maintenanceFs.openSync, maintenanceFs.writeFileSync, maintenanceFs.fsyncSync, maintenanceFs.closeSync, maintenanceFs.renameSync]) vi.mocked(method).mockReset();
+    for (const method of [
+      maintenanceFs.openSync,
+      maintenanceFs.writeFileSync,
+      maintenanceFs.fsyncSync,
+      maintenanceFs.closeSync,
+      maintenanceFs.renameSync,
+    ])
+      vi.mocked(method).mockReset();
   }
-  function inject(stage: typeof stages[number]) {
+  function inject(stage: (typeof stages)[number]) {
     let injected = false;
-    const fail = (matches: boolean) => { if (matches && !injected) { injected = true; throw new Error(`injected ${stage}`); } };
+    const fail = (matches: boolean) => {
+      if (matches && !injected) {
+        injected = true;
+        throw new Error(`injected ${stage}`);
+      }
+    };
     vi.mocked(maintenanceFs.openSync).mockImplementation((...args) => {
-      fail((stage === "temp-open" && args[1] === "wx") || (stage === "directory-open" && args[1] === "r"));
+      fail(
+        (stage === "temp-open" && args[1] === "wx") ||
+          (stage === "directory-open" && args[1] === "r"),
+      );
       return unmockedMaintenanceFs.openSync(...args);
     });
     vi.mocked(maintenanceFs.writeFileSync).mockImplementation((...args) => {
-      fail(stage === "write"); return unmockedMaintenanceFs.writeFileSync(...args);
+      fail(stage === "write");
+      return unmockedMaintenanceFs.writeFileSync(...args);
     });
-    vi.mocked(maintenanceFs.fsyncSync).mockImplementation(fd => {
+    vi.mocked(maintenanceFs.fsyncSync).mockImplementation((fd) => {
       const directory = unmockedMaintenanceFs.fstatSync(fd).isDirectory();
       fail((stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory));
       return unmockedMaintenanceFs.fsyncSync(fd);
     });
-    vi.mocked(maintenanceFs.closeSync).mockImplementation(fd => {
+    vi.mocked(maintenanceFs.closeSync).mockImplementation((fd) => {
       const directory = unmockedMaintenanceFs.fstatSync(fd).isDirectory();
       fail((stage === "file-close" && !directory) || (stage === "directory-close" && directory));
       return unmockedMaintenanceFs.closeSync(fd);
     });
     vi.mocked(maintenanceFs.renameSync).mockImplementation((...args) => {
-      fail(stage === "rename"); return unmockedMaintenanceFs.renameSync(...args);
+      fail(stage === "rename");
+      return unmockedMaintenanceFs.renameSync(...args);
     });
   }
-  test.each(stages)("begin %s fails closed; restart reads stable committed authority", async stage => {
-    const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "begin-fault-"));
-    try {
-      const reservation = new MaintenanceReservation(home, async () => true);
-      const previous = await reservation.begin(1, "previous"); reservation.end(1, previous.ownerToken);
-      inject(stage);
-      await expect(reservation.begin(2, "failed-begin")).rejects.toThrow("injected");
-      expect(reservation.status()).toMatchObject({ state: "recovery-required", recoveryRequired: true });
-      expect(() => reservation.enter()).toThrow();
-      resetFaults();
-      const restarted = new MaintenanceReservation(home, async () => true);
-      const renamed = stage.startsWith("directory-");
-      expect(restarted.status().state).toBe(renamed ? "recovery-required" : "idle");
-      expect(restarted.status().generation).toBe(renamed ? 2 : 1);
-    } finally { resetFaults(); removeMaintenanceHome(home, { recursive: true, force: true }); }
-  });
-  test.each(stages)("end %s fails closed; valid renamed idle is the authorized release commit", async stage => {
-    const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "end-fault-"));
-    try {
-      const reservation = new MaintenanceReservation(home, async () => true);
-      const held = await reservation.begin(1, "held");
-      inject(stage);
-      expect(() => reservation.end(1, held.ownerToken)).toThrow("injected");
-      expect(reservation.status()).toMatchObject({ state: "recovery-required", recoveryRequired: true });
-      expect(() => reservation.enter()).toThrow();
-      resetFaults();
-      const restarted = new MaintenanceReservation(home, async () => true);
-      expect(restarted.status().state).toBe(stage.startsWith("directory-") ? "idle" : "recovery-required");
-    } finally { resetFaults(); removeMaintenanceHome(home, { recursive: true, force: true }); }
-  });
+  test.each(stages)(
+    "begin %s fails closed; restart reads stable committed authority",
+    async (stage) => {
+      const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "begin-fault-"));
+      try {
+        const reservation = new MaintenanceReservation(home, async () => true);
+        const previous = await reservation.begin(1, "previous");
+        reservation.end(1, previous.ownerToken);
+        inject(stage);
+        await expect(reservation.begin(2, "failed-begin")).rejects.toThrow("injected");
+        expect(reservation.status()).toMatchObject({
+          state: "recovery-required",
+          recoveryRequired: true,
+        });
+        expect(() => reservation.enter()).toThrow();
+        resetFaults();
+        const restarted = new MaintenanceReservation(home, async () => true);
+        const renamed = stage.startsWith("directory-");
+        expect(restarted.status().state).toBe(renamed ? "recovery-required" : "idle");
+        expect(restarted.status().generation).toBe(renamed ? 2 : 1);
+      } finally {
+        resetFaults();
+        removeMaintenanceHome(home, { recursive: true, force: true });
+      }
+    },
+  );
+  test.each(stages)(
+    "end %s fails closed; valid renamed idle is the authorized release commit",
+    async (stage) => {
+      const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "end-fault-"));
+      try {
+        const reservation = new MaintenanceReservation(home, async () => true);
+        const held = await reservation.begin(1, "held");
+        inject(stage);
+        expect(() => reservation.end(1, held.ownerToken)).toThrow("injected");
+        expect(reservation.status()).toMatchObject({
+          state: "recovery-required",
+          recoveryRequired: true,
+        });
+        expect(() => reservation.enter()).toThrow();
+        resetFaults();
+        const restarted = new MaintenanceReservation(home, async () => true);
+        expect(restarted.status().state).toBe(
+          stage.startsWith("directory-") ? "idle" : "recovery-required",
+        );
+      } finally {
+        resetFaults();
+        removeMaintenanceHome(home, { recursive: true, force: true });
+      }
+    },
+  );
   test("fresh differs from established missing authority; dangling and ENOTDIR cannot mean fresh", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "authority-missing-"));
     try {
@@ -686,16 +782,26 @@ describe("maintenance filesystem failure and restart commit points", () => {
       expect(() => new MaintenanceReservation(home, async () => true)).toThrow("missing");
       maintenanceFs.symlinkSync(maintenanceJoin(home, "absent"), path);
       expect(() => new MaintenanceReservation(home, async () => true)).toThrow();
-      const nonDirectory = maintenanceJoin(home, "file"); maintenanceFs.writeFileSync(nonDirectory, "file");
-      expect(() => new MaintenanceReservation(maintenanceJoin(nonDirectory, "child"), async () => true)).toThrow();
-    } finally { removeMaintenanceHome(home, { recursive: true, force: true }); }
+      const nonDirectory = maintenanceJoin(home, "file");
+      maintenanceFs.writeFileSync(nonDirectory, "file");
+      expect(
+        () => new MaintenanceReservation(maintenanceJoin(nonDirectory, "child"), async () => true),
+      ).toThrow();
+    } finally {
+      removeMaintenanceHome(home, { recursive: true, force: true });
+    }
   });
   test("EACCES is never treated as fresh authority", () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "authority-access-"));
     try {
-      vi.mocked(maintenanceFs.lstatSync).mockImplementationOnce(() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
+      vi.mocked(maintenanceFs.lstatSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error("denied"), { code: "EACCES" });
+      });
       expect(() => new MaintenanceReservation(home, async () => true)).toThrow("denied");
-    } finally { vi.mocked(maintenanceFs.lstatSync).mockReset(); removeMaintenanceHome(home, { recursive: true, force: true }); }
+    } finally {
+      vi.mocked(maintenanceFs.lstatSync).mockReset();
+      removeMaintenanceHome(home, { recursive: true, force: true });
+    }
   });
   test("enrollment committed before a first-record failure prevents restart treating home as fresh", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "enrollment-fault-"));
@@ -706,7 +812,10 @@ describe("maintenance filesystem failure and restart commit points", () => {
       expect(reservation.status().state).toBe("recovery-required");
       resetFaults();
       expect(() => new MaintenanceReservation(home, async () => true)).toThrow("missing");
-    } finally { resetFaults(); removeMaintenanceHome(home, { recursive: true, force: true }); }
+    } finally {
+      resetFaults();
+      removeMaintenanceHome(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -716,23 +825,51 @@ describe("protected offline maintenance authority", () => {
     const home = makeMaintenanceHome(maintenanceJoin(account.homedir, "maintenance-proof-"));
     const directory = maintenanceJoin(home, ".paseo");
     maintenanceFs.mkdirSync(directory, { mode: 0o700 });
-    maintenanceFs.writeFileSync(maintenanceJoin(directory, "maintenance-enrollment.json"), JSON.stringify({ schemaVersion: 1, component: "paseo-maintenance" }), { mode: 0o600 });
+    maintenanceFs.writeFileSync(
+      maintenanceJoin(directory, "maintenance-enrollment.json"),
+      JSON.stringify({ schemaVersion: 1, component: "paseo-maintenance" }),
+      { mode: 0o600 },
+    );
     const path = maintenanceJoin(directory, "maintenance-reservation.json");
-    const record = { schemaVersion: 1, generation: 7, transactionId: "protected-journal", tokenDigest: "a".repeat(64) };
+    const record = {
+      schemaVersion: 1,
+      generation: 7,
+      transactionId: "protected-journal",
+      tokenDigest: "a".repeat(64),
+    };
     maintenanceFs.writeFileSync(path, JSON.stringify(record), { mode: 0o600 });
     vi.mocked(maintenanceOs.userInfo).mockReturnValue({ ...account, homedir: home });
-    return { home, directory, path, record, verify: () => verifyOfflineMaintenance(7, "protected-journal"),
-      close: () => { vi.mocked(maintenanceOs.userInfo).mockReset(); vi.mocked(maintenanceFs.readSync).mockReset(); vi.restoreAllMocks(); removeMaintenanceHome(home, { recursive: true, force: true }); } };
+    return {
+      home,
+      directory,
+      path,
+      record,
+      verify: () => verifyOfflineMaintenance(7, "protected-journal"),
+      close: () => {
+        vi.mocked(maintenanceOs.userInfo).mockReset();
+        vi.mocked(maintenanceFs.readSync).mockReset();
+        vi.restoreAllMocks();
+        removeMaintenanceHome(home, { recursive: true, force: true });
+      },
+    };
   }
   test("accepts only matching protected persisted hold and returns no digest/token", () => {
     const f = fixture();
     try {
-      expect(f.verify()).toEqual({ schemaVersion: 1, generation: 7, transactionId: "protected-journal", state: "recovery-required", recoveryRequired: true });
+      expect(f.verify()).toEqual({
+        schemaVersion: 1,
+        generation: 7,
+        transactionId: "protected-journal",
+        state: "recovery-required",
+        recoveryRequired: true,
+      });
       expect(() => verifyOfflineMaintenance(8, "protected-journal")).toThrow();
       expect(() => verifyOfflineMaintenance(7, "candidate-transaction")).toThrow();
       maintenanceFs.writeFileSync(f.path, JSON.stringify({ ...f.record, tokenDigest: null }));
       expect(f.verify).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("rejects writable directories and readable records", () => {
     const f = fixture();
@@ -742,12 +879,16 @@ describe("protected offline maintenance authority", () => {
       maintenanceFs.chmodSync(f.directory, 0o700);
       maintenanceFs.chmodSync(f.path, 0o644);
       expect(f.verify).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("rejects record ownership mismatch and size instability", () => {
     const f = fixture();
     try {
-      vi.mocked(maintenanceFs.fstatSync).mockImplementationOnce(((...args: Parameters<typeof maintenanceFs.fstatSync>) => {
+      vi.mocked(maintenanceFs.fstatSync).mockImplementationOnce(((
+        ...args: Parameters<typeof maintenanceFs.fstatSync>
+      ) => {
         const stat = unmockedMaintenanceFs.fstatSync(...args);
         return Object.assign(stat, { uid: account.uid + 1 });
       }) as typeof maintenanceFs.fstatSync);
@@ -755,7 +896,10 @@ describe("protected offline maintenance authority", () => {
       vi.mocked(maintenanceFs.fstatSync).mockReset();
       maintenanceFs.writeFileSync(f.path, "x".repeat(4097));
       expect(f.verify).toThrow();
-    } finally { vi.mocked(maintenanceFs.fstatSync).mockReset(); f.close(); }
+    } finally {
+      vi.mocked(maintenanceFs.fstatSync).mockReset();
+      f.close();
+    }
   });
   test("rejects final symlinks, ancestor symlinks and hardlinked authority", () => {
     const f = fixture();
@@ -773,16 +917,24 @@ describe("protected offline maintenance authority", () => {
       maintenanceFs.renameSync(f.directory, previous);
       maintenanceFs.symlinkSync(previous, f.directory);
       expect(f.verify).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("rejects unknown schema, digest and candidate-added approval fields", () => {
     const f = fixture();
     try {
-      for (const record of [{ ...f.record, schemaVersion: 2 }, { ...f.record, tokenDigest: "not-a-digest" }, { ...f.record, approved: true }]) {
+      for (const record of [
+        { ...f.record, schemaVersion: 2 },
+        { ...f.record, tokenDigest: "not-a-digest" },
+        { ...f.record, approved: true },
+      ]) {
         maintenanceFs.writeFileSync(f.path, JSON.stringify(record));
         expect(f.verify).toThrow();
       }
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("ignores HOME override, rejects missing enrollment/established record and nonregular FIFO promptly", async () => {
     const f = fixture();
@@ -792,7 +944,11 @@ describe("protected offline maintenance authority", () => {
       expect(f.verify().generation).toBe(7);
       maintenanceFs.unlinkSync(maintenanceJoin(f.directory, "maintenance-enrollment.json"));
       expect(f.verify).toThrow();
-      maintenanceFs.writeFileSync(maintenanceJoin(f.directory, "maintenance-enrollment.json"), JSON.stringify({ schemaVersion: 1, component: "paseo-maintenance" }), { mode: 0o600 });
+      maintenanceFs.writeFileSync(
+        maintenanceJoin(f.directory, "maintenance-enrollment.json"),
+        JSON.stringify({ schemaVersion: 1, component: "paseo-maintenance" }),
+        { mode: 0o600 },
+      );
       maintenanceFs.unlinkSync(f.path);
       expect(f.verify).toThrow();
       const { execFileSync } = await import("node:child_process");
@@ -800,27 +956,46 @@ describe("protected offline maintenance authority", () => {
       const opened = vi.mocked(maintenanceFs.openSync).mock.calls.length;
       expect(f.verify).toThrow("Nonregular");
       expect(vi.mocked(maintenanceFs.openSync).mock.calls.length).toBe(opened + 1); // Enrollment alone opened; FIFO never opened.
-    } finally { restoreEnv("HOME", previousHome); f.close(); }
+    } finally {
+      restoreEnv("HOME", previousHome);
+      f.close();
+    }
   }, 2000);
   test("rejects record replacement during read", () => {
     const f = fixture();
     try {
-      vi.mocked(maintenanceFs.readSync).mockImplementation(((...args: Parameters<typeof maintenanceFs.readSync>) => {
+      vi.mocked(maintenanceFs.readSync).mockImplementation(((
+        ...args: Parameters<typeof maintenanceFs.readSync>
+      ) => {
         const bytes = unmockedMaintenanceFs.readSync(...args);
-        if (!Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength).toString("utf8").includes("tokenDigest")) return bytes;
+        if (
+          !Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength)
+            .toString("utf8")
+            .includes("tokenDigest")
+        )
+          return bytes;
         maintenanceFs.unlinkSync(f.path);
         maintenanceFs.writeFileSync(f.path, JSON.stringify(f.record), { mode: 0o600 });
         return bytes;
       }) as typeof maintenanceFs.readSync);
       expect(f.verify).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
   test("rejects a protected ancestor replaced during read", () => {
     const f = fixture();
     try {
-      vi.mocked(maintenanceFs.readSync).mockImplementation(((...args: Parameters<typeof maintenanceFs.readSync>) => {
+      vi.mocked(maintenanceFs.readSync).mockImplementation(((
+        ...args: Parameters<typeof maintenanceFs.readSync>
+      ) => {
         const bytes = unmockedMaintenanceFs.readSync(...args);
-        if (!Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength).toString("utf8").includes("tokenDigest")) return bytes;
+        if (
+          !Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength)
+            .toString("utf8")
+            .includes("tokenDigest")
+        )
+          return bytes;
         const previous = maintenanceJoin(f.home, "previous");
         maintenanceFs.renameSync(f.directory, previous);
         maintenanceFs.mkdirSync(f.directory, { mode: 0o700 });
@@ -828,7 +1003,9 @@ describe("protected offline maintenance authority", () => {
         return bytes;
       }) as typeof maintenanceFs.readSync);
       expect(f.verify).toThrow();
-    } finally { f.close(); }
+    } finally {
+      f.close();
+    }
   });
 });
 
@@ -838,19 +1015,34 @@ describe("shared workspace setup maintenance admission", () => {
     const reservation = new MaintenanceReservation(home, async () => true);
     const setup = new WorkspaceSetupRuntime(reservation);
     let started!: () => void;
-    const began = new Promise<void>(resolve => { started = resolve; });
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     let complete!: () => void;
-    const completion = new Promise<void>(resolve => { complete = resolve; });
+    const completion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
     try {
-      setup.start("workspace", async () => { started(); await completion; });
+      setup.start("workspace", async () => {
+        started();
+        await completion;
+      });
       await began;
       await expect(reservation.begin(1, "active-setup")).rejects.toThrow();
       complete();
       await setup.stop("workspace");
       await reservation.begin(1, "setup-finished");
       let ran = false;
-      expect(() => setup.start("new-workspace", async () => { ran = true; })).toThrow("maintenance");
+      expect(() =>
+        setup.start("new-workspace", async () => {
+          ran = true;
+        }),
+      ).toThrow("maintenance");
       expect(ran).toBe(false);
-    } finally { complete?.(); await setup.stop("workspace"); removeMaintenanceHome(home, { recursive: true, force: true }); }
+    } finally {
+      complete?.();
+      await setup.stop("workspace");
+      removeMaintenanceHome(home, { recursive: true, force: true });
+    }
   });
 });

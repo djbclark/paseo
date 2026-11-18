@@ -65,10 +65,12 @@ describe("daemon reload output", () => {
 describe("maintenance CLI contract", () => {
   test("end accepts a private FD and has no token argv option", () => {
     const maintenance = daemonMaintenanceCommand();
-    const end = maintenance.commands.find(command => command.name() === "end")!;
-    expect(end.options.some(option => option.long === "--owner-token-fd")).toBe(true);
-    expect(end.options.some(option => option.long === "--owner-token")).toBe(false);
-    const offline = maintenance.commands.find(command => command.name() === "verify-offline")!;
-    expect(offline.options.some(option => ["--home", "--host", "--state"].includes(option.long ?? ""))).toBe(false);
+    const end = maintenance.commands.find((command) => command.name() === "end")!;
+    expect(end.options.some((option) => option.long === "--owner-token-fd")).toBe(true);
+    expect(end.options.some((option) => option.long === "--owner-token")).toBe(false);
+    const offline = maintenance.commands.find((command) => command.name() === "verify-offline")!;
+    expect(
+      offline.options.some((option) => ["--home", "--host", "--state"].includes(option.long ?? "")),
+    ).toBe(false);
   });
 });

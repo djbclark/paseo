@@ -1,4 +1,10 @@
-import { MISSING_MAINTENANCE_AUTHORITY, readProtectedMaintenanceJson, parseMaintenanceRecord, validateMaintenanceEnrollment, type MaintenanceRecord } from "./maintenance-offline.js";
+import {
+  MISSING_MAINTENANCE_AUTHORITY,
+  readProtectedMaintenanceJson,
+  parseMaintenanceRecord,
+  validateMaintenanceEnrollment,
+  type MaintenanceRecord,
+} from "./maintenance-offline.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,16 +31,25 @@ export class MaintenanceReservation {
   private ready = true;
   private enrolled = false;
   private attempt: { generation: number; transactionId: string } | null = null;
-  constructor(private readonly home: string, private readonly isQuiet: () => Promise<boolean>) {
+  constructor(
+    private readonly home: string,
+    private readonly isQuiet: () => Promise<boolean>,
+  ) {
     this.path = join(home, "maintenance-reservation.json");
     const enrollment = readProtectedMaintenanceJson(home, "maintenance-enrollment.json");
     const stored = readProtectedMaintenanceJson(home, "maintenance-reservation.json");
-    if (JSON.stringify(enrollment) !== JSON.stringify(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"))) throw new Error("Maintenance enrollment changed");
+    if (
+      JSON.stringify(enrollment) !==
+      JSON.stringify(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"))
+    )
+      throw new Error("Maintenance enrollment changed");
     if (enrollment !== MISSING_MAINTENANCE_AUTHORITY) {
       validateMaintenanceEnrollment(enrollment);
       this.enrolled = true;
-      if (stored === MISSING_MAINTENANCE_AUTHORITY) throw new Error("Established maintenance authority missing");
-    } else if (stored !== MISSING_MAINTENANCE_AUTHORITY) throw new Error("Maintenance enrollment missing");
+      if (stored === MISSING_MAINTENANCE_AUTHORITY)
+        throw new Error("Established maintenance authority missing");
+    } else if (stored !== MISSING_MAINTENANCE_AUTHORITY)
+      throw new Error("Maintenance enrollment missing");
     if (stored !== MISSING_MAINTENANCE_AUTHORITY) {
       this.record = parseMaintenanceRecord(stored);
       this.recovery = Boolean(this.record.tokenDigest) || this.record.uncertain === true;
@@ -46,43 +61,86 @@ export class MaintenanceReservation {
     this.failed = true;
     this.recovery = true;
     this.enroll();
-    this.persist({ ...(this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null }), uncertain: true });
+    this.persist({
+      ...(this.record ?? {
+        schemaVersion: 1,
+        generation: 0,
+        transactionId: null,
+        tokenDigest: null,
+      }),
+      uncertain: true,
+    });
   }
 
   private enroll(): void {
     if (this.enrolled) return;
-    this.writeAtomically(join(this.home, "maintenance-enrollment.json"), { schemaVersion: 1, component: "paseo-maintenance" });
+    this.writeAtomically(join(this.home, "maintenance-enrollment.json"), {
+      schemaVersion: 1,
+      component: "paseo-maintenance",
+    });
     this.enrolled = true;
     this.persist({ schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null });
   }
 
-  isReady(): boolean { return this.ready; }
-  setReady(ready: boolean): void { this.ready = ready; }
+  isReady(): boolean {
+    return this.ready;
+  }
+  setReady(ready: boolean): void {
+    this.ready = ready;
+  }
 
   enter(): () => void {
-    if (this.failed || this.pending || this.record?.tokenDigest) throw new Error("Daemon maintenance admission held");
+    if (this.failed || this.pending || this.record?.tokenDigest)
+      throw new Error("Daemon maintenance admission held");
     this.inFlight++;
     let released = false;
-    return () => { if (!released) { released = true; this.inFlight--; } };
+    return () => {
+      if (!released) {
+        released = true;
+        this.inFlight--;
+      }
+    };
   }
 
   async run<T>(operation: () => Promise<T>): Promise<T> {
     const release = this.enter();
-    try { return await operation(); } finally { release(); }
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   status(): MaintenanceStatus {
     const recoveryRequired = this.failed || this.recovery;
     const closed = this.pending || recoveryRequired || Boolean(this.record?.tokenDigest);
-    return { schemaVersion: 1, state: recoveryRequired ? "recovery-required" : closed ? "held" : "idle",
+    return {
+      schemaVersion: 1,
+      state: recoveryRequired ? "recovery-required" : closed ? "held" : "idle",
       generation: this.attempt?.generation ?? (this.record?.generation || null),
-      transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null, recoveryRequired };
+      transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
+      recoveryRequired,
+    };
   }
 
-  async begin(generation: number, transactionId: string): Promise<MaintenanceStatus & { ownerToken: string }> {
-    if (!Number.isSafeInteger(generation) || generation <= 0 || !transactionId || transactionId.length > 256)
+  async begin(
+    generation: number,
+    transactionId: string,
+  ): Promise<MaintenanceStatus & { ownerToken: string }> {
+    if (
+      !Number.isSafeInteger(generation) ||
+      generation <= 0 ||
+      !transactionId ||
+      transactionId.length > 256
+    )
       throw new Error("Invalid maintenance transaction");
-    if (this.failed || this.pending || this.record?.tokenDigest || this.inFlight || generation <= (this.record?.generation ?? 0))
+    if (
+      this.failed ||
+      this.pending ||
+      this.record?.tokenDigest ||
+      this.inFlight ||
+      generation <= (this.record?.generation ?? 0)
+    )
       throw new Error("Maintenance busy or stale generation");
     if (!this.ready) throw new Error("Maintenance startup not ready");
     this.pending = true;
@@ -94,21 +152,37 @@ export class MaintenanceReservation {
       try {
         quiet = await this.isQuiet();
         if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
-      }
-      catch (error) {
+      } catch (error) {
         this.failed = true;
         this.recovery = true;
-        this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: null, uncertain: true });
+        this.persist({
+          schemaVersion: 1,
+          generation,
+          transactionId,
+          tokenDigest: null,
+          uncertain: true,
+        });
         throw error;
       }
-      if (!quiet || this.inFlight) { knownBusy = true; throw new Error("Maintenance known busy"); }
+      if (!quiet || this.inFlight) {
+        knownBusy = true;
+        throw new Error("Maintenance known busy");
+      }
       const ownerToken = randomBytes(32).toString("base64url");
-      this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) });
+      this.persist({
+        schemaVersion: 1,
+        generation,
+        transactionId,
+        tokenDigest: digest(ownerToken),
+      });
       this.recovery = false;
       this.pending = false;
       return { ...this.status(), ownerToken };
     } catch (error) {
-      if (!knownBusy) { this.failed = true; this.recovery = true; }
+      if (!knownBusy) {
+        this.failed = true;
+        this.recovery = true;
+      }
       throw error;
     } finally {
       this.pending = false;
@@ -119,8 +193,14 @@ export class MaintenanceReservation {
   end(generation: number, ownerToken: string): MaintenanceStatus {
     const record = this.record;
     const expected = record?.tokenDigest;
-    if (this.failed || this.pending || !record || !expected || generation !== record.generation ||
-        !timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(digest(ownerToken), "hex")))
+    if (
+      this.failed ||
+      this.pending ||
+      !record ||
+      !expected ||
+      generation !== record.generation ||
+      !timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(digest(ownerToken), "hex"))
+    )
       throw new Error("Maintenance ownership mismatch");
     this.persist({ ...record, tokenDigest: null });
     this.recovery = false;
@@ -128,7 +208,9 @@ export class MaintenanceReservation {
   }
 
   private persist(record: RecordV1): void {
-    this.writeAtomically(this.path, record, () => { this.record = record; });
+    this.writeAtomically(this.path, record, () => {
+      this.record = record;
+    });
   }
 
   private writeAtomically(path: string, value: unknown, committed?: () => void): void {
@@ -139,45 +221,67 @@ export class MaintenanceReservation {
       fd = openSync(temporary, "wx", 0o600);
       writeFileSync(fd, JSON.stringify(value));
       fsyncSync(fd);
-      closeSync(fd); fd = null;
+      closeSync(fd);
+      fd = null;
       renameSync(temporary, path);
       committed?.(); // Logical commit: an idle tombstone follows owner-authorized release.
       directory = openSync(this.home, "r");
       fsyncSync(directory);
-      closeSync(directory); directory = null;
+      closeSync(directory);
+      directory = null;
     } catch (error) {
       this.failed = true;
       this.recovery = true;
-      if (fd !== null) { try { closeSync(fd); } catch {} }
-      if (directory !== null) { try { closeSync(directory); } catch {} }
-      try { unlinkSync(temporary); } catch {}
+      if (fd !== null) {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+      if (directory !== null) {
+        try {
+          closeSync(directory);
+        } catch {}
+      }
+      try {
+        unlinkSync(temporary);
+      } catch {}
       throw error;
     }
   }
-
 }
 
 /** Install on the shared owner, before handing it to any internal or transport caller. */
 export function guardMaintenanceMethod<T extends object, K extends keyof T>(
-  owner: T, key: K, reservation: MaintenanceReservation,
+  owner: T,
+  key: K,
+  reservation: MaintenanceReservation,
 ): void {
   owners.set(owner, reservation);
   const operation = owner[key] as (...args: unknown[]) => Promise<unknown>;
-  owner[key] = ((...args: unknown[]) => reservation.run(() => operation.apply(owner, args))) as T[K];
+  owner[key] = ((...args: unknown[]) =>
+    reservation.run(() => operation.apply(owner, args))) as T[K];
 }
 
 export function guardMaintenanceStream<T extends object, K extends keyof T>(
-  owner: T, key: K, reservation: MaintenanceReservation,
+  owner: T,
+  key: K,
+  reservation: MaintenanceReservation,
 ): void {
   owners.set(owner, reservation);
   const operation = owner[key] as (...args: unknown[]) => AsyncGenerator<unknown>;
-  owner[key] = (async function* (...args: unknown[]) {
+  owner[key] = async function* (...args: unknown[]) {
     const release = reservation.enter();
-    try { yield* operation.apply(owner, args); } finally { release(); }
-  }) as T[K];
+    try {
+      yield* operation.apply(owner, args);
+    } finally {
+      release();
+    }
+  } as T[K];
 }
 
 const owners = new WeakMap<object, MaintenanceReservation>();
-export function maintenanceFor(owner: object | null | undefined): MaintenanceReservation | undefined {
+export function maintenanceFor(
+  owner: object | null | undefined,
+): MaintenanceReservation | undefined {
   return owner ? owners.get(owner) : undefined;
 }

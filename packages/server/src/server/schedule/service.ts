@@ -716,7 +716,11 @@ export class ScheduleService {
     });
   }
 
-  private runSchedule(schedule: StoredSchedule, now: Date, options?: { manual?: boolean }): Promise<void> {
+  private runSchedule(
+    schedule: StoredSchedule,
+    now: Date,
+    options?: { manual?: boolean },
+  ): Promise<void> {
     const run = () => this.runScheduleAdmitted(schedule, now, options);
     return this.maintenance ? this.maintenance.run(run) : run();
   }

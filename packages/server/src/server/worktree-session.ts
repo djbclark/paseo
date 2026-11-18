@@ -614,7 +614,11 @@ export async function runWorktreeSetupInBackground(
   }
 }
 
-export function createPaseoWorktreeWorkflow(...args: Parameters<typeof createPaseoWorktreeWorkflowUnreserved>): ReturnType<typeof createPaseoWorktreeWorkflowUnreserved> {
- const reservation = maintenanceFor(args[0].terminalManager);
- return reservation ? reservation.run(() => createPaseoWorktreeWorkflowUnreserved(...args)) : createPaseoWorktreeWorkflowUnreserved(...args);
+export function createPaseoWorktreeWorkflow(
+  ...args: Parameters<typeof createPaseoWorktreeWorkflowUnreserved>
+): ReturnType<typeof createPaseoWorktreeWorkflowUnreserved> {
+  const reservation = maintenanceFor(args[0].terminalManager);
+  return reservation
+    ? reservation.run(() => createPaseoWorktreeWorkflowUnreserved(...args))
+    : createPaseoWorktreeWorkflowUnreserved(...args);
 }

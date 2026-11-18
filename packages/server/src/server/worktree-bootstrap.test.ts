@@ -438,27 +438,52 @@ describe("runWorktreeAutoTerminals", () => {
     const calls: CreateTerminalCall[] = [];
     const records: StubTerminalRecord[] = [];
     const manager = createStubTerminalManager(calls, records);
-    const reservation = new MaintenanceReservation(repoDir, async () => !runtimeStore.isRunning({ workspaceId: repoDir, scriptName: "web" }));
+    const reservation = new MaintenanceReservation(
+      repoDir,
+      async () => !runtimeStore.isRunning({ workspaceId: repoDir, scriptName: "web" }),
+    );
     let started!: () => void;
-    const creating = new Promise<void>(resolve => { started = resolve; });
+    const creating = new Promise<void>((resolve) => {
+      started = resolve;
+    });
     let finish!: () => void;
-    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
     const create = manager.createTerminal.bind(manager);
-    manager.createTerminal = async options => { started(); await gate; return create(options); };
+    manager.createTerminal = async (options) => {
+      started();
+      await gate;
+      return create(options);
+    };
     guardMaintenanceMethod(manager, "createTerminal", reservation);
-    const options = { repoRoot: repoDir, workspaceId: repoDir, projectSlug: "repo", branchName: "feature-maintenance", scriptName: "web", daemonPort: null, serviceProxy: routeStore, runtimeStore, terminalManager: manager };
+    const options = {
+      repoRoot: repoDir,
+      workspaceId: repoDir,
+      projectSlug: "repo",
+      branchName: "feature-maintenance",
+      scriptName: "web",
+      daemonPort: null,
+      serviceProxy: routeStore,
+      runtimeStore,
+      terminalManager: manager,
+    };
     const spawning = spawnWorkspaceScript(options);
     try {
       await creating;
       await expect(reservation.begin(1, "script-starting")).rejects.toThrow();
-      finish(); await spawning;
+      finish();
+      await spawning;
       await expect(reservation.begin(1, "script-running")).rejects.toThrow();
       records[0]!.triggerExit(0); // The test's simulated command exits normally; no reservation cancels it.
       const held = await reservation.begin(1, "script-exited");
       await expect(spawnWorkspaceScript(options)).rejects.toThrow("maintenance");
       expect(calls).toHaveLength(1);
       reservation.end(1, held.ownerToken);
-    } finally { finish(); await spawning; }
+    } finally {
+      finish();
+      await spawning;
+    }
   });
 
   it("spawns plain scripts in persistent shell terminals without env injection or routes", async () => {

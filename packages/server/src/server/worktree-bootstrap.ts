@@ -713,7 +713,11 @@ export function teardownWorktreeScripts(options: {
   }
 }
 
-export function spawnWorkspaceScript(...args: Parameters<typeof spawnWorkspaceScriptUnreserved>): ReturnType<typeof spawnWorkspaceScriptUnreserved> {
- const reservation = maintenanceFor(args[0].terminalManager);
- return reservation ? reservation.run(() => spawnWorkspaceScriptUnreserved(...args)) : spawnWorkspaceScriptUnreserved(...args);
+export function spawnWorkspaceScript(
+  ...args: Parameters<typeof spawnWorkspaceScriptUnreserved>
+): ReturnType<typeof spawnWorkspaceScriptUnreserved> {
+  const reservation = maintenanceFor(args[0].terminalManager);
+  return reservation
+    ? reservation.run(() => spawnWorkspaceScriptUnreserved(...args))
+    : spawnWorkspaceScriptUnreserved(...args);
 }

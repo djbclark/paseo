@@ -153,9 +153,19 @@ describe("SessionAuthorization", () => {
 
 describe("maintenance semantic authority", () => {
   test("every reservation operation requires daemon.manage, including status", () => {
-    for (const type of ["daemon.maintenance.begin.request", "daemon.maintenance.status.request", "daemon.maintenance.end.request"] as const) {
-      expect(new SessionAuthorization(["daemon.read", "workspace.write", "hub.execute"]).allowsInbound(inboundMessage(type))).toBe(false);
-      expect(new SessionAuthorization(["daemon.manage"]).allowsInbound(inboundMessage(type))).toBe(true);
+    for (const type of [
+      "daemon.maintenance.begin.request",
+      "daemon.maintenance.status.request",
+      "daemon.maintenance.end.request",
+    ] as const) {
+      expect(
+        new SessionAuthorization(["daemon.read", "workspace.write", "hub.execute"]).allowsInbound(
+          inboundMessage(type),
+        ),
+      ).toBe(false);
+      expect(new SessionAuthorization(["daemon.manage"]).allowsInbound(inboundMessage(type))).toBe(
+        true,
+      );
     }
   });
 });

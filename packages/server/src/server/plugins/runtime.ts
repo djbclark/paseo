@@ -20,6 +20,7 @@ import {
   samePluginMaintenanceIdentity,
   type NativePluginAdmission,
   type PluginMaintenanceIdentity,
+  type PluginHeldRecoveryIdentity,
   type PluginMaintenancePort,
 } from "./maintenance.js";
 import { realpath } from "node:fs/promises";
@@ -132,6 +133,8 @@ interface ServerPluginActivation {
 }
 
 interface ChildTermination {
+  code?: number | null;
+  signal?: NodeJS.Signals | null;
   closed: boolean;
   completion: Promise<void>;
 }
@@ -377,7 +380,9 @@ function observeChildTermination(child: PluginChild): ChildTermination {
     resolveCompletion = resolve;
   });
   const state: ChildTermination = { closed: false, completion };
-  child.on("close", () => {
+  child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    state.code = code;
+    state.signal = signal;
     state.closed = true;
     resolveCompletion();
   });
@@ -399,6 +404,63 @@ async function terminateObservedChild(
 function assertChildAlive(loaded: LoadedPlugin): void {
   if (loaded.termination?.closed)
     throw new Error(`Plugin process exited during activation: ${loaded.id}`);
+}
+
+interface PluginLaunchInput {
+  qualifiedChild?: QualifiedOwnedChild;
+  builtinInstance?: { child: InternalPluginChild; directory: string };
+  initializationBarrier?: PluginMaintenanceIdentity;
+  activationTicket?: ActivationTicket;
+  pluginId: string;
+  pluginDirectory: string;
+  managedSource?: boolean;
+  requirements: PluginRequirements | undefined;
+  child: PluginChild;
+  bundle: string;
+  clientBundle: string;
+  beforeInitialize?: (dispatch: () => void) => Promise<void>;
+
+  held?: PluginHeldOperation;
+}
+export interface SettledQualifiedInitializationFailure {
+  readonly outcome: "initialization_rejected";
+  readonly ticket: ActivationTicket;
+  readonly instanceId: string;
+}
+type PluginLaunchAttempt =
+  | { outcome: "ready"; loaded: LoadedPlugin }
+  | SettledQualifiedInitializationFailure;
+interface InitializationFailureRecord {
+  result: SettledQualifiedInitializationFailure;
+  owner: QualifiedDaemonOwner;
+  held: PluginHeldOperation;
+  owned: QualifiedOwnedChild;
+  termination: ChildTermination;
+  ticket: ActivationTicket;
+}
+const settledInitializationFailures = new WeakMap<object, InitializationFailureRecord>();
+/** Private evidence reader only. There is no exported constructor or metadata mint. */
+export function readSettledQualifiedInitializationFailure(
+  value: unknown,
+  owner: QualifiedDaemonOwner,
+  held: PluginHeldOperation,
+): SettledQualifiedInitializationFailure | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = settledInitializationFailures.get(value);
+  if (
+    !record ||
+    record.owner !== owner ||
+    record.held.scope !== held.scope ||
+    record.held.claim !== held.claim ||
+    !record.termination.closed ||
+    record.termination.code !== 0 ||
+    record.termination.signal !== null ||
+    record.owned.child.killed
+  )
+    return undefined;
+  assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+  owner.assertFresh();
+  return record.result;
 }
 
 export class PluginRuntime {
@@ -425,7 +487,36 @@ export class PluginRuntime {
       return this.holdQualifiedCohort(identity);
     },
     end: (identity) => this.releaseQualifiedCohort(identity),
+    supportsHeldRecoveryV1: (identity) => this.supportsHeldRecovery(identity),
+    beginHeldRecoveryV1: async (identity) => {
+      if (!this.supportsHeldRecovery(identity)) return "unknown";
+      const result = await this.holdQualifiedCohort(identity);
+      if (result !== "held") return result;
+      return this.supportsHeldRecovery(identity) ? "held" : "unknown";
+    },
   };
+
+  private readonly failedInitializations = new Map<string, SettledQualifiedInitializationFailure>();
+  private supportsHeldRecovery(identity: PluginHeldRecoveryIdentity): boolean {
+    const proof = this.failedInitializations.get(identity.pluginId);
+    const record = proof && settledInitializationFailures.get(proof);
+    if (
+      !record ||
+      this.plugins.has(identity.pluginId) ||
+      this.maintenanceUncertain ||
+      !this.maintenanceIdentity ||
+      !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity) ||
+      record.held.claim.pluginId !== identity.pluginId ||
+      !samePluginMaintenanceIdentity(record.held.claim, identity) ||
+      record.owner !== this.dependencies.qualifiedDaemonOwner ||
+      !record.termination.closed ||
+      record.termination.code !== 0 ||
+      record.termination.signal !== null ||
+      record.owned.child.killed
+    )
+      return false;
+    return this.hasQualifiedCohort();
+  }
 
   private hasQualifiedCohort(): boolean {
     const owner = this.dependencies.qualifiedDaemonOwner;
@@ -631,6 +722,41 @@ export class PluginRuntime {
     this.plugins.set(pluginId, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+  }
+
+  async startHeldPluginAttempt(
+    pluginId: string,
+    configuredPath: string,
+    canPublish: () => boolean,
+    operation: ActivationOperation,
+    held: PluginHeldOperation,
+  ): Promise<SettledQualifiedInitializationFailure | undefined> {
+    this.requireLifecycleAdmission(held);
+    assertPluginHeldOperation(held, pluginId, configuredPath);
+    if (this.plugins.has(pluginId)) throw new Error("Held target already running");
+    const attempt = await this.loadDirectoryPluginAttempt(
+      pluginId,
+      configuredPath,
+      canPublish,
+      operation,
+      held,
+    );
+    if (attempt.outcome !== "ready") {
+      this.failedInitializations.set(pluginId, attempt);
+      return attempt;
+    }
+    const loaded = attempt.loaded;
+    if (!canPublish() || loaded.termination?.closed) {
+      loaded.executionOwner?.expectHeldTermination(held, loaded.instanceId);
+      await this.stopPlugin(loaded);
+      throw new Error("Held target changed before publication");
+    }
+    this.observationEpoch++;
+    this.plugins.set(pluginId, loaded);
+    this.failedInitializations.delete(pluginId);
+    this.notifySessionOpenChange(loaded);
+    this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    return undefined;
   }
 
   async startBuiltinPlugin(
@@ -1452,6 +1578,27 @@ export class PluginRuntime {
     held?: PluginHeldOperation,
     initialization?: QualifiedPluginInitialization,
   ): Promise<LoadedPlugin> {
+    const attempt = await this.loadDirectoryPluginAttempt(
+      pluginId,
+      configuredPath,
+      canPublish,
+      operation,
+      held,
+      initialization,
+    );
+    if (attempt.outcome !== "ready")
+      throw new Error("Plugin initialization rejected after retirement");
+    return attempt.loaded;
+  }
+
+  private async loadDirectoryPluginAttempt(
+    pluginId: string,
+    configuredPath: string,
+    canPublish: () => boolean,
+    operation: ActivationOperation,
+    held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<PluginLaunchAttempt> {
     const directory = await realpath(path.resolve(configuredPath));
     const policy = this.dependencies.activationPolicy;
     const ticket = await policy?.authorize(pluginId, configuredPath, operation);
@@ -1460,8 +1607,9 @@ export class PluginRuntime {
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
     const serverBundle = bundles.serverBundle;
     const compilation = { pluginId, configuredPath, directory, operation, ticket, bundles };
-    if (!serverBundle) return this.loadClientOnlyPlugin(compilation);
-    return this.launchPreparedPlugin({
+    if (!serverBundle)
+      return { outcome: "ready", loaded: await this.loadClientOnlyPlugin(compilation) };
+    return this.launchPreparedPluginAttempt({
       held,
       initialization,
       canPublish,
@@ -1513,6 +1661,14 @@ export class PluginRuntime {
   }
 
   private async launchPreparedPlugin(input: ServerPluginActivation): Promise<LoadedPlugin> {
+    const attempt = await this.launchPreparedPluginAttempt(input);
+    if (attempt.outcome !== "ready")
+      throw new Error("Plugin initialization rejected after retirement");
+    return attempt.loaded;
+  }
+  private async launchPreparedPluginAttempt(
+    input: ServerPluginActivation,
+  ): Promise<PluginLaunchAttempt> {
     const { pluginId, directory, ticket, serverBundle, clientBundle, requirements } = input;
     const policy = this.dependencies.activationPolicy;
     await this.assertPreparedAuthorization(input, "Managed enrollment changed during compilation");
@@ -1534,7 +1690,8 @@ export class PluginRuntime {
       const barrier =
         inheritedHold ??
         (input.initialization ? { generation: 0, transactionId: randomUUID() } : null);
-      const loaded = await this.launchPlugin({
+      const attempt = await this.launchPluginAttempt({
+        held: input.held,
         initializationBarrier: barrier ?? undefined,
         qualifiedChild: owned,
         activationTicket: ticket,
@@ -1569,6 +1726,11 @@ export class PluginRuntime {
           }
         },
       });
+      if (attempt.outcome !== "ready") {
+        await policy?.finish(pluginId, ticket, false);
+        return attempt;
+      }
+      const loaded = attempt.loaded;
       launched = loaded;
       if (owned) await this.verifySuccessorBarrier(input, loaded, owned, barrier, inheritedHold);
       assertChildAlive(loaded);
@@ -1576,7 +1738,7 @@ export class PluginRuntime {
       assertChildAlive(loaded);
       await this.recordDirectoryReceipt(input, loaded, startedAt);
       assertChildAlive(loaded);
-      return loaded;
+      return { outcome: "ready", loaded };
     } catch (error) {
       if (launched) {
         if (input.held)
@@ -1688,20 +1850,61 @@ export class PluginRuntime {
     assertChildAlive(loaded);
   }
 
-  private async launchPlugin(input: {
-    qualifiedChild?: QualifiedOwnedChild;
-    builtinInstance?: { child: InternalPluginChild; directory: string };
-    initializationBarrier?: PluginMaintenanceIdentity;
-    activationTicket?: ActivationTicket;
-    pluginId: string;
-    pluginDirectory: string;
-    managedSource?: boolean;
-    requirements: PluginRequirements | undefined;
-    child: PluginChild;
-    bundle: string;
-    clientBundle: string;
-    beforeInitialize?: (dispatch: () => void) => Promise<void>;
-  }): Promise<LoadedPlugin> {
+  private async retireRejectedChild(
+    input: PluginLaunchInput,
+    execution: PluginExecutionOwner,
+    termination: ChildTermination,
+    socket: PluginSessionSocket,
+    sessionClosed: Promise<void>,
+  ): Promise<SettledQualifiedInitializationFailure> {
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const held = input.held;
+    const owned = input.qualifiedChild;
+    const ticket = input.activationTicket;
+    const barrier = input.initializationBarrier;
+    if (!owner || !held || !owned || !ticket || !barrier || termination.closed)
+      throw new Error("Initialization rejection lacks actual held identity");
+    assertPluginHeldOperation(held, input.pluginId, input.pluginDirectory);
+    await owner.refresh();
+    owned.assertFresh();
+    owner.assertOwnedExecutionHandle(owned.child, "plugin-child", owned.incarnation);
+    const observed = await owned.challenge();
+    if (observed.incarnation !== owned.incarnation || observed.pid !== owned.child.pid)
+      throw new Error("Initialization rejection execution identity changed");
+    await this.dependencies.activationPolicy?.authorize(
+      input.pluginId,
+      input.pluginDirectory,
+      ticket.authorization.operation,
+      input.bundle,
+      ticket,
+    );
+    assertPluginHeldOperation(held, input.pluginId, input.pluginDirectory);
+    execution.expectHeldTermination(held, owned.incarnation);
+    await retireRejectedProcess(owned.child, owned.incarnation, barrier);
+    await termination.completion;
+    socket.peerClosed();
+    await sessionClosed;
+    if (termination.code !== 0 || termination.signal !== null || owned.child.killed)
+      throw new Error("Initialization retirement did not naturally close");
+    await owner.refresh();
+    assertPluginHeldOperation(held, input.pluginId, input.pluginDirectory);
+    const result = Object.freeze({
+      outcome: "initialization_rejected" as const,
+      ticket,
+      instanceId: owned.incarnation,
+    });
+    settledInitializationFailures.set(result, { result, owner, held, owned, termination, ticket });
+    return result;
+  }
+
+  private async launchPlugin(input: PluginLaunchInput): Promise<LoadedPlugin> {
+    const attempt = await this.launchPluginAttempt(input);
+    if (attempt.outcome !== "ready")
+      throw new Error("Plugin initialization rejected after retirement");
+    return attempt.loaded;
+  }
+
+  private async launchPluginAttempt(input: PluginLaunchInput): Promise<PluginLaunchAttempt> {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
     this.observationEpoch++;
     const termination = observeChildTermination(child);
@@ -1748,106 +1951,128 @@ export class PluginRuntime {
         throw error;
       });
     let loaded: LoadedPlugin | null = null;
-    let ready: Extract<PluginProcessMessage, { type: "ready" }>;
+    let ready: Extract<PluginProcessMessage, { type: "ready" | "initialization.rejected" }>;
     try {
-      ready = await new Promise<Extract<PluginProcessMessage, { type: "ready" }>>(
-        (resolve, reject) => {
-          let settled = false;
-          const timeout = setTimeout(
-            () => fail(new Error(`Plugin ${pluginId} did not initialize`)),
-            REQUEST_TIMEOUT_MS,
-          );
-          const fail = (error: Error): void => {
+      ready = await new Promise<
+        Extract<PluginProcessMessage, { type: "ready" | "initialization.rejected" }>
+      >((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(
+          () => fail(new Error(`Plugin ${pluginId} did not initialize`)),
+          REQUEST_TIMEOUT_MS,
+        );
+        const fail = (error: Error): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          reject(error);
+        };
+        child.on("message", (rawMessage) => {
+          if (input.qualifiedChild?.consumeObservation(rawMessage)) return;
+          const parsed = PluginProcessMessageSchema.safeParse(rawMessage);
+          if (!parsed.success) {
+            const error = new Error(
+              `Plugin ${pluginId} sent an invalid message: ${parsed.error.message}`,
+            );
+            if (loaded) this.handleMalformedChildMessage(loaded, rawMessage, error);
+            else fail(error);
+            return;
+          }
+          const message = parsed.data;
+          if (message.type === "execution.unknown") {
+            executionOwner.markUnknown();
+          } else if (message.type === "execution.settled") {
+            executionOwner.settled(message.instanceId, message.requestKey);
+          } else if (message.type === "paseo_frame") {
+            this.routePluginFrame({
+              session,
+              pluginId,
+              child,
+              sessionHost,
+              frame: message.data,
+              isBinary: message.isBinary,
+            });
+          } else if (message.type === "paseo_close") {
+            session.socket.peerClosed();
+          } else if (message.type === "ready") {
             if (settled) return;
             settled = true;
             clearTimeout(timeout);
-            reject(error);
-          };
-          child.on("message", (rawMessage) => {
-            if (input.qualifiedChild?.consumeObservation(rawMessage)) return;
-            const parsed = PluginProcessMessageSchema.safeParse(rawMessage);
-            if (!parsed.success) {
-              const error = new Error(
-                `Plugin ${pluginId} sent an invalid message: ${parsed.error.message}`,
-              );
-              if (loaded) this.handleMalformedChildMessage(loaded, rawMessage, error);
-              else fail(error);
-              return;
-            }
-            const message = parsed.data;
-            if (message.type === "execution.unknown") {
-              executionOwner.markUnknown();
-            } else if (message.type === "execution.settled") {
-              executionOwner.settled(message.instanceId, message.requestKey);
-            } else if (message.type === "paseo_frame") {
-              this.routePluginFrame({
-                session,
-                pluginId,
-                child,
-                sessionHost,
-                frame: message.data,
-                isBinary: message.isBinary,
-              });
-            } else if (message.type === "paseo_close") {
-              session.socket.peerClosed();
-            } else if (message.type === "ready") {
-              if (settled) return;
-              settled = true;
-              clearTimeout(timeout);
-              resolve(message);
-            } else if (message.type === "initialization.rejected") {
-              // The ordinary path cannot certify recovery from a rejection message.
-              // The held attempt path must additionally prove actual retirement.
+            resolve(message);
+          } else if (message.type === "initialization.rejected") {
+            if (!input.held || !input.qualifiedChild || message.instanceId !== instanceId) {
               fail(new Error("Plugin initialization rejected by host validation"));
-            } else if (message.type === "fatal") {
-              fail(new Error(message.error));
-            } else if (loaded) {
-              this.handleChildMessage(loaded, message);
-            }
-          });
-          child.on("close", () => {
-            session.socket.peerClosed();
-            if (!loaded) {
-              fail(new Error(`Plugin ${pluginId} exited during initialization`));
               return;
             }
-            void this.handleChildClose(loaded);
-          });
-          const initialize = () => {
-            if (termination.closed) {
-              fail(new Error(`Plugin ${pluginId} exited before initialize`));
-              return;
-            }
-            void send(child, {
-              type: "initialize",
-              pluginId,
-              pluginDirectory: input.pluginDirectory,
-              managedSource: input.managedSource === true,
-              hostInstanceId: instanceId,
-              ...((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier
-                ? {
-                    passiveInitialization: {
-                      contract: "native-passive-contract-1" as const,
-                      hold: { ...input.initializationBarrier, instanceId },
-                    },
-                  }
-                : {}),
-              appVersion: this.daemonVersion,
-              bundle,
-              settingsDirectory: this.dependencies.settingsDirectory
-                ? path.join(this.dependencies.settingsDirectory, pluginId)
-                : undefined,
-            }).catch(fail);
-          };
-          if (input.beforeInitialize) void input.beforeInitialize(initialize).catch(fail);
-          else initialize();
-        },
-      );
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            resolve(message);
+          } else if (message.type === "fatal") {
+            fail(new Error(message.error));
+          } else if (loaded) {
+            this.handleChildMessage(loaded, message);
+          }
+        });
+        child.on("close", () => {
+          session.socket.peerClosed();
+          if (!loaded) {
+            fail(new Error(`Plugin ${pluginId} exited during initialization`));
+            return;
+          }
+          void this.handleChildClose(loaded);
+        });
+        const initialize = () => {
+          if (termination.closed) {
+            fail(new Error(`Plugin ${pluginId} exited before initialize`));
+            return;
+          }
+          void send(child, {
+            type: "initialize",
+            pluginId,
+            pluginDirectory: input.pluginDirectory,
+            managedSource: input.managedSource === true,
+            hostInstanceId: instanceId,
+            ...((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier
+              ? {
+                  passiveInitialization: {
+                    contract: "native-passive-contract-1" as const,
+                    hold: { ...input.initializationBarrier, instanceId },
+                  },
+                }
+              : {}),
+            appVersion: this.daemonVersion,
+            bundle,
+            settingsDirectory: this.dependencies.settingsDirectory
+              ? path.join(this.dependencies.settingsDirectory, pluginId)
+              : undefined,
+          }).catch(fail);
+        };
+        if (input.beforeInitialize) void input.beforeInitialize(initialize).catch(fail);
+        else initialize();
+      });
     } catch (error) {
       session.socket.close();
       await sessionAttachment.closed;
       await terminateObservedChild(child, termination);
       throw error;
+    }
+    if (ready.type === "initialization.rejected") {
+      try {
+        return await this.retireRejectedChild(
+          input,
+          executionOwner,
+          termination,
+          session.socket,
+          sessionAttachment.closed,
+        );
+      } catch (error) {
+        executionOwner.markUnknown();
+        session.socket.close();
+        await sessionAttachment.closed;
+        await terminateObservedChild(child, termination);
+        throw error;
+      }
     }
     loaded = {
       id: pluginId,
@@ -1879,7 +2104,7 @@ export class PluginRuntime {
       { pluginId, methods: ready.methods, providers: ready.providers },
       "Loaded plugin",
     );
-    return loaded;
+    return { outcome: "ready", loaded };
   }
 
   /**
@@ -2386,6 +2611,49 @@ export class PluginRuntime {
   private notify(pluginId: string, error?: string): void {
     for (const listener of this.listeners) listener(pluginId, error);
   }
+}
+
+function retireRejectedProcess(
+  child: PluginChild,
+  instanceId: string,
+  identity: PluginMaintenanceIdentity,
+): Promise<void> {
+  const requestId = randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error) => {
+      clearTimeout(timer);
+      child.off("message", receive);
+      child.off("close", closed);
+      if (error) reject(error);
+      else resolve();
+    };
+    const closed = () =>
+      finish(new Error("Rejected initialization closed before retirement acknowledgement"));
+    const receive = (raw: unknown) => {
+      const parsed = PluginProcessMessageSchema.safeParse(raw);
+      if (!parsed.success || parsed.data.type !== "initialization.retired") return;
+      const reply = parsed.data;
+      if (
+        reply.requestId !== requestId ||
+        reply.instanceId !== instanceId ||
+        reply.generation !== identity.generation ||
+        reply.transactionId !== identity.transactionId
+      ) {
+        finish(new Error("Initialization retirement acknowledgement identity mismatch"));
+        return;
+      }
+      finish();
+    };
+    const timer = setTimeout(
+      () => finish(new Error("Initialization retirement acknowledgement timed out")),
+      REQUEST_TIMEOUT_MS,
+    );
+    child.on("message", receive);
+    child.on("close", closed);
+    void send(child, { type: "initialization.retire", requestId, instanceId, ...identity }).catch(
+      (error) => finish(error),
+    );
+  });
 }
 
 function isSessionHelloFrame(input: { frame: string | Uint8Array; isBinary: boolean }): boolean {

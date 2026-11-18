@@ -6,11 +6,16 @@ export interface PluginMaintenanceIdentity {
   generation: number;
   transactionId: string;
 }
+export interface PluginHeldRecoveryIdentity extends PluginMaintenanceIdentity {
+  pluginId: string;
+}
 export type PluginMaintenanceState = "held" | "known-busy" | "unknown";
 export interface PluginMaintenancePort {
   supportsV1(): boolean;
   begin(identity: PluginMaintenanceIdentity): Promise<PluginMaintenanceState>;
   end(identity: PluginMaintenanceIdentity): Promise<void>;
+  supportsHeldRecoveryV1?(identity: PluginHeldRecoveryIdentity): boolean;
+  beginHeldRecoveryV1?(identity: PluginHeldRecoveryIdentity): Promise<PluginMaintenanceState>;
 }
 export interface NativePluginAdmission {
   enterWork(): () => void;

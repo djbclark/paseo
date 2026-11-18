@@ -43,7 +43,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginHookEvents, PluginHookAgent, AgentToolResult } from "@getpaseo/plugin/server";
 import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
-import { fork } from "node:child_process";
+import { fork, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -2614,7 +2614,7 @@ export class PluginRuntime {
 }
 
 function retireRejectedProcess(
-  child: PluginChild,
+  child: ChildProcess,
   instanceId: string,
   identity: PluginMaintenanceIdentity,
 ): Promise<void> {

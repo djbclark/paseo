@@ -20,14 +20,31 @@ const incarnation = randomUUID();
 const queued: string[] = [];
 let initialized = false;
 let stopping = false;
+let compilerRuntime: object | null = null;
 port.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object") return;
   if (Reflect.get(raw, "type") === "qualified.execution.stop") {
     const challenge = Reflect.get(raw, "challenge");
     if (stopping || typeof challenge !== "string" || challenge.length > 128) return;
     stopping = true;
-    void helperOwner
-      .stop()
+    const retire = compilerRuntime
+      ? Reflect.get(compilerRuntime, "retireQualifiedCompilerTasks")
+      : undefined;
+    if (!initialized || typeof retire !== "function") {
+      port.postMessage({ type: "qualified.execution.unknown" });
+      return;
+    }
+    // Fixed real worker export closes task ingress synchronously on this call.
+    // Existing tasks keep their helper ownership until their actual completion.
+    let admitted: Promise<void>;
+    try {
+      admitted = retire();
+    } catch {
+      port.postMessage({ type: "qualified.execution.unknown" });
+      return;
+    }
+    void admitted
+      .then(() => helperOwner.stop())
       .then(() => {
         port.postMessage({
           type: "qualified.execution.stopped",
@@ -65,6 +82,6 @@ async function respond(challenge: string): Promise<void> {
   });
 }
 await assertEnclosingAuthorityUnchanged(initial);
-await import(path.join(root, "compiler-code.mjs"));
+compilerRuntime = await import(path.join(root, "compiler-code.mjs"));
 initialized = true;
 for (const challenge of queued.splice(0)) await respond(challenge);

@@ -199,20 +199,27 @@ export async function retainSystemClosure(root) {
     try {
       description = describeElf(row.bytes);
     } catch (error) {
-      const diagnostic = spawnSync(
-        "/usr/bin/readelf",
-        ["--dynamic", "--wide", "--program-headers", row.file],
-        {
-          encoding: "utf8",
-          timeout: 10000,
-          maxBuffer: 32768,
-          env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-        },
-      );
-      throw new Error(
-        `ELF inventory refused member ${row.member} sha256=${digest(row.bytes)} size=${row.bytes.length}\n${diagnostic.stdout ?? "Dynamic metadata unavailable"}`,
-        { cause: error },
-      );
+      const related = row.member.startsWith("node_modules/sherpa-onnx-linux-x64/")
+        ? pending.filter((entry) => entry.member.startsWith("node_modules/sherpa-onnx-linux-x64/"))
+        : [row];
+      if (related.length > 16)
+        throw new Error("Rejected package diagnostic bound", { cause: error });
+      const diagnostics = related.map((entry) => {
+        const result = spawnSync(
+          "/usr/bin/readelf",
+          ["--dynamic", "--wide", "--program-headers", entry.file],
+          {
+            encoding: "utf8",
+            timeout: 10000,
+            maxBuffer: 32768,
+            env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+          },
+        );
+        return `ORIGINAL ${entry.member} sha256=${digest(entry.bytes)} size=${entry.bytes.length}\n${result.stdout ?? "Dynamic metadata unavailable"}`;
+      });
+      throw new Error(`ELF inventory refused member ${row.member}\n${diagnostics.join("\n")}`, {
+        cause: error,
+      });
     }
     elfs.set(row.member, { member: row.member, ...description });
     if (elfs.size > 512) throw new Error("System ELF bound");

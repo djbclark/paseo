@@ -139,6 +139,10 @@ export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner
   owner.assertFresh();
   // Fixed literal import is sealed by the daemon build; v1/source roles never initialize it.
   internalRuntime ??= await import("../plugins/internal-child.js");
+  await assertEnclosingAuthorityUnchanged({
+    root: owner.root,
+    authorityIdentity: context.authorityIdentity,
+  });
   owner.assertFresh();
   let record: InstanceRecord | undefined;
   const child = new internalRuntime.InternalPluginChild(

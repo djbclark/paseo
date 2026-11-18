@@ -6,6 +6,7 @@ export interface MaintenanceIdentity {
 export interface PluginMaintenancePort {
   supportsV1(): boolean;
   begin(identity: MaintenanceIdentity): Promise<"held" | "known-busy" | "unknown">;
+  /** Qualified release, or confirmed rollback of every unpublished provisional barrier. */
   end(identity: MaintenanceIdentity): Promise<void>;
 }
 

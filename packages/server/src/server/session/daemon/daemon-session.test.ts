@@ -1069,11 +1069,98 @@ describe("native maintenance participant serialization", () => {
     try {
       await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
       expect(f.reservation.status().state).toBe("idle");
-      expect(end).not.toHaveBeenCalled();
+      expect(end).toHaveBeenCalledWith({ generation: 1, transactionId: "busy" });
       f.reservation.enter()();
     } finally {
       f.close();
     }
+  });
+  test.each(["initial", "quiet", "recheck"] as const)(
+    "unknown work during BEGIN %s await survives completion and restart",
+    async (phase) => {
+      let started!: () => void;
+      let finish!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      let calls = 0;
+      const end = vi.fn(async () => {});
+      const f = fixture({
+        supportsV1: () => true,
+        begin: async () => {
+          calls++;
+          if ((phase === "initial" && calls === 1) || (phase === "recheck" && calls === 2)) {
+            started();
+            await gate;
+          }
+          return "held";
+        },
+        end,
+      }, async () => {
+        if (phase === "quiet") { started(); await gate; }
+        return true;
+      });
+      try {
+        const pending = f.reservation.begin(1, "interleaved-begin");
+        await entered;
+        f.reservation.holdForUnknownWork();
+        finish();
+        await expect(pending).rejects.toThrow("unknown");
+        expect(end).not.toHaveBeenCalled();
+        const record = JSON.parse(readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"));
+        expect(record.uncertain).toBe(true);
+        expect(record.tokenDigest).toBeNull();
+        expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("recovery-required");
+        expect(() => f.reservation.enter()).toThrow();
+      } finally { finish(); f.close(); }
+    },
+  );
+  test.each(["check", "release"] as const)(
+    "unknown work during END %s await cannot become clean idle",
+    async (phase) => {
+      let started!: () => void;
+      let finish!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      let ending = false;
+      const release = vi.fn(async () => {
+        if (ending && phase === "release") { started(); await gate; }
+      });
+      const f = fixture({
+        supportsV1: () => true,
+        begin: async () => {
+          if (ending && phase === "check") { started(); await gate; }
+          return "held";
+        },
+        end: release,
+      });
+      try {
+        const held = await f.reservation.begin(1, "interleaved-end");
+        ending = true;
+        const pending = f.reservation.end(1, held.ownerToken);
+        await entered;
+        f.reservation.holdForUnknownWork();
+        finish();
+        await expect(pending).rejects.toThrow("unknown");
+        expect(release).toHaveBeenCalledTimes(phase === "check" ? 0 : 1);
+        const record = JSON.parse(readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"));
+        expect(record.uncertain).toBe(true);
+        expect(Boolean(record.tokenDigest)).toBe(phase === "check");
+        expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("recovery-required");
+        expect(() => f.reservation.enter()).toThrow();
+      } finally { finish(); f.close(); }
+    },
+  );
+  test("initial known-busy with unconfirmed rollback holds instead of reopening", async () => {
+    const f = fixture({
+      supportsV1: () => true,
+      begin: async () => "known-busy",
+      end: async () => { throw new Error("rollback unconfirmed"); },
+    });
+    try {
+      await expect(f.reservation.begin(1, "busy-rollback-failed")).rejects.toThrow("rollback");
+      expect(f.reservation.status().state).toBe("recovery-required");
+      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("recovery-required");
+    } finally { f.close(); }
   });
   test("authoritative busy rolls back provisional barrier; rollback uncertainty stays held", async () => {
     let fail = false;

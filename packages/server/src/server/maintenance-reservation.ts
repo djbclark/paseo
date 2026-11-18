@@ -239,6 +239,10 @@ export class MaintenanceReservation {
     };
   }
 
+  private assertNoUnknownWork(): void {
+    if (this.failed) throw new Error("Maintenance activity became unknown");
+  }
+
   async begin(
     generation: number,
     transactionId: string,
@@ -267,27 +271,36 @@ export class MaintenanceReservation {
     try {
       this.enroll();
       const initial = await this.participant.begin(identity);
+      this.assertNoUnknownWork();
       if (initial === "known-busy") {
+        // Only a confirmed qualified rollback can discard an unpublished attempt.
+        await this.participant.end(identity);
+        this.assertNoUnknownWork();
         knownBusy = true;
         throw new Error("Maintenance known busy");
       }
       if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
       const quiet = await this.isQuiet();
+      this.assertNoUnknownWork();
       if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
       if (!quiet || this.inFlight) {
         await this.participant.end(identity);
+        this.assertNoUnknownWork();
         knownBusy = true;
         throw new Error("Maintenance known busy");
       }
       // Recheck current policy, cohort and incarnation after authoritative awaits.
       const rechecked = await this.participant.begin(identity);
+      this.assertNoUnknownWork();
       if (rechecked === "known-busy") {
         await this.participant.end(identity);
+        this.assertNoUnknownWork();
         knownBusy = true;
         throw new Error("Maintenance known busy");
       }
       if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
         throw new Error("Plugin maintenance cohort changed or unknown");
+      this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
       this.persist({
         schemaVersion: 1,
@@ -344,14 +357,17 @@ export class MaintenanceReservation {
     let knownBusy = false;
     try {
       const fresh = await this.participant.begin(identity);
+      this.assertNoUnknownWork();
       if (fresh === "known-busy" || this.inFlight || !this.ready) {
         knownBusy = true;
         throw new Error("Maintenance known busy");
       }
       if (fresh !== "held" || !this.participant.supportsV1())
         throw new Error("Maintenance participant not safely held");
+      this.assertNoUnknownWork();
       this.persist({ ...record, tokenDigest: null });
       await this.participant.end(identity);
+      this.assertNoUnknownWork();
       this.recovery = false;
     } catch (error) {
       if (!knownBusy) {

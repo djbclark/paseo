@@ -765,7 +765,10 @@ or unsupported provider queries with confirmed successful cleanup return ordinar
 creating a recovery hold. Failed close or unknown cleanup outcome holds admission. A query timeout
 or response is not proof its child ended: the process lease lasts through actual close. Unknown
 observations persist an uncertain recovery hold where storage permits; any persistence lifecycle
-failure latches the current process closed. Pending status reports held; failure status reports
+failure latches the current process closed. An unknown-work latch raised during an awaited observation or participant operation is rechecked
+before granting a token or committing release. Initial participant BUSY permits reopening only after
+a confirmed rollback of every provisional barrier; failed or unsupported rollback stays held.
+Pending status reports held; failure status reports
 recovery-required even before a token exists. An uncertain hold without an issued owner token
 requires separately authorized operator recovery; this API cannot manufacture a replacement token.
 

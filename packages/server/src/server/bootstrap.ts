@@ -736,7 +736,9 @@ async function createPaseoDaemonInExecutionContext(
       }
     },
   };
-  const pluginDependencies = {
+  const pluginDependencies: NonNullable<ConstructorParameters<typeof PluginService>[3]> & {
+    nativeMaintenance: NativePluginAdmission;
+  } = {
     nativeMaintenance,
     activationPolicy: new ManagedPluginActivationPolicy(
       process.env.PASEO_MANAGED_PLUGIN_POLICY,

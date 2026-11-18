@@ -42,6 +42,8 @@ export interface PluginSettings<Schema extends ZodType> {
 export interface PluginServerContext extends PluginLifecycleRegistration {
   /** Canonical directory of this launched source, independent of its current registration. Identity, not authorization. */
   readonly sourceDirectory: string;
+  /** Native managed enrollment identity; not permission or executing qualification. */
+  readonly managedSource: boolean;
   registerSettings<Schema extends ZodType>(
     definition: import("../settings.js").SettingsDefinition<Schema>,
   ): PluginSettings<Schema>;

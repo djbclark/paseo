@@ -17,10 +17,34 @@ export type CompilerReply =
     };
 
 const port = parentPort!;
+const admittedTasks = new Set<Promise<void>>();
+let retirement: Promise<void> | undefined;
+let acceptingTasks = true;
+
+// Closing ingress is synchronous: the qualified producer seals helper admission
+// immediately after this call, then awaits actual tasks before stopping esbuild.
+export function retireQualifiedCompilerTasks(): Promise<void> {
+  acceptingTasks = false;
+  retirement ??= Promise.allSettled(admittedTasks).then(() => undefined);
+  return retirement;
+}
 // The compiler owner serializes requests; the port queues the first request
 // until this entrypoint has loaded, including in source/tsx development.
 port.on("message", (task: CompilerTask) => {
-  void run(task);
+  if (!acceptingTasks) {
+    port.postMessage({
+      kind: "error",
+      error: new Error("Plugin compiler is retiring"),
+      properties: {},
+    } satisfies CompilerReply);
+    return;
+  }
+  const pending = run(task);
+  admittedTasks.add(pending);
+  void pending.then(
+    () => admittedTasks.delete(pending),
+    () => admittedTasks.delete(pending),
+  );
 });
 
 async function run(task: CompilerTask): Promise<void> {

@@ -62,6 +62,9 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
     Reflect.set(childProcess, name, () => unsupported());
   syncBuiltinESMExports();
   return Object.freeze({
+    sealAdmission(): void {
+      stopping = true;
+    },
     async settled(): Promise<void> {
       await Promise.all(observations);
       for (const [child, expected] of identities) {

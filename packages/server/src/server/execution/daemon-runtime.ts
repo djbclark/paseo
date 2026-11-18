@@ -1,3 +1,5 @@
+import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
+import { ManagedPluginPolicySchema } from "../plugins/activation-policy.js";
 import { getQualifiedDaemonOwner } from "./daemon-owner.js";
 import { createPaseoDaemon, type PaseoDaemonDependencies } from "../bootstrap.js";
 import { loadConfig } from "../config.js";
@@ -5,6 +7,7 @@ import { createRootLogger } from "../logger.js";
 import { resolvePaseoHome } from "../paseo-home.js";
 export async function startQualifiedDaemon(): Promise<void> {
   const owner = await getQualifiedDaemonOwner();
+  ManagedPluginPolicySchema.parse((await readFixedManagedPluginPolicy()).document);
   const home = resolvePaseoHome();
   const config = loadConfig(home);
   const logger = createRootLogger({ log: config.log }, { paseoHome: home });

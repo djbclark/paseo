@@ -35,7 +35,7 @@ import {
   getQualifiedRuntimeMeasurementEpoch,
   getQualifiedRuntimeMeasurement,
 } from "./index.js";
-import { BuiltinPluginLoader } from "./builtin/index.js";
+import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./builtin/index.js";
 import { ManagedPluginSources } from "./managed-source.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
 import {
@@ -3149,4 +3149,13 @@ it("cannot open restricted bootstrap initialization from a forged producer or ca
   ).rejects.toThrow("Qualified initialization owner unavailable");
   expect(initialization).not.toHaveBeenCalled();
   expect(nativeInitializationCalled).toBe(false);
+});
+
+it("rejects a source-provided owner for the fixed sealed builtin inventory", () => {
+  const forged = {
+    root: "/candidate",
+  } as import("../execution/daemon-types.js").QualifiedDaemonOwner;
+  expect(() => createQualifiedBuiltinPluginLoader(forged)).toThrow(
+    "Qualified builtin owner unavailable",
+  );
 });

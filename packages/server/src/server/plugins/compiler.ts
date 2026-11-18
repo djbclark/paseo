@@ -76,7 +76,47 @@ type QualifiedInitialCompilerContext = QualifiedCompilerBase & {
 };
 type QualifiedCompilerContext = QualifiedHeldCompilerContext | QualifiedInitialCompilerContext;
 
+declare const compilerFailureBrand: unique symbol;
+export interface SettledQualifiedCompilerFailure {
+  readonly [compilerFailureBrand]: true;
+  readonly outcome: "compiler_error";
+}
+export type QualifiedDirectoryAttempt =
+  | { outcome: "compiled"; bundles: TaskResult["directory"] }
+  | SettledQualifiedCompilerFailure;
+const settledCompilerFailures = new WeakMap<
+  SettledQualifiedCompilerFailure,
+  {
+    owner: QualifiedDaemonOwner;
+    held: PluginHeldOperation;
+    identity: { threadId: number; incarnation: string; closure: Readonly<QualifiedClosure> };
+  }
+>();
+export function readSettledQualifiedCompilerFailure(
+  value: unknown,
+  owner: QualifiedDaemonOwner,
+  held: PluginHeldOperation,
+) {
+  if (!value || typeof value !== "object") return undefined;
+  const evidence = settledCompilerFailures.get(value as SettledQualifiedCompilerFailure);
+  if (!evidence) return undefined;
+  if (
+    evidence.owner !== owner ||
+    evidence.held.scope !== held.scope ||
+    evidence.held.claim !== held.claim
+  )
+    throw new Error("Settled compiler failure scope mismatch");
+  assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
+  owner.assertFresh();
+  return Object.freeze({
+    ...evidence.identity,
+    closure: Object.freeze({ ...evidence.identity.closure }),
+  });
+}
+
 class PluginCompiler {
+  private actualWorkerSettled = false;
+  private actualOwnedErrorReply: Error | undefined;
   private ownedWorker: QualifiedOwnedCompiler | null = null;
   private ownedIdentity: {
     threadId: number;
@@ -117,6 +157,38 @@ class PluginCompiler {
         }
       }
     });
+  }
+
+  async runHeldDirectoryAttempt(
+    directory: string,
+    version: string,
+  ): Promise<QualifiedDirectoryAttempt> {
+    try {
+      return {
+        outcome: "compiled",
+        bundles: await this.run({ kind: "directory", directory, version }),
+      };
+    } catch (error) {
+      const context = this.qualified;
+      if (
+        !context?.held ||
+        error !== this.actualOwnedErrorReply ||
+        !this.actualWorkerSettled ||
+        !this.ownedIdentity
+      )
+        throw error;
+      assertPluginHeldOperation(context.held, context.held.claim.pluginId, directory);
+      context.owner.assertFresh();
+      const failure = Object.freeze({
+        outcome: "compiler_error" as const,
+      }) as SettledQualifiedCompilerFailure;
+      settledCompilerFailures.set(failure, {
+        owner: context.owner,
+        held: context.held,
+        identity: this.ownedIdentity,
+      });
+      return failure;
+    }
   }
 
   private async startWorker(): Promise<Worker> {
@@ -188,6 +260,7 @@ class PluginCompiler {
         })
         .then(() => owned.settled)
         .then(() => {
+          this.actualWorkerSettled = true;
           qualifiedObservationEpoch++;
           return undefined;
         });
@@ -216,6 +289,8 @@ class PluginCompiler {
             Object.assign(error, reply.properties);
             if (reply.errors) Object.assign(error, { errors: reply.errors });
             if (reply.warnings) Object.assign(error, { warnings: reply.warnings });
+            if (this.qualified?.held && this.ownedWorker?.worker === worker)
+              this.actualOwnedErrorReply = error;
             // All target work has settled before an error reply. Retire this
             // isolate before another request can enter it.
             this.stopWorker(worker);
@@ -296,6 +371,17 @@ export async function compileQualifiedDirectoryPlugin(
   version: string,
   context: QualifiedHeldCompilerContext,
 ): Promise<TaskResult["directory"]> {
+  const attempt = await tryCompileQualifiedDirectoryPlugin(directory, version, context);
+  if (attempt.outcome === "compiler_error")
+    throw new Error("Qualified compiler rejected the candidate");
+  return attempt.bundles;
+}
+
+export async function tryCompileQualifiedDirectoryPlugin(
+  directory: string,
+  version: string,
+  context: QualifiedHeldCompilerContext,
+): Promise<QualifiedDirectoryAttempt> {
   const { owner, native, held, snapshotRoot } = context;
   if (!isQualifiedDaemonOwner(owner) || !native.runHeldOperation)
     throw new Error("Qualified compiler admission unavailable");
@@ -309,11 +395,13 @@ export async function compileQualifiedDirectoryPlugin(
     const snapshotSha256 = await hashPluginSnapshot(snapshotRoot);
     if (snapshotSha256 !== held.claim.snapshotSha256) throw new Error("Compiler snapshot mismatch");
     const instance = new PluginCompiler(context);
-    const result = await instance.run({ kind: "directory", directory, version });
+    const attempt = await instance.runHeldDirectoryAttempt(directory, version);
     if ((await hashPluginSnapshot(snapshotRoot)) !== snapshotSha256)
       throw new Error("Compiler snapshot changed");
     assertPluginHeldOperation(held, held.claim.pluginId, directory);
     await owner.refresh();
+    if (attempt.outcome === "compiler_error") return attempt;
+    const result = attempt.bundles;
     if (!result.serverBundle) throw new Error("Qualified compilation requires server output");
     const identity = instance.getQualifiedWorkerIdentity();
     if (!identity) throw new Error("Missing actual owned compiler identity");
@@ -348,7 +436,7 @@ export async function compileQualifiedDirectoryPlugin(
       Object.freeze([...(qualifiedRuns.get(owner) ?? []).slice(-3), observation]),
     );
     qualifiedObservationEpoch++;
-    return result;
+    return { outcome: "compiled", bundles: result };
   });
 }
 

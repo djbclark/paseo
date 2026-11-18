@@ -53,6 +53,7 @@ import {
   compileDirectoryPlugin,
   compileQualifiedDirectoryPlugin,
   compileQualifiedInitialDirectoryPlugin,
+  tryCompileQualifiedDirectoryPlugin,
 } from "./compiler.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import type {
@@ -686,6 +687,42 @@ export class PluginRuntime {
       bundles.serverBundle ?? undefined,
       ticket,
     );
+  }
+
+  async tryValidateHeldActivation(
+    pluginId: string,
+    directory: string,
+    operation: ActivationOperation,
+    held: PluginHeldOperation,
+  ) {
+    this.requireLifecycleAdmission(held);
+    assertPluginHeldOperation(held, pluginId, directory);
+    const policy = this.dependencies.activationPolicy;
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const native = this.dependencies.nativeMaintenance;
+    if (!policy || !owner || !isQualifiedDaemonOwner(owner) || !native)
+      throw new Error("Held compiler authority unavailable");
+    const ticket = await policy.authorize(pluginId, directory, operation);
+    if (!ticket?.authorization.passiveProfile)
+      throw new Error("Held candidate lacks protected passive profile");
+    await owner.refresh();
+    const incarnation = owner.binding.expectedIncarnation;
+    if (typeof incarnation !== "string") throw new Error("Missing enclosing incarnation");
+    owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    const attempt = await tryCompileQualifiedDirectoryPlugin(directory, this.daemonVersion, {
+      owner,
+      native,
+      held,
+      snapshotRoot: ticket.authorization.snapshotRoot,
+    });
+    await policy.authorize(
+      pluginId,
+      directory,
+      operation,
+      attempt.outcome === "compiled" ? (attempt.bundles.serverBundle ?? undefined) : undefined,
+      ticket,
+    );
+    return { ticket, attempt };
   }
 
   async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {

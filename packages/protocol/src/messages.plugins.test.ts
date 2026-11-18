@@ -431,3 +431,17 @@ it("parses the source/generation CAS recovery request and receipt-bearing respon
   };
   expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
 });
+
+describe("native held plugin operation protocol", () => {
+  const request = { type: "daemon.maintenance.plugin.operation.request", requestId: "held", schemaVersion: 1, generation: 3, transactionId: "transaction", ownerToken: "x".repeat(43), expectedServerId: "server", expectedDaemonIncarnation: "incarnation", operation: "replace", pluginId: "example", path: "/retained/B", expectedPath: "/retained/A", expectedGeneration: 8, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
+  it("requires exact explicit owner, native CAS and candidate digest fields", () => {
+    expect(SessionInboundMessageSchema.parse(request)).toEqual(request);
+    for (const key of ["ownerToken", "transactionId", "expectedServerId", "expectedDaemonIncarnation", "expectedGeneration", "snapshotSha256", "serverBundleSha256"]) {
+      const missing: Record<string, unknown> = { ...request };
+      delete missing[key];
+      expect(SessionInboundMessageSchema.safeParse(missing).success).toBe(false);
+    }
+    expect(SessionInboundMessageSchema.safeParse({ ...request, ownerToken: "argv-token" }).success).toBe(false);
+    expect(SessionInboundMessageSchema.safeParse({ ...request, expectedGeneration: -1 }).success).toBe(false);
+  });
+});

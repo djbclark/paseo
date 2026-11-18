@@ -1534,12 +1534,20 @@ export const DaemonGetPairingOfferRequestSchema = z.object({
   requestId: z.string(),
 });
 
+export const MaintenanceTransportAuthoritySchema = z.object({
+  schemaVersion: z.literal(1),
+  serverId: z.string(),
+  daemonIncarnation: z.string().nullable(),
+  qualified: z.boolean(),
+  features: z.object({ maintenanceReservationV1: z.boolean(), maintenancePluginOperationV1: z.boolean() }),
+});
 export const MaintenanceStatusSchema = z.object({
   schemaVersion: z.literal(1),
   state: z.enum(["idle", "held", "recovery-required"]),
   generation: z.number().int().positive().nullable(),
   transactionId: z.string().nullable(),
   recoveryRequired: z.boolean(),
+  authority: MaintenanceTransportAuthoritySchema.optional(),
 });
 export const MaintenanceBeginRequestSchema = z.object({
   type: z.literal("daemon.maintenance.begin.request"),
@@ -1547,6 +1555,8 @@ export const MaintenanceBeginRequestSchema = z.object({
   schemaVersion: z.literal(1),
   generation: z.number().int().positive(),
   transactionId: z.string().min(1).max(256),
+  expectedServerId: z.string().optional(),
+  expectedDaemonIncarnation: z.string().optional(),
 });
 export const MaintenanceBeginResponseSchema = z.object({
   type: z.literal("daemon.maintenance.begin.response"),
@@ -1574,6 +1584,9 @@ export const MaintenanceEndRequestSchema = z.object({
   schemaVersion: z.literal(1),
   generation: z.number().int().positive(),
   ownerToken: z.string().min(1).max(256),
+  expectedServerId: z.string().optional(),
+  expectedDaemonIncarnation: z.string().optional(),
+  transactionId: z.string().min(1).max(256).optional(),
 });
 export const MaintenanceEndResponseSchema = z.object({
   type: z.literal("daemon.maintenance.end.response"),
@@ -1582,6 +1595,23 @@ export const MaintenanceEndResponseSchema = z.object({
     result: MaintenanceStatusSchema.nullable(),
     error: z.string().nullable(),
   }),
+});
+export const MaintenancePluginOperationRequestSchema = z.object({
+  type: z.literal("daemon.maintenance.plugin.operation.request"),
+  requestId: z.string(),
+  schemaVersion: z.literal(1),
+  generation: z.number().int().positive(),
+  transactionId: z.string().min(1).max(256),
+  ownerToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  expectedServerId: z.string().min(1),
+  expectedDaemonIncarnation: z.string().min(1),
+  operation: z.enum(["replace", "recover", "verify"]),
+  pluginId: PluginIdSchema,
+  path: z.string().min(1),
+  expectedPath: z.string().min(1),
+  expectedGeneration: z.number().int().nonnegative(),
+  snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  serverBundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
 export const DaemonConfigReloadRequestSchema = z.object({
   type: z.literal("daemon.config.reload.request"),
@@ -3615,6 +3645,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetPairingOfferRequestSchema,
   DaemonConfigReloadRequestSchema,
   MaintenanceBeginRequestSchema,
+  MaintenancePluginOperationRequestSchema,
   MaintenanceStatusRequestSchema,
   MaintenanceEndRequestSchema,
   HubManagementDaemonConnectRequestSchema,
@@ -4027,6 +4058,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: z.boolean().optional(),
         maintenanceReservationV1: z.boolean().optional(),
+        maintenancePluginOperationV1: z.boolean().optional(),
         // COMPAT(speechSettings): added in v0.12.0, remove gate after 2027-04-18.
         speechSettings: z.boolean().optional(),
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
@@ -7283,6 +7315,15 @@ export const PluginListItemSchema = z.object({
 });
 export type PluginListItem = z.infer<typeof PluginListItemSchema>;
 
+export const MaintenancePluginOperationResponseSchema = z.object({
+  type: z.literal("daemon.maintenance.plugin.operation.response"),
+  payload: z.object({
+    requestId: z.string(),
+    result: z.object({ plugin: PluginListItemSchema, nativeGeneration: z.number().int().nonnegative(), maintenance: MaintenanceStatusSchema, serverId: z.string(), daemonIncarnation: z.string() }).nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 export const PluginLogEntrySchema = z.object({
   sequence: z.number().int().nonnegative(),
   timestamp: z.string().datetime(),
@@ -7592,6 +7633,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetPairingOfferResponseSchema,
   DaemonConfigReloadResponseSchema,
   MaintenanceBeginResponseSchema,
+  MaintenancePluginOperationResponseSchema,
   MaintenanceStatusResponseSchema,
   MaintenanceEndResponseSchema,
   HubManagementDaemonConnectResponseSchema,

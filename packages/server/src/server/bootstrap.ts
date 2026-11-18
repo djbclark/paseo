@@ -1,3 +1,4 @@
+import { heldPluginOperationDriver } from "./maintenance-operation.js";
 import {
   pluginMaintenancePort,
   qualifiedMaintenanceParticipant,
@@ -771,6 +772,7 @@ async function createPaseoDaemonInExecutionContext(
   );
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
+  maintenance.bindTransport(serverId, qualifiedDaemon, heldPluginOperationDriver(pluginRuntime));
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
   const managedProcesses = createBootstrapManagedProcessRegistry(config, logger);
   // Reconcile the helper-process ledger in the background so it never blocks the

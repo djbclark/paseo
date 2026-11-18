@@ -2087,6 +2087,7 @@ export class VoiceAssistantWebSocketServer {
         ...(this.advertiseDaemonStatusRpc ? { daemonStatusRpc: true } : {}),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: true,
+        maintenancePluginOperationV1: process.platform !== "win32" && this.agentManager.maintenanceReservation?.supportsPluginOperations() === true,
         maintenanceReservationV1:
           process.platform !== "win32" &&
           this.agentManager.maintenanceReservation?.isReady() === true,

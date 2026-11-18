@@ -1,8 +1,9 @@
-import type { HeldPluginOperationClaim, HeldPluginOperationScope } from "./maintenance-operation.js";
+import type { HeldPluginOperationClaim, HeldPluginOperationScope, HeldPluginOperationDriver } from "./maintenance-operation.js";
 import {
   emptyMaintenanceParticipant,
   type PluginMaintenancePort,
   type MaintenanceIdentity,
+  type QualifiedDaemonAccess,
 } from "./maintenance-participant.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
@@ -15,7 +16,7 @@ import {
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { renameSync } from "node:fs";
 import { open, unlink, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
+import { join, isAbsolute, resolve } from "node:path";
 
 export interface MaintenanceStatus {
   schemaVersion: 1;
@@ -63,6 +64,8 @@ export class MaintenanceReservation {
   private failed = false;
   private readonly path: string;
 
+  private transport?: { serverId: string; authority: QualifiedDaemonAccess };
+  private pluginOperation?: HeldPluginOperationDriver;
   private ready = false;
   private revision = 0;
   private storageTail: Promise<void> = Promise.resolve();
@@ -157,6 +160,48 @@ export class MaintenanceReservation {
       this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null },
       uncertain,
     );
+  }
+
+  bindTransport(serverId: string, authority: QualifiedDaemonAccess, operation?: HeldPluginOperationDriver): void {
+    if (this.ready || this.pending) throw new Error("Maintenance transport must bind before startup");
+    this.transport = { serverId, authority };
+    this.pluginOperation = operation;
+  }
+
+  transportAuthority() {
+    let daemonIncarnation: string | null = null;
+    try { daemonIncarnation = this.transport?.authority.incarnation() ?? null; } catch { /* Unsupported owner never yields qualified metadata. */ }
+    const qualified = daemonIncarnation !== null;
+    const supported = qualified && this.isReady();
+    return { schemaVersion: 1 as const, serverId: this.transport?.serverId ?? "", daemonIncarnation, qualified, features: { maintenanceReservationV1: supported, maintenancePluginOperationV1: supported && this.pluginOperation !== undefined } };
+  }
+
+  supportsPluginOperations(): boolean { return this.transportAuthority().features.maintenancePluginOperationV1; }
+
+  assertTransport(input: { expectedServerId?: string; expectedDaemonIncarnation?: string; transactionId?: string }, end = false): void {
+    if (input.expectedServerId !== undefined || input.expectedDaemonIncarnation !== undefined) {
+      const actual = this.transportAuthority();
+      if (!actual.qualified || input.expectedServerId !== actual.serverId || input.expectedDaemonIncarnation !== actual.daemonIncarnation) throw new Error("Maintenance transport identity mismatch");
+    }
+    if (end && input.transactionId !== undefined && input.transactionId !== this.record?.transactionId) throw new Error("Maintenance transaction mismatch");
+  }
+
+  async executePluginOperation(input: HeldPluginOperationClaim & { ownerToken: string; expectedServerId: string; expectedDaemonIncarnation: string }) {
+    this.assertTransport(input);
+    const driver = this.pluginOperation;
+    if (!driver || !this.supportsPluginOperations()) throw new Error("Held plugin operation unsupported");
+    if (!isAbsolute(input.path) || resolve(input.path) !== input.path || !isAbsolute(input.expectedPath) || resolve(input.expectedPath) !== input.expectedPath || !Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0 || !/^[a-f0-9]{64}$/.test(input.snapshotSha256) || !/^[a-f0-9]{64}$/.test(input.serverBundleSha256)) throw new Error("Invalid held plugin operation target");
+    // Copy only public claim fields; bearer and transport metadata never reach the driver.
+    const claim: HeldPluginOperationClaim = { generation: input.generation, transactionId: input.transactionId, operation: input.operation, pluginId: input.pluginId, path: input.path, expectedPath: input.expectedPath, expectedGeneration: input.expectedGeneration, snapshotSha256: input.snapshotSha256, serverBundleSha256: input.serverBundleSha256 };
+    return this.ownerPluginOperation(claim, input.ownerToken, async (scope) => {
+      const result = await driver(claim, scope);
+      this.assertTransport(input);
+      assertHeldPluginOperation(scope, claim);
+      if (!Number.isSafeInteger(result.nativeGeneration) || result.nativeGeneration < input.expectedGeneration || result.plugin.id !== input.pluginId) throw new Error("Invalid held plugin operation result");
+      const authority = this.transportAuthority();
+      if (!authority.qualified || !authority.daemonIncarnation) throw new Error("Maintenance owner unavailable");
+      return { ...result, maintenance: { ...this.status(), authority }, serverId: authority.serverId, daemonIncarnation: authority.daemonIncarnation };
+    });
   }
 
   isReady(): boolean {
@@ -446,7 +491,7 @@ export class MaintenanceReservation {
   }
 
   assertHeldScopeCurrent(entry: HeldScopeEntry): void {
-    if (entry.owner !== this || this.failed || this.revision !== entry.revision || !this.leases.get(entry.release)?.active || this.record?.tokenDigest !== entry.tokenDigest || this.record.generation !== entry.claim.generation || this.record.transactionId !== entry.claim.transactionId) throw new Error("Expired held plugin operation authority");
+    if (entry.owner !== this || this.failed || !this.isReady() || this.revision !== entry.revision || !this.leases.get(entry.release)?.active || this.record?.tokenDigest !== entry.tokenDigest || this.record.generation !== entry.claim.generation || this.record.transactionId !== entry.claim.transactionId) throw new Error("Expired held plugin operation authority");
   }
 
   runHeldOperation<T>(scope: HeldPluginOperationScope, expected: HeldPluginOperationClaim, operation: () => Promise<T>): Promise<T> {

@@ -11,6 +11,7 @@ import { ZodError } from "zod";
 import {
   compilePlugin,
   compileDirectoryPlugin,
+  compileQualifiedDirectoryPlugin,
   resolveExistingAsarUnpackedEsbuildBinary,
   unpackedEsbuildBinaryFromPackageDir,
 } from "./compiler.js";
@@ -1201,3 +1202,40 @@ it("drains an admitted real compile and rejects later task ingress", async () =>
     await worker.terminate();
   }
 }, 20_000);
+
+it("refuses forged qualified compiler ownership before opening source or entering native work", async () => {
+  let entered = false;
+  await expect(
+    compileQualifiedDirectoryPlugin("/absent/candidate", "1", {
+      owner: {} as import("../execution/daemon-types.js").QualifiedDaemonOwner,
+      native: {
+        enterWork: () => {
+          entered = true;
+          return () => {};
+        },
+        holdForUnknownWork: () => {},
+        runQualifiedInitialization: async (operation) => operation(),
+        runHeldOperation: async (_scope, _claim, operation) => {
+          entered = true;
+          return operation();
+        },
+      },
+      held: {
+        scope: {} as import("../maintenance-operation.js").HeldPluginOperationScope,
+        claim: {
+          generation: 1,
+          transactionId: "forged",
+          operation: "verify",
+          pluginId: "probe",
+          path: "/absent/candidate",
+          expectedPath: "/absent/candidate",
+          expectedGeneration: 1,
+          snapshotSha256: "0".repeat(64),
+          serverBundleSha256: "0".repeat(64),
+        },
+      },
+      snapshotRoot: "/absent/candidate",
+    }),
+  ).rejects.toThrow("Qualified compiler admission unavailable");
+  expect(entered).toBe(false);
+});

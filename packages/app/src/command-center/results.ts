@@ -60,6 +60,8 @@ export interface CommandCenterWorkspaceResult {
   project: CommandCenterWorkspaceProject;
   /** PR/MR number backing this workspace, so a number query can match it exactly. */
   changeRequestNumber: number | null;
+  /** IDs of the agents in this workspace, so an agent-ID prefix query lands on the workspace. */
+  agentIds: readonly string[];
   activityAt: Date | null;
   run(): void;
 }

@@ -14,6 +14,19 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 const sha = (value) => createHash("sha256").update(value).digest("hex");
+// Keep the child program as ordinary parsed source: serialization preserves its
+// newline/regex literals without a second layer of manual string escaping.
+function observeRuntimeLibraries(fs, os) {
+  os.userInfo();
+  const files = fs
+    .readFileSync("/proc/self/maps", "utf8")
+    .split("\n")
+    .flatMap((line) => {
+      const match = line.match(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +(\/.*)$/);
+      return match ? [fs.realpathSync(match[1])] : [];
+    });
+  process.stdout.write(JSON.stringify([...new Set(files)].sort()));
+}
 export async function finalizeQualifiedHost(root, runtimePath) {
   const canonical = await realpath(root);
   const inputs = JSON.parse(await readFile(path.join(canonical, "inputs.json"), "utf8"));
@@ -47,10 +60,7 @@ export async function finalizeQualifiedHost(root, runtimePath) {
   files.sort((a, b) => a.path.localeCompare(b.path));
   const observation = spawnSync(
     path.join(canonical, "runtime/node"),
-    [
-      "-e",
-      `const fs=require('node:fs'); require('node:os').userInfo(); process.stdout.write(JSON.stringify([...new Set(fs.readFileSync('/proc/self/maps','utf8').split('\\n').flatMap(line=>{const m=line.match(/^[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +[^ ]+ +(\\/.*)$/);return m?[fs.realpathSync(m[1])]:[]}))].sort())));`,
-    ],
+    ["-e", `(${observeRuntimeLibraries.toString()})(require("node:fs"), require("node:os"));`],
     { encoding: "utf8", timeout: 10000, env: { PATH: "/usr/bin:/bin" } },
   );
   if (observation.status !== 0)

@@ -3,8 +3,7 @@ import { open, lstat, realpath } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 
-/** Fixed controller authority, independent of PASEO_HOME/HOME and caller arguments. */
-export async function readFixedManagedPluginPolicy(): Promise<{ path: string; document: unknown }> {
+async function authorityLocation(): Promise<{ file: string; uid: number }> {
   const account = userInfo();
   const home = await realpath(account.homedir);
   const file = path.join(home, ".local/state/djbclark-ade/forks/paseo-managed-plugins.json");
@@ -18,12 +17,15 @@ export async function readFixedManagedPluginPolicy(): Promise<{ path: string; do
     if (current === path.dirname(current))
       throw new Error("Managed policy outside real account home");
   }
+  return { file, uid: account.uid };
+}
+async function privatePolicyBytes(file: string, uid: number): Promise<Buffer> {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat({ bigint: true });
     if (
       !before.isFile() ||
-      before.uid !== BigInt(account.uid) ||
+      before.uid !== BigInt(uid) ||
       before.nlink !== 1n ||
       before.mode & 0o077n ||
       before.size > 65536n
@@ -53,22 +55,33 @@ export async function readFixedManagedPluginPolicy(): Promise<{ path: string; do
       if (before[key] !== after[key] || before[key] !== current[key])
         throw new Error("Managed policy changed during read");
     if (BigInt(total) !== before.size) throw new Error("Managed policy changed size");
-    const document: unknown = JSON.parse(buffer.subarray(0, total).toString("utf8"));
-    if (
-      !document ||
-      typeof document !== "object" ||
-      Array.isArray(document) ||
-      Reflect.get(document, "version") !== 1 ||
-      Object.keys(document).sort().join(",") !== "plugins,version"
-    )
-      throw new Error("Managed policy envelope invalid");
-    const plugins: unknown = Reflect.get(document, "plugins");
-    if (!plugins || typeof plugins !== "object" || Array.isArray(plugins))
-      throw new Error("Managed policy plugin authority invalid");
-    return { path: file, document };
+    return buffer.subarray(0, total);
   } finally {
     await handle.close();
   }
+}
+function policyEnvelope(raw: Buffer): unknown {
+  const document: unknown = JSON.parse(raw.toString("utf8"));
+  if (
+    !document ||
+    typeof document !== "object" ||
+    Array.isArray(document) ||
+    Reflect.get(document, "version") !== 1 ||
+    Object.keys(document).sort().join(",") !== "plugins,version"
+  )
+    throw new Error("Managed policy envelope invalid");
+  const plugins: unknown = Reflect.get(document, "plugins");
+  if (!plugins || typeof plugins !== "object" || Array.isArray(plugins))
+    throw new Error("Managed policy plugin authority invalid");
+  return document;
+}
+/** Fixed controller authority, independent of PASEO_HOME/HOME and caller arguments. */
+export async function readFixedManagedPluginPolicy(): Promise<{ path: string; document: unknown }> {
+  const location = await authorityLocation();
+  return {
+    path: location.file,
+    document: policyEnvelope(await privatePolicyBytes(location.file, location.uid)),
+  };
 }
 export async function qualifiedManagedEnvironment() {
   const policy = await readFixedManagedPluginPolicy();

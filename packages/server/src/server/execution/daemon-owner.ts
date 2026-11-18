@@ -31,7 +31,11 @@ interface ObservationPort {
   off(event: "message", listener: (value: unknown) => void): void;
   postMessage(message: { type: string; challenge: string }): void;
 }
-function exchange(port: ObservationPort, challenge: string): Promise<OwnedObservation> {
+function exchange(
+  port: ObservationPort,
+  challenge: string,
+  acceptReply?: (reply: OwnedObservation) => void,
+): Promise<OwnedObservation> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();

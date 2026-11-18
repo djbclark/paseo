@@ -89,10 +89,22 @@ int main(int argc, char **argv) {
     if (sigaction(signals[i], &action, NULL) < 0) return 126;
   int ready[2], control[2];
   if (pipe2(ready, O_CLOEXEC) < 0 || pipe2(control, O_CLOEXEC) < 0) return 126;
+  sigset_t during_fork, previous_mask;
+  sigemptyset(&during_fork);
+  for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++)
+    sigaddset(&during_fork, signals[i]);
+  if (sigprocmask(SIG_BLOCK, &during_fork, &previous_mask) < 0) return 126;
   pid_t child = fork();
   if (child < 0) return 126;
-  if (child == 0) execute_git(argv[1], argv[2], ready[1], control[0]);
+  if (child == 0) {
+    action.sa_handler = SIG_DFL;
+    for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++)
+      if (sigaction(signals[i], &action, NULL) < 0) _exit(126);
+    if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) < 0) _exit(126);
+    execute_git(argv[1], argv[2], ready[1], control[0]);
+  }
   owned_leader = child;
+  if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) < 0) return 126;
   (void)forward_request(child);
   close(ready[1]);
   close(control[0]);

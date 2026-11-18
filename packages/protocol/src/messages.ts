@@ -1550,6 +1550,8 @@ export const MaintenanceStatusSchema = z.object({
   generation: z.number().int().positive().nullable(),
   transactionId: z.string().nullable(),
   recoveryRequired: z.boolean(),
+  reservationGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  ready: z.boolean().optional(),
   authority: MaintenanceTransportAuthoritySchema.optional(),
 });
 export const MaintenanceBeginRequestSchema = z.object({
@@ -1567,6 +1569,7 @@ export const MaintenanceBeginResponseSchema = z.object({
     requestId: z.string(),
     result: MaintenanceStatusSchema.extend({ ownerToken: z.string() }).nullable(),
     error: z.string().nullable(),
+    errorCode: z.literal("MAINTENANCE_KNOWN_BUSY").optional(),
   }),
 });
 export const MaintenanceStatusRequestSchema = z.object({

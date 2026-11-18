@@ -510,3 +510,20 @@ describe("native held plugin operation protocol", () => {
     ).toBe(false);
   });
 });
+
+
+describe("native BEGIN refusal metadata and idle counter compatibility", () => {
+  it("preserves old status and carries explicit fresh generation without interpreting null", () => {
+    const response = { type: "daemon.maintenance.status.response", payload: { requestId: "status", error: null, result: { schemaVersion: 1, state: "idle", generation: null, transactionId: null, recoveryRequired: false } } };
+    expect(SessionOutboundMessageSchema.safeParse(response).success).toBe(true);
+    const fresh = { ...response, payload: { ...response.payload, result: { ...response.payload.result, reservationGeneration: 0, ready: true } } };
+    expect(SessionOutboundMessageSchema.parse(fresh)).toEqual(fresh);
+    expect(SessionOutboundMessageSchema.safeParse({ ...fresh, payload: { ...fresh.payload, result: { ...fresh.payload.result, reservationGeneration: -1 } } }).success).toBe(false);
+  });
+  it("adds only the exact typed known-busy refusal code", () => {
+    const response = { type: "daemon.maintenance.begin.response", payload: { requestId: "begin", result: null, error: "Maintenance reservation refused" } };
+    expect(SessionOutboundMessageSchema.safeParse(response).success).toBe(true);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, errorCode: "MAINTENANCE_KNOWN_BUSY" } }).success).toBe(true);
+    expect(SessionOutboundMessageSchema.safeParse({ ...response, payload: { ...response.payload, errorCode: "BUSY" } }).success).toBe(false);
+  });
+});

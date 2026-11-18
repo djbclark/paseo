@@ -431,3 +431,40 @@ it("parses the source/generation CAS recovery request and receipt-bearing respon
   };
   expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
 });
+
+it("parses strict versioned managed status and keeps journal and loaded identity separate", () => {
+  expect(
+    SessionInboundMessageSchema.parse({
+      type: "plugins.managed.status.request",
+      requestId: "status",
+      pluginId: "managed",
+    }).type,
+  ).toBe("plugins.managed.status.request");
+  const status = {
+    version: 1,
+    pluginId: "managed",
+    consistency: "coherent",
+    registration: { source: "directory", path: "/old" },
+    journal: { version: 1, generation: 3, phase: "held" },
+  };
+  const response = {
+    type: "plugins.managed.status.response",
+    payload: { requestId: "status", status },
+  };
+  expect(SessionOutboundMessageSchema.parse(response)).toEqual(response);
+  expect(
+    SessionOutboundMessageSchema.safeParse({
+      ...response,
+      payload: { requestId: "status", status: { ...status, ownerToken: "forbidden" } },
+    }).success,
+  ).toBe(false);
+  expect(
+    SessionOutboundMessageSchema.safeParse({
+      ...response,
+      payload: {
+        requestId: "status",
+        status: { version: 1, pluginId: "managed", consistency: "uncertain" },
+      },
+    }).success,
+  ).toBe(false);
+});

@@ -3,7 +3,11 @@ import { expandUserPath } from "../../classify.js";
 import { createInterface } from "node:readline/promises";
 import { reviewPluginUpdates, type UpdateOutcome } from "./update.js";
 import { Command } from "commander";
-import type { PluginListItem, PluginLogEntry } from "@getpaseo/protocol/messages";
+import type {
+  ManagedPluginStatus,
+  PluginListItem,
+  PluginLogEntry,
+} from "@getpaseo/protocol/messages";
 import {
   formatPluginSourceReference,
   parsePluginSourceReference,
@@ -15,6 +19,7 @@ import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-
 import { scaffoldPluginDirectory, type PluginScaffold } from "./scaffold.js";
 import {
   withManagedPluginClient,
+  withManagedPluginStatusClient,
   withPluginLogsClient,
   withPluginUpdateClient,
   withPluginManagementClient,
@@ -258,8 +263,55 @@ export async function runPluginRecoverCommand(
   return { type: "single", data, schema: pluginSchema };
 }
 
+export async function runManagedPluginStatusCommand(
+  pluginId: string,
+  options: PluginOptions,
+  _command: Command,
+): Promise<SingleResult<ManagedPluginStatus>> {
+  const data = await withManagedPluginStatusClient(options.daemonTarget, (client) =>
+    client.getManagedPluginStatus(pluginId),
+  );
+  return {
+    type: "single",
+    data,
+    schema: {
+      idField: "pluginId",
+      columns: [
+        { header: "PLUGIN", field: "pluginId", width: 20 },
+        { header: "CONSISTENCY", field: "consistency", width: 16 },
+        {
+          header: "PHASE",
+          field: (status) =>
+            status.consistency === "coherent" ? status.journal.phase : status.reason,
+          width: 22,
+        },
+        {
+          header: "JOURNAL_GENERATION",
+          field: (status) =>
+            status.consistency === "coherent" ? String(status.journal.generation) : "-",
+          width: 20,
+        },
+        {
+          header: "LOADED_GENERATION",
+          field: (status) =>
+            status.consistency === "coherent"
+              ? String(status.loaded?.activationGeneration ?? "-")
+              : "-",
+          width: 20,
+        },
+      ],
+    },
+  };
+}
+
 export function createPluginCommand(): Command {
   const plugin = new Command("plugin").description("Manage trusted, unsandboxed plugins");
+  addJsonAndDaemonHostOptions(
+    plugin
+      .command("managed-status")
+      .description("Read a bounded coherent managed journal/runtime snapshot")
+      .argument("<id>"),
+  ).action(withOutput(runManagedPluginStatusCommand));
   addJsonAndDaemonHostOptions(
     plugin
       .command("recover")

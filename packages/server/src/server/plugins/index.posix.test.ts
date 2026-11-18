@@ -2021,6 +2021,151 @@ describe("managed plugin promotion boundary", () => {
       JSON.stringify({ version: 1, plugins: { managed: { authorizations: entries } } }),
     );
   }
+
+  it("reports a coherent held journal independently from loaded generation after failed native replacement", async () => {
+    const f = await fixture();
+    const old = await createPlugin(
+      "managed",
+      "export default function contribute() { return () => {}; }",
+    );
+    const bad = await createPlugin(
+      "managed",
+      "throw new Error('candidate failed'); export default function contribute() { return () => {}; }",
+    );
+    await allow(f.policyFile, [await authorization(old, 0)]);
+    const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0", {
+      activationPolicy: f.policy,
+    });
+    const service = createService(
+      f.home,
+      { managed: { source: "directory", path: old } },
+      { activationPolicy: f.policy, runtime },
+    );
+    try {
+      await service.start();
+      const first = await service.getManagedPluginStatus("managed");
+      expect(first.consistency).toBe("coherent");
+      if (first.consistency !== "coherent") throw new Error("missing initial evidence");
+      expect(first.journal.generation).toBe(1);
+      expect(first.loaded?.activationGeneration).toBe(1);
+      await allow(f.policyFile, [await authorization(bad, 1)]);
+      await expect(
+        service.replaceDirectory({
+          pluginId: "managed",
+          path: bad,
+          expectedPath: old,
+          expectedGeneration: 1,
+        }),
+      ).rejects.toThrow();
+      await service.maintenance.begin({ generation: 1, transactionId: "held-status" });
+      const held = await service.getManagedPluginStatus("managed");
+      expect(held.consistency).toBe("coherent");
+      if (held.consistency !== "coherent") throw new Error("missing held evidence");
+      expect(held.journal.phase).toBe("held");
+      expect(held.journal.generation).toBeGreaterThan(first.journal.generation);
+      expect(held.journal.baseline?.receipt).toEqual(first.loaded);
+      expect(held.journal.currentReceipt).toEqual(first.loaded);
+      expect(held.loaded).toBeUndefined();
+      expect(held.registration.path).toBe(old);
+    } finally {
+      await runtime.stopAll();
+    }
+  });
+
+  it("returns journal uncertainty instead of an invented initial generation", async () => {
+    const f = await fixture();
+    const directory = await createPlugin(
+      "managed",
+      "export default function contribute() { return () => {}; }",
+    );
+    const service = createService(
+      f.home,
+      { managed: { source: "directory", path: directory } },
+      { activationPolicy: f.policy },
+    );
+    expect(await service.getManagedPluginStatus("managed")).toMatchObject({
+      consistency: "uncertain",
+      reason: "journal-missing",
+    });
+    await mkdir(path.join(f.home, "promotions"));
+    await writeFile(path.join(f.home, "promotions", "managed.json"), "not-json");
+    expect(await service.getManagedPluginStatus("managed")).toMatchObject({
+      consistency: "uncertain",
+      reason: "journal-unreadable",
+    });
+  });
+
+  it("bounds a serialized status wait without cancelling the operation occupying the native queue", async () => {
+    const f = await fixture();
+    const begun = path.join(f.home, "begun");
+    const release = path.join(f.home, "release");
+    const blocker = await createQueueBlocker(begun, release);
+    await allow(f.policyFile, []);
+    const service = createService(f.home, {}, { activationPolicy: f.policy });
+    const operation = service.installSource({ source: blocker, id: "blocker" });
+    try {
+      await waitForQueueBlocker(operation, begun);
+      expect(await service.getManagedPluginStatus("managed")).toMatchObject({
+        consistency: "uncertain",
+        reason: "busy",
+      });
+      expect(await readManagedSignal(release)).toBe("");
+    } finally {
+      await writeFile(release, "go");
+      await operation;
+      await service.stopAllPlugins();
+    }
+  });
+
+  it.each(["child-close", "journal-replacement", "registration-replacement"])(
+    "detects %s identity changes across journal awaits",
+    async (change) => {
+      const f = await fixture();
+      const old = await createPlugin(
+        "managed",
+        "export default function contribute() { return () => {}; }",
+      );
+      await allow(f.policyFile, [await authorization(old, 0)]);
+      const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0", {
+        activationPolicy: f.policy,
+      });
+      const store = createStore(f.home, { managed: { source: "directory", path: old } });
+      const service = bindTestSessionHost(
+        new PluginService(pino({ level: "silent" }), store, "0.4.0", {
+          activationPolicy: f.policy,
+          runtime,
+        }),
+      );
+      try {
+        await service.start();
+        const observe = f.policy.observeStatus.bind(f.policy);
+        vi.spyOn(f.policy, "observeStatus").mockImplementationOnce(async (id) => {
+          const snapshot = await observe(id);
+          if (change === "child-close") await runtime.stopAll();
+          else if (change === "registration-replacement") {
+            await store.patch({
+              plugins: { managed: { source: "directory", path: old, enabled: false } },
+            });
+            await store.patch({
+              plugins: { managed: { source: "directory", path: old, enabled: true } },
+            });
+          } else {
+            const journal = path.join(f.home, "promotions", "managed.json");
+            const replacement = journal + ".replacement";
+            await writeFile(replacement, await readFile(journal));
+            await rename(replacement, journal);
+          }
+          return snapshot;
+        });
+        expect(await service.getManagedPluginStatus("managed")).toMatchObject({
+          consistency: "uncertain",
+          reason: "changed",
+        });
+      } finally {
+        await runtime.stopAll();
+      }
+    },
+  );
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();
     const directory = await createPlugin(

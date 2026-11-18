@@ -126,6 +126,27 @@ Snapshots and dependency closure still require administrator-enforced immutabili
 rename but are not fsynced: process-interruption recovery is covered; power-loss durability and orphan
 child reconciliation are not established by these tests.
 
+### Observe the managed journal
+
+Use `paseo plugin managed-status ID --json` (`plugins.managed.status.request`,
+client `getManagedPluginStatus(ID)`) when a controller needs a serialized read.
+Gate once on `server_info.features.managedPluginStatus`; the operation uses
+`daemon.read` authorization and remains readable while plugin admission is held.
+
+The version 1 response distinguishes `journal.generation` (mutation CAS),
+`journal.phase`, retained `journal.baseline`, persisted `journal.currentReceipt`,
+current `registration`, and actual `loaded` receipt. A persisted receipt does not
+prove a child is still running. `coherent` means one observed serialized snapshot;
+a mutation must still recheck its expected identity/generation and current policy.
+
+The read waits at most one second. A busy queue, missing/unreadable journal,
+unconfigured policy, absent registration/runtime, or identity change returns
+`consistency: "uncertain"` with a reason and no invented initial generation.
+Timeout never cancels or releases admitted work. Journal descriptor identity,
+configuration object identity and runtime mutation epoch detect replacement and
+child-close races across asynchronous reads. Status returns no owner token or
+permission to activate, recover, or release maintenance.
+
 ### Replace a managed directory
 
 ```bash

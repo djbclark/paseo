@@ -371,6 +371,11 @@ function assertChildAlive(loaded: LoadedPlugin): void {
 }
 
 export class PluginRuntime {
+  private observationEpoch = 0;
+  getObservationEpoch(): number {
+    return this.observationEpoch;
+  }
+
   private maintenanceIdentity: PluginMaintenanceIdentity | null = null;
   private maintenanceUncertain = false;
   /** HOLD by default until both executing daemon and child closure capabilities are integrated. */
@@ -478,6 +483,7 @@ export class PluginRuntime {
       await this.stopPlugin(loaded);
       throw new Error(`Plugin start cancelled: ${pluginId}`);
     }
+    this.observationEpoch++;
     this.plugins.set(pluginId, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
@@ -499,6 +505,7 @@ export class PluginRuntime {
       bundle: "",
       clientBundle: bundles.clientBundle ?? "",
     });
+    this.observationEpoch++;
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
     this.appendLog(input.id, "stdout", "[paseo] Plugin ready");
@@ -534,6 +541,7 @@ export class PluginRuntime {
   async stopPluginById(pluginId: string): Promise<boolean> {
     const loaded = this.plugins.get(pluginId);
     if (!loaded) return false;
+    this.observationEpoch++;
     this.plugins.delete(pluginId);
     this.notifySessionOpenChange(loaded);
     this.rejectPending(loaded, `Plugin stopped: ${pluginId}`);
@@ -1141,6 +1149,7 @@ export class PluginRuntime {
     beforeInitialize?: (dispatch: () => void) => Promise<void>;
   }): Promise<LoadedPlugin> {
     const { pluginId, requirements, child, bundle, clientBundle } = input;
+    this.observationEpoch++;
     const termination = observeChildTermination(child);
     const instanceId = randomUUID();
     const executionOwner = new PluginExecutionOwner(
@@ -1152,7 +1161,10 @@ export class PluginRuntime {
       },
     );
     childExecutionOwners.set(child, executionOwner);
-    child.on("close", () => executionOwner.terminated());
+    child.on("close", () => {
+      this.observationEpoch++;
+      executionOwner.terminated();
+    });
     const sessionHost = this.sessionHost;
     if (!sessionHost) throw new Error("Plugin Paseo session host is not attached");
     const outputCapture = new PluginOutputCapture(child, (stream, message) => {

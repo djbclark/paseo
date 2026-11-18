@@ -1,7 +1,17 @@
 import { PluginLoadedReceiptSchema, type PluginLoadedReceipt } from "@getpaseo/protocol/messages";
 import { PluginSourceSchema, type PluginSource } from "@getpaseo/protocol/plugin-config";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readdir, readFile, realpath, mkdir, writeFile, rename } from "node:fs/promises";
+import {
+  lstat,
+  readdir,
+  readFile,
+  open,
+  stat as statPath,
+  realpath,
+  mkdir,
+  writeFile,
+  rename,
+} from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
@@ -85,6 +95,9 @@ export class ManagedPluginActivationPolicy {
     private readonly policyFile: string | undefined,
     private readonly stateDirectory: string,
   ) {}
+  get configured(): boolean {
+    return this.policyFile !== undefined;
+  }
   private stateFile(id: string): string {
     return path.join(this.stateDirectory, `${encodeURIComponent(id)}.json`);
   }
@@ -95,6 +108,45 @@ export class ManagedPluginActivationPolicy {
       if (error instanceof Error && "code" in error && error.code === "ENOENT")
         return { version: 1, generation: 0, phase: "ready" };
       throw error;
+    }
+  }
+  async observeStatus(
+    id: string,
+  ): Promise<{ state: ManagedPluginActivationState; identity: string }> {
+    const file = await open(this.stateFile(id), "r");
+    try {
+      const before = await file.stat();
+      if (!before.isFile() || before.size > 65536)
+        throw new Error("Invalid plugin journal size/type");
+      const bytes = await file.readFile("utf8");
+      const after = await file.stat();
+      const named = await statPath(this.stateFile(id));
+      if (
+        named.dev !== after.dev ||
+        named.ino !== after.ino ||
+        named.mtimeMs !== after.mtimeMs ||
+        named.ctimeMs !== after.ctimeMs
+      )
+        throw new Error("Plugin journal was replaced during read");
+      if (
+        before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs ||
+        before.size !== after.size
+      )
+        throw new Error("Plugin journal changed during read");
+      return {
+        state: State.parse(JSON.parse(bytes)),
+        identity: JSON.stringify([
+          after.dev,
+          after.ino,
+          after.mtimeMs,
+          after.ctimeMs,
+          after.size,
+          createHash("sha256").update(bytes).digest("hex"),
+        ]),
+      };
+    } finally {
+      await file.close();
     }
   }
   private async save(id: string, state: z.infer<typeof State>): Promise<void> {

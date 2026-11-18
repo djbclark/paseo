@@ -84,5 +84,7 @@ async function respond(challenge: string): Promise<void> {
 }
 await assertEnclosingAuthorityUnchanged(initial);
 compilerRuntime = await import(path.join(root, "compiler-code.mjs"));
+if (typeof Reflect.get(compilerRuntime, "retireQualifiedCompilerTasks") !== "function")
+  throw new Error("Qualified compiler task retirement unavailable");
 initialized = true;
 for (const challenge of queued.splice(0)) await respond(challenge);

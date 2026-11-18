@@ -307,6 +307,18 @@ and native-library inventory. It is build evidence; the independently authentica
 completed run and later controller/evaluator proof supply the qualification decision.
 No running workflow authenticates itself or emits an ADE qualified snapshot receipt.
 
+The original owned IPC parent can request a read-only snapshot with exactly
+`{ "type": "qualified.measurement.request", "schemaVersion": 1, "nonce": "fresh-parent-nonce" }`.
+The fixed response echoes that nonce and reports `observed` data or `hold`; it never
+contains a capability or permission. It includes actual parent/child namespace rows,
+owned terminal identity and the fixed plugin observer's coherent full cohort plus
+settled cold compiler runs. Unknown, changed, incomplete or oversized facts hold.
+There is no command, path, work selector or requested identity in this request. Actual
+compilation and mutation remain on the native held FD operation lane.
+
+The endpoint validates collection counts and an encoded JSON payload limit of 16 MiB
+before sending. These are sender data bounds, not receiver IPC framing or heap limits.
+
 A successful distribution build does not establish native maintenance support. The
 reviewed native and plugin consumers must share the producer's exact module instance,
 actual daemon owner, retained terminal manager and owned compiler/child handles. The

@@ -1,6 +1,6 @@
 import { build, version as esbuildVersion } from "esbuild";
 import { createHash } from "node:crypto";
-import { builtinModules, createRequire } from "node:module";
+import { isBuiltin, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -43,7 +43,6 @@ function inputMetafile(meta, output) {
 }
 const require = createRequire(import.meta.url);
 const externals = ["node-pty", "sherpa-onnx-node", "onnxruntime-node", "esbuild", "typescript"];
-const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 const banner =
   'import {createRequire as __qualifiedRequire} from "node:module"; import {fileURLToPath as __qualifiedFile} from "node:url"; import {dirname as __qualifiedDirname} from "node:path"; const require=__qualifiedRequire(import.meta.url); const __filename=__qualifiedFile(import.meta.url); const __dirname=__qualifiedDirname(__filename);';
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
@@ -110,7 +109,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       for (const imported of emitted.imports) {
         if (
           imported.external &&
-          !builtins.has(imported.path) &&
+          !isBuiltin(imported.path) &&
           !externals.some((name) => imported.path === name || imported.path.startsWith(`${name}/`))
         )
           throw new Error(`Unknown qualified daemon external: ${imported.path}`);
@@ -195,6 +194,15 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       distributionBuildId,
       metafiles: allInputs,
       sourceInputs,
+      builtinDependencies: [
+        ...new Set(
+          Object.values(allInputs).flatMap((meta) =>
+            Object.values(meta.outputs).flatMap((row) =>
+              row.imports.filter((item) => isBuiltin(item.path)).map((item) => item.path),
+            ),
+          ),
+        ),
+      ].sort(),
       packageLockSha256: digest(await readFile(path.join(repositoryRoot, "package-lock.json"))),
       toolchain: {
         node: process.version,

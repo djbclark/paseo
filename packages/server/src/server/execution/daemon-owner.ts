@@ -19,7 +19,7 @@ import {
   verifyEnclosingProcess,
   unsupported,
 } from "./daemon-verifier.js";
-import type { QualifiedExecutionBinding } from "./types.js";
+import type { QualifiedExecutionBinding, HostEvidence } from "./types.js";
 import type {
   QualifiedDaemonOwner,
   OwnedObservation,
@@ -99,6 +99,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   const handles = new WeakMap<object, HandleRecord>();
   const observers = new Map<object, () => Promise<void>>();
   const terminals = new WeakMap<object, { child: ChildProcess; incarnation: string }>();
+  const pluginHosts = new WeakMap<object, HostEvidence>();
   let fresh = true;
   let failed = false;
   let pending: Promise<void> | null = null;
@@ -192,6 +193,58 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       return unsupported();
     if (kind === "compiler" && !Number.isInteger(observed.threadId)) return unsupported();
   }
+  function rememberPluginHost(
+    child: ChildProcess,
+    reply: OwnedObservation,
+    actual: Awaited<ReturnType<typeof observeLinuxProcess>>,
+  ): void {
+    const host = reply.hostEvidence;
+    if (
+      !host ||
+      host.schemaVersion !== 1 ||
+      host.role !== "plugin-host" ||
+      host.distributionBuildId !== initial.manifest.distributionBuildId ||
+      host.qualificationManifestSha256 !== initial.manifestSha256 ||
+      host.process.pid !== actual.pid ||
+      host.process.processStartToken !== reply.incarnation
+    )
+      return unsupported();
+    if (
+      host.process.bootId !== actual.bootId ||
+      host.process.osBirthIdentity !== actual.birth ||
+      host.runtime.observedExecutableIdentity !== actual.image ||
+      host.runtime.artifactId !== initial.manifest.runtime.sha256 ||
+      host.runtime.platform !== process.platform ||
+      host.runtime.arch !== process.arch
+    )
+      return unsupported();
+    assertPluginNamespaces(host);
+    pluginHosts.set(child, structuredClone(host));
+  }
+  function assertPluginNamespaces(host: HostEvidence): void {
+    const artifact = initial.manifest.files.find((row) => row.path === "plugin-worker-code.mjs");
+    const roleBuildId = `${initial.manifest.distributionBuildId}:plugin-child`;
+    if (
+      !artifact ||
+      host.roleBuildId !== roleBuildId ||
+      !Array.isArray(host.bindings) ||
+      !Array.isArray(host.helpers) ||
+      host.helpers.length
+    )
+      return unsupported();
+    if (
+      JSON.stringify(host.bindings.map((row) => row.bindingKey).sort()) !==
+      JSON.stringify(Object.keys(qualifiedBindings).sort())
+    )
+      return unsupported();
+    for (const row of host.bindings)
+      if (
+        row.moduleBuildId !== roleBuildId ||
+        row.artifactId !== artifact.sha256 ||
+        row.qualifiedOrigin !== `${root}/plugin-worker-code.mjs#${row.bindingKey}`
+      )
+        return unsupported();
+  }
   const owner = Object.freeze<QualifiedDaemonOwner>({
     binding,
     evidenceDigest,
@@ -228,6 +281,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         const observed = await exchange(port, challenge);
         const actual = await observeLinuxProcess(child.pid!);
         accept(observed, challenge, "plugin-child", actual);
+        rememberPluginHost(child, observed, actual);
         if (actual.executable !== path.join(root, "runtime/node")) return unsupported();
         const record: HandleRecord = {
           kind: "plugin-child",
@@ -249,6 +303,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           const now = await observeLinuxProcess(child.pid!);
           if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
           accept(result, nonce, "plugin-child", now, record.incarnation);
+          rememberPluginHost(child, result, now);
         });
         child.once("close", () => {
           record.alive = false;
@@ -265,13 +320,19 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           incarnation: record.incarnation,
           assertFresh: () => assertOwnedExecutionHandle(child, "plugin-child", record.incarnation),
           async challenge() {
-            assertOwnedExecutionHandle(child, "plugin-child", record.incarnation);
-            const nonce = randomUUID();
-            const result = await exchange(port, nonce, verifyReply);
-            const now = await observeLinuxProcess(child.pid!);
-            if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
-            accept(result, nonce, "plugin-child", now, record.incarnation);
-            return result;
+            try {
+              assertOwnedExecutionHandle(child, "plugin-child", record.incarnation);
+              const nonce = randomUUID();
+              const result = await exchange(port, nonce, verifyReply);
+              const now = await observeLinuxProcess(child.pid!);
+              if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
+              accept(result, nonce, "plugin-child", now, record.incarnation);
+              rememberPluginHost(child, result, now);
+              return result;
+            } catch (error) {
+              failed = true;
+              throw error;
+            }
           },
         });
       } catch (error) {
@@ -516,6 +577,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   if (!artifact) return unsupported();
   observations.set(owner, () => {
     assertFresh();
+    if (observers.size > 128) return unsupported();
     const ownedHandles = [...observers.keys()].map((handle) => {
       const record = handles.get(handle);
       if (!record) return unsupported();
@@ -528,6 +590,17 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         incarnation: record.incarnation,
       };
     });
+    const hosts = ownedHandles
+      .filter((row) => row.kind === "plugin-child")
+      .map((row) => {
+        const handle = [...observers.keys()].find((value) => {
+          if (value instanceof Worker) return false;
+          return (value as ChildProcess).pid === row.pid;
+        });
+        const host = handle ? pluginHosts.get(handle) : undefined;
+        if (!host) return unsupported();
+        return { pid: row.pid, incarnation: row.incarnation, hostEvidence: host };
+      });
     return {
       schemaVersion: 1,
       role: "daemon",
@@ -548,6 +621,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         qualifiedOrigin: `${root}/daemon.mjs#${bindingKey}`,
       })),
       ownedHandles,
+      pluginHosts: hosts,
     };
   });
   owners.add(owner);

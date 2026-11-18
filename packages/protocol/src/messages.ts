@@ -1539,7 +1539,10 @@ export const MaintenanceTransportAuthoritySchema = z.object({
   serverId: z.string(),
   daemonIncarnation: z.string().nullable(),
   qualified: z.boolean(),
-  features: z.object({ maintenanceReservationV1: z.boolean(), maintenancePluginOperationV1: z.boolean() }),
+  features: z.object({
+    maintenanceReservationV1: z.boolean(),
+    maintenancePluginOperationV1: z.boolean(),
+  }),
 });
 export const MaintenanceStatusSchema = z.object({
   schemaVersion: z.literal(1),
@@ -7319,7 +7322,15 @@ export const MaintenancePluginOperationResponseSchema = z.object({
   type: z.literal("daemon.maintenance.plugin.operation.response"),
   payload: z.object({
     requestId: z.string(),
-    result: z.object({ plugin: PluginListItemSchema, nativeGeneration: z.number().int().nonnegative(), maintenance: MaintenanceStatusSchema, serverId: z.string(), daemonIncarnation: z.string() }).nullable(),
+    result: z
+      .object({
+        plugin: PluginListItemSchema,
+        nativeGeneration: z.number().int().nonnegative(),
+        maintenance: MaintenanceStatusSchema,
+        serverId: z.string(),
+        daemonIncarnation: z.string(),
+      })
+      .nullable(),
     error: z.string().nullable(),
   }),
 });

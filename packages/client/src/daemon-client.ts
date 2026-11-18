@@ -6085,9 +6085,22 @@ export class DaemonClient {
     });
   }
 
-  async maintenancePluginOperation(input: Omit<Extract<SessionInboundMessage, { type: "daemon.maintenance.plugin.operation.request" }>, "type" | "requestId" | "schemaVersion">): Promise<Extract<SessionOutboundMessage, { type: "daemon.maintenance.plugin.operation.response" }>["payload"]> {
-    if (this.lastServerInfoMessage?.features?.maintenancePluginOperationV1 !== true) throw new Error("Host update required for held plugin operation");
-    return this.sendNamespacedCorrelatedSessionRequest({ message: { type: "daemon.maintenance.plugin.operation.request", schemaVersion: 1, ...input } });
+  async maintenancePluginOperation(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "daemon.maintenance.plugin.operation.request" }>,
+      "type" | "requestId" | "schemaVersion"
+    >,
+  ): Promise<
+    Extract<
+      SessionOutboundMessage,
+      { type: "daemon.maintenance.plugin.operation.response" }
+    >["payload"]
+  > {
+    if (this.lastServerInfoMessage?.features?.maintenancePluginOperationV1 !== true)
+      throw new Error("Host update required for held plugin operation");
+    return this.sendNamespacedCorrelatedSessionRequest({
+      message: { type: "daemon.maintenance.plugin.operation.request", schemaVersion: 1, ...input },
+    });
   }
 
   async reloadDaemonConfig(requestId?: string): Promise<DaemonConfigReloadResponse["payload"]> {

@@ -3259,15 +3259,23 @@ export class Session {
     try {
       if (!maintenance || process.platform === "win32")
         throw new Error("Maintenance reservation unsupported");
-      if (msg.type !== "daemon.maintenance.status.request") maintenance.assertTransport(msg, msg.type === "daemon.maintenance.end.request");
+      if (msg.type !== "daemon.maintenance.status.request")
+        maintenance.assertTransport(msg, msg.type === "daemon.maintenance.end.request");
       if (msg.type === "daemon.maintenance.plugin.operation.request") {
         const result = await maintenance.executePluginOperation(msg);
-        this.emit({ type: "daemon.maintenance.plugin.operation.response", payload: { requestId: msg.requestId, result, error: null } });
+        this.emit({
+          type: "daemon.maintenance.plugin.operation.response",
+          payload: { requestId: msg.requestId, result, error: null },
+        });
       } else if (msg.type === "daemon.maintenance.begin.request") {
         const result = await maintenance.begin(msg.generation, msg.transactionId);
         this.emit({
           type: "daemon.maintenance.begin.response",
-          payload: { requestId: msg.requestId, result: { ...result, authority: maintenance.transportAuthority() }, error: null },
+          payload: {
+            requestId: msg.requestId,
+            result: { ...result, authority: maintenance.transportAuthority() },
+            error: null,
+          },
         });
       } else {
         const result =
@@ -3279,7 +3287,11 @@ export class Session {
             msg.type === "daemon.maintenance.end.request"
               ? "daemon.maintenance.end.response"
               : "daemon.maintenance.status.response",
-          payload: { requestId: msg.requestId, result: { ...result, authority: maintenance.transportAuthority() }, error: null },
+          payload: {
+            requestId: msg.requestId,
+            result: { ...result, authority: maintenance.transportAuthority() },
+            error: null,
+          },
         });
       }
     } catch {
@@ -3306,7 +3318,8 @@ export class Session {
       case "daemon.maintenance.end.request":
       case "daemon.maintenance.plugin.operation.request":
         return this.handleMaintenanceRequest(msg);
-      default: return undefined;
+      default:
+        return undefined;
     }
   }
 

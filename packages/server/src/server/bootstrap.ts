@@ -722,7 +722,8 @@ async function createPaseoDaemonInExecutionContext(
   let pluginBootstrapWindow = false;
   const nativeMaintenance: NativePluginAdmission = {
     enterWork: () => maintenance.enter(),
-    runHeldOperation: (scope, expected, operation) => maintenance.runHeldOperation(scope, expected, operation),
+    runHeldOperation: (scope, expected, operation) =>
+      maintenance.runHeldOperation(scope, expected, operation),
     holdForUnknownWork: () => maintenance.holdForUnknownWork(),
     async runQualifiedInitialization(operation) {
       qualifiedDaemon.assertQualified();

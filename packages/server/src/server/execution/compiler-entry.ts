@@ -5,29 +5,43 @@ import path from "node:path";
 import { installCompilerHelperOwner } from "./compiler-helpers.js";
 import { verifyEnclosingProcess } from "./daemon-verifier.js";
 const root = path.dirname(fileURLToPath(import.meta.url));
-const port: unknown = workerData?.qualificationPort;
-if (!(port instanceof MessagePort)) throw new Error("Missing owned compiler observation channel");
+const transferred: unknown = workerData?.qualificationPort;
+if (!(transferred instanceof MessagePort))
+  throw new Error("Missing owned compiler observation channel");
+const port = transferred;
 const initial = await verifyEnclosingProcess(root);
 if (process.env.ESBUILD_BINARY_PATH !== path.join(root, "runtime/esbuild"))
   throw new Error("Unqualified compiler helper");
 // Ordinary compiler jobs stay on parentPort; this private channel cannot be a job.
 const helperOwner = await installCompilerHelperOwner(root, () => {
-  (port as MessagePort).postMessage({ type: "qualified.execution.unknown" });
+  port.postMessage({ type: "qualified.execution.unknown" });
 });
 const incarnation = randomUUID();
 const queued: string[] = [];
 let initialized = false;
+let stopping = false;
 port.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object") return;
   if (Reflect.get(raw, "type") === "qualified.execution.stop") {
+    const challenge = Reflect.get(raw, "challenge");
+    if (stopping || typeof challenge !== "string" || challenge.length > 128) return;
+    stopping = true;
     void helperOwner
       .stop()
       .then(() => {
-        (port as MessagePort).postMessage({ type: "qualified.execution.stopped" });
-        process.exit(0);
+        port.postMessage({
+          type: "qualified.execution.stopped",
+          challenge,
+          incarnation,
+          pid: process.pid,
+          threadId,
+          manifestSha256: initial.manifestSha256,
+          distributionBuildId: initial.manifest.distributionBuildId,
+        });
+        return process.exit(0);
       })
       .catch(() => {
-        (port as MessagePort).postMessage({ type: "qualified.execution.unknown" });
+        port.postMessage({ type: "qualified.execution.unknown" });
       });
     return;
   }
@@ -40,7 +54,7 @@ port.on("message", (raw: unknown) => {
 async function respond(challenge: string): Promise<void> {
   await verifyEnclosingProcess(root);
   await helperOwner.settled();
-  (port as MessagePort).postMessage({
+  port.postMessage({
     challenge,
     incarnation,
     pid: process.pid,

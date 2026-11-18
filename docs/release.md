@@ -288,7 +288,9 @@ permission. Source/dev and macOS/Electron launches remain unsupported.
 
 The v2 private owner binds actual namespace objects, process birth, owned handles and
 fresh challenges. `refresh()` performs asynchronous observations; synchronous assertions
-only consult that private state after the refresh. The stable runtime/helper/qualification
+only consult that private state after the refresh. Compiler close timeouts mark
+uncertainty; admitted work remains held until its separate actual helper-close and
+Worker-exit settlement promise completes. The stable runtime/helper/qualification
 closure triple is separate from the per-process evidence digest. JSON, markers, versions,
 independent role receipts and disk hashes cannot create the in-process capability.
 Preserve immutable retained roots for running processes; changing the visible install

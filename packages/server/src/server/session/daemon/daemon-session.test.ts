@@ -50,6 +50,23 @@ import type { HubRelationshipManagement } from "../../hub/relationship-controlle
 import type { SessionOutboundMessage } from "../../messages.js";
 import type { DaemonConfigReloadResult } from "../../daemon-config-store.js";
 
+function persistenceAuthorityCases() {
+  const cases: { operation: string; stage: string; mutation: string }[] = [];
+  for (const operation of ["begin", "end"]) {
+    for (const stage of ["file-fsync", "directory-fsync"]) {
+      for (const mutation of [
+        "cleanup",
+        "cleanup-completed",
+        "readiness",
+        "readiness-restored",
+        "support",
+      ])
+        cases.push({ operation, stage, mutation });
+    }
+  }
+  return cases;
+}
+
 function assertScopeRefusals(
   reservation: MaintenanceReservation,
   scope: HeldPluginOperationScope,
@@ -938,6 +955,98 @@ describe("maintenance filesystem failure and restart commit points", () => {
         expect(Boolean(stable.tokenDigest)).toBe(hasToken);
       } finally {
         finish();
+        resetFaults();
+        removeMaintenanceHome(home, { recursive: true, force: true });
+      }
+    },
+  );
+  test.each(persistenceAuthorityCases())(
+    "$operation $stage rejects changed $mutation without cancelling work or moving rename commit",
+    async ({ operation, stage, mutation }) => {
+      const home = makeMaintenanceHome(
+        maintenanceJoin(maintenanceTmpdir(), "maintenance-commit-authority-"),
+      );
+      let supported = true;
+      const participantEnd = vi.fn(async () => {});
+      const reservation = await MaintenanceReservation.create(home, async () => true, {
+        supportsV1: () => supported,
+        begin: async () => "held",
+        end: participantEnd,
+      });
+      const held = await reservation.begin(1, "stable-baseline");
+      if (operation === "begin") await reservation.end(1, held.ownerToken);
+      participantEnd.mockClear();
+      let reached!: () => void;
+      let resume!: () => void;
+      let finishCleanup!: () => void;
+      const reachedBoundary = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const persistenceGate = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const cleanupGate = new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      });
+      let paused = false;
+      let cleanupSettled = false;
+      let cleanup: Promise<void> | undefined;
+      const pause = async (matches: boolean) => {
+        if (matches && !paused) {
+          paused = true;
+          reached();
+          await persistenceGate;
+        }
+      };
+      vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
+        const handle = await unmockedMaintenanceIo.open(...args);
+        if (args[1] === "wx" || args[1] === "r")
+          installAwaitPause(handle, args[1] === "r", stage, pause);
+        return handle;
+      });
+      try {
+        const pending =
+          operation === "begin"
+            ? reservation.begin(2, "new-grant")
+            : reservation.end(1, held.ownerToken);
+        await reachedBoundary;
+        if (mutation === "cleanup" || mutation === "cleanup-completed") {
+          cleanup = reservation.runCleanup(async () => {
+            await cleanupGate;
+            cleanupSettled = true;
+          });
+          if (mutation === "cleanup-completed") {
+            finishCleanup();
+            await cleanup;
+          }
+        } else if (mutation === "support") supported = false;
+        else {
+          reservation.setReady(false);
+          if (mutation === "readiness-restored") reservation.setReady(true);
+        }
+        resume();
+        await expect(pending).rejects.toThrow();
+        expect(participantEnd).not.toHaveBeenCalled();
+        expect(reservation.status().state).toBe("recovery-required");
+        expect(() => reservation.enter()).toThrow();
+        if (mutation === "cleanup") expect(cleanupSettled).toBe(false);
+        const stored = JSON.parse(
+          readMaintenanceFile(maintenanceJoin(home, "maintenance-reservation.json"), "utf8"),
+        );
+        const committed = stage === "directory-fsync";
+        const hasToken = operation === "begin" ? committed : !committed;
+        expect(Boolean(stored.tokenDigest)).toBe(hasToken);
+        expect(stored.uncertain).not.toBe(true);
+        expect(stored.generation).toBe(operation === "begin" && committed ? 2 : 1);
+        const restarted = await MaintenanceReservation.create(home, async () => true);
+        expect(restarted.status().state).toBe(hasToken ? "recovery-required" : "idle");
+        // Only the test owner settles admitted cleanup; reservation never cancels it.
+        finishCleanup();
+        await cleanup;
+      } finally {
+        resume();
+        finishCleanup();
+        await cleanup;
         resetFaults();
         removeMaintenanceHome(home, { recursive: true, force: true });
       }

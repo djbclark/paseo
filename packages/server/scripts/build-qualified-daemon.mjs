@@ -10,7 +10,12 @@ const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]
 const banner =
   'import {createRequire as __qualifiedRequire} from "node:module"; import {fileURLToPath as __qualifiedFile} from "node:url"; import {dirname as __qualifiedDirname} from "node:path"; const require=__qualifiedRequire(import.meta.url); const __filename=__qualifiedFile(import.meta.url); const __dirname=__qualifiedDirname(__filename);';
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
-  if (!distributionBuildId) throw new Error("CI distribution identity required");
+  if (
+    !distributionBuildId ||
+    process.platform !== "linux" ||
+    !["x64", "arm64"].includes(process.arch)
+  )
+    throw new Error("Finite Linux CI distribution identity required");
   await mkdir(outDir, { recursive: true });
   const allInputs = {};
   const entries = [
@@ -90,7 +95,9 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
             metadataPath = path.join(current, "package.json");
             break;
           }
-        } catch {}
+        } catch {
+          /* Continue to the enclosing package boundary. */
+        }
         if (current === path.dirname(current)) throw new Error(`Missing package root: ${name}`);
         current = path.dirname(current);
       }
@@ -124,6 +131,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     "@getpaseo/protocol",
     "zod",
     `@esbuild/linux-${process.arch}`,
+    `sherpa-onnx-linux-${process.arch}`,
   ])
     await copyPackage(name, require);
   await cp(

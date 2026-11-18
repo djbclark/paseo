@@ -1,3 +1,4 @@
+import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { verifyEnclosingProcess, unsupported } from "./daemon-verifier.js";
@@ -80,6 +81,7 @@ function produce() {
     expectedClosure: launch.manifestSha256,
     expectedIncarnation: incarnation,
   });
+  installQualifiedPluginHelperGuard();
   branded.set(binding, { role: "plugin-host", binding });
   return Object.freeze({ binding, evidence, bindings: qualifiedBindings });
 }
@@ -236,17 +238,13 @@ export async function initializeQualifiedChildHost(): Promise<void> {
     if (
       now.manifestSha256 !== initial.manifestSha256 ||
       now.observed.birth !== initial.observed.birth ||
-      now.observed.image !== initial.observed.image
+      now.observed.image !== initial.observed.image ||
+      JSON.stringify(now.closure) !== JSON.stringify(initial.closure)
     )
       return unsupported();
     fresh = true;
   };
-  const activity = qualifiedBindings["@getpaseo/plugin/internal/activity"];
-  const install = activity ? Reflect.get(activity, "installQualifiedHelperAdmission") : undefined;
-  if (typeof install !== "function") return unsupported();
-  install(() => {
-    throw new Error("Qualified plugin external helper unsupported");
-  });
+  installQualifiedPluginHelperGuard();
   branded.set(binding, { role: "plugin-host", binding });
   current = Object.freeze({ binding, evidence, bindings: qualifiedBindings });
 }

@@ -475,7 +475,11 @@ export class MaintenanceReservation {
     return true;
   }
 
-  private persistenceAuthority(previous: RecordV1 | null, next: RecordV1, identity: MaintenanceIdentity): (committed: boolean) => void {
+  private persistenceAuthority(
+    previous: RecordV1 | null,
+    next: RecordV1,
+    identity: MaintenanceIdentity,
+  ): (committed: boolean) => void {
     const readinessRevision = this.readinessRevision;
     const activityRevision = this.activityRevision;
     return (committed) => {
@@ -484,8 +488,19 @@ export class MaintenanceReservation {
       // Check after the synchronous participant/producer assertions as well. No
       // async preparation may replace the sampled owner or admit even completed cleanup.
       this.assertNoUnknownWork();
-      if (!this.ready || this.readinessRevision !== readinessRevision || this.inFlight || this.activityRevision !== activityRevision) throw new Error("Maintenance work or readiness changed during persistence");
-      if (this.record !== (committed ? next : previous) || next.generation !== identity.generation || next.transactionId !== identity.transactionId) throw new Error("Maintenance persistence ownership changed");
+      if (
+        !this.ready ||
+        this.readinessRevision !== readinessRevision ||
+        this.inFlight ||
+        this.activityRevision !== activityRevision
+      )
+        throw new Error("Maintenance work or readiness changed during persistence");
+      if (
+        this.record !== (committed ? next : previous) ||
+        next.generation !== identity.generation ||
+        next.transactionId !== identity.transactionId
+      )
+        throw new Error("Maintenance persistence ownership changed");
     };
   }
 
@@ -521,7 +536,12 @@ export class MaintenanceReservation {
       if (knownBusy) throw new Error("Maintenance known busy");
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
-      const next: RecordV1 = { schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) };
+      const next: RecordV1 = {
+        schemaVersion: 1,
+        generation,
+        transactionId,
+        tokenDigest: digest(ownerToken),
+      };
       const validate = this.persistenceAuthority(this.record, next, identity);
       await this.storage(() => this.persist(next, false, validate));
       validate(true);
@@ -677,7 +697,11 @@ export class MaintenanceReservation {
     }
   }
 
-  private persist(record: RecordV1, uncertain = false, validate?: (committed: boolean) => void): Promise<void> {
+  private persist(
+    record: RecordV1,
+    uncertain = false,
+    validate?: (committed: boolean) => void,
+  ): Promise<void> {
     return this.writeAtomically(
       this.path,
       record,

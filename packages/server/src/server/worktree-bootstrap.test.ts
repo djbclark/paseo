@@ -438,10 +438,10 @@ describe("runWorktreeAutoTerminals", () => {
     const calls: CreateTerminalCall[] = [];
     const records: StubTerminalRecord[] = [];
     const manager = createStubTerminalManager(calls, records);
-    const reservation = new MaintenanceReservation(
+    const reservation = (await MaintenanceReservation.create(
       repoDir,
       async () => !runtimeStore.isRunning({ workspaceId: repoDir, scriptName: "web" }),
-    );
+    ));
     let started!: () => void;
     const creating = new Promise<void>((resolve) => {
       started = resolve;

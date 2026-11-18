@@ -6,6 +6,7 @@ import {
 } from "../../maintenance-participant.js";
 import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import * as maintenanceFs from "node:fs";
+import * as maintenanceIo from "node:fs/promises";
 import * as maintenanceOs from "node:os";
 import { verifyOfflineMaintenance } from "../../maintenance-offline.js";
 import { WorkspaceSetupRuntime } from "../../workspace-setup-runtime.js";
@@ -23,8 +24,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 vi.mock("node:fs", { spy: true });
+vi.mock("node:fs/promises", { spy: true });
 vi.mock("node:os", { spy: true });
 const unmockedMaintenanceFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+const unmockedMaintenanceIo = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
 import pino from "pino";
 import {
   DaemonSession,
@@ -552,9 +555,9 @@ describe("DaemonSession", () => {
 });
 
 describe("maintenance reservation admission", () => {
-  function fixture(quiet: () => Promise<boolean> = async () => true) {
+  async function fixture(quiet: () => Promise<boolean> = async () => true) {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "maintenance-"));
-    const reservation = new MaintenanceReservation(home, quiet);
+    const reservation = (await MaintenanceReservation.create(home, quiet));
     return {
       home,
       reservation,
@@ -562,7 +565,7 @@ describe("maintenance reservation admission", () => {
     };
   }
   test("persists only ownership digest, survives restart indefinitely, requires token and generation", async () => {
-    const f = fixture();
+    const f = await fixture();
     try {
       const held = await f.reservation.begin(1, "transaction");
       const persisted = readMaintenanceFile(
@@ -571,7 +574,7 @@ describe("maintenance reservation admission", () => {
       );
       expect(persisted).not.toContain(held.ownerToken);
       expect(JSON.stringify(f.reservation.status())).not.toContain(held.ownerToken);
-      const restarted = new MaintenanceReservation(f.home, async () => true);
+      const restarted = (await MaintenanceReservation.create(f.home, async () => true));
       expect(restarted.status().state).toBe("recovery-required");
       expect(() => restarted.enter()).toThrow();
       await expect(restarted.end(2, held.ownerToken)).rejects.toThrow();
@@ -584,7 +587,7 @@ describe("maintenance reservation admission", () => {
     }
   });
   test("serializes shared internal admission and never cancels existing work", async () => {
-    const f = fixture();
+    const f = await fixture();
     let finish!: () => void;
     const owner = {
       execute: () =>
@@ -606,10 +609,13 @@ describe("maintenance reservation admission", () => {
   });
   test("closes admission before awaiting observation, rejecting simultaneous begin and new work", async () => {
     let observed!: (quiet: boolean) => void;
-    const f = fixture(
+    let observing!: () => void;
+    const observingStarted = new Promise<void>((resolve) => { observing = resolve; });
+    const f = await fixture(
       () =>
         new Promise((resolve) => {
           observed = resolve;
+          observing();
         }),
     );
     try {
@@ -617,6 +623,7 @@ describe("maintenance reservation admission", () => {
       expect(() => f.reservation.enter()).toThrow();
       expect(f.reservation.status().state).toBe("held");
       await expect(f.reservation.begin(2, "second")).rejects.toThrow();
+      await observingStarted;
       observed(false);
       await expect(grant).rejects.toThrow();
       const release = f.reservation.enter();
@@ -627,7 +634,7 @@ describe("maintenance reservation admission", () => {
     }
   });
   test("direct internal manager calls share the held admission owner", async () => {
-    const f = fixture();
+    const f = await fixture();
     const manager = new AgentManager({
       logger: pino({ level: "silent" }),
       clients: createTestAgentClients(),
@@ -655,14 +662,14 @@ describe("maintenance reservation admission", () => {
     }
   });
   test("unknown observation fails closed without granting or expiring a hold", async () => {
-    const f = fixture(async () => {
+    const f = await fixture(async () => {
       throw new Error("unknown");
     });
     try {
       await expect(f.reservation.begin(1, "unknown")).rejects.toThrow();
       expect(f.reservation.status().state).toBe("recovery-required");
       expect(() => f.reservation.enter()).toThrow();
-      const restarted = new MaintenanceReservation(f.home, async () => true);
+      const restarted = (await MaintenanceReservation.create(f.home, async () => true));
       expect(restarted.status().state).toBe("recovery-required");
       expect(() => restarted.enter()).toThrow();
     } finally {
@@ -683,43 +690,27 @@ describe("maintenance filesystem failure and restart commit points", () => {
     "directory-close",
   ] as const;
   function resetFaults() {
-    for (const method of [
-      maintenanceFs.openSync,
-      maintenanceFs.writeFileSync,
-      maintenanceFs.fsyncSync,
-      maintenanceFs.closeSync,
-      maintenanceFs.renameSync,
-    ])
-      vi.mocked(method).mockReset();
+    vi.mocked(maintenanceIo.open).mockReset();
+    vi.mocked(maintenanceFs.renameSync).mockReset();
   }
   function inject(stage: (typeof stages)[number]) {
     let injected = false;
     const fail = (matches: boolean) => {
-      if (matches && !injected) {
-        injected = true;
-        throw new Error(`injected ${stage}`);
-      }
+      if (matches && !injected) { injected = true; throw new Error(`injected ${stage}`); }
     };
-    vi.mocked(maintenanceFs.openSync).mockImplementation((...args) => {
-      fail(
-        (stage === "temp-open" && args[1] === "wx") ||
-          (stage === "directory-open" && args[1] === "r"),
-      );
-      return unmockedMaintenanceFs.openSync(...args);
-    });
-    vi.mocked(maintenanceFs.writeFileSync).mockImplementation((...args) => {
-      fail(stage === "write");
-      return unmockedMaintenanceFs.writeFileSync(...args);
-    });
-    vi.mocked(maintenanceFs.fsyncSync).mockImplementation((fd) => {
-      const directory = unmockedMaintenanceFs.fstatSync(fd).isDirectory();
-      fail((stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory));
-      return unmockedMaintenanceFs.fsyncSync(fd);
-    });
-    vi.mocked(maintenanceFs.closeSync).mockImplementation((fd) => {
-      const directory = unmockedMaintenanceFs.fstatSync(fd).isDirectory();
-      fail((stage === "file-close" && !directory) || (stage === "directory-close" && directory));
-      return unmockedMaintenanceFs.closeSync(fd);
+    vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
+      fail((stage === "temp-open" && args[1] === "wx") || (stage === "directory-open" && args[1] === "r"));
+      const handle = await unmockedMaintenanceIo.open(...args);
+      if (args[1] === "wx" || args[1] === "r") {
+        const directory = args[1] === "r";
+        const write = handle.writeFile.bind(handle);
+        const sync = handle.sync.bind(handle);
+        const close = handle.close.bind(handle);
+        vi.spyOn(handle, "writeFile").mockImplementation(async (...writeArgs) => { fail(stage === "write"); return write(...writeArgs); });
+        vi.spyOn(handle, "sync").mockImplementation(async () => { fail((stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory)); return sync(); });
+        vi.spyOn(handle, "close").mockImplementation(async () => { fail((stage === "file-close" && !directory) || (stage === "directory-close" && directory)); return close(); });
+      }
+      return handle;
     });
     vi.mocked(maintenanceFs.renameSync).mockImplementation((...args) => {
       fail(stage === "rename");
@@ -731,7 +722,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
     async (stage) => {
       const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "begin-fault-"));
       try {
-        const reservation = new MaintenanceReservation(home, async () => true);
+        const reservation = (await MaintenanceReservation.create(home, async () => true));
         const previous = await reservation.begin(1, "previous");
         await reservation.end(1, previous.ownerToken);
         inject(stage);
@@ -742,7 +733,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
         });
         expect(() => reservation.enter()).toThrow();
         resetFaults();
-        const restarted = new MaintenanceReservation(home, async () => true);
+        const restarted = (await MaintenanceReservation.create(home, async () => true));
         const renamed = stage.startsWith("directory-");
         expect(restarted.status().state).toBe(renamed ? "recovery-required" : "idle");
         expect(restarted.status().generation).toBe(renamed ? 2 : 1);
@@ -757,7 +748,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
     async (stage) => {
       const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "end-fault-"));
       try {
-        const reservation = new MaintenanceReservation(home, async () => true);
+        const reservation = (await MaintenanceReservation.create(home, async () => true));
         const held = await reservation.begin(1, "held");
         inject(stage);
         await expect(reservation.end(1, held.ownerToken)).rejects.toThrow("injected");
@@ -767,7 +758,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
         });
         expect(() => reservation.enter()).toThrow();
         resetFaults();
-        const restarted = new MaintenanceReservation(home, async () => true);
+        const restarted = (await MaintenanceReservation.create(home, async () => true));
         expect(restarted.status().state).toBe(
           stage.startsWith("directory-") ? "idle" : "recovery-required",
         );
@@ -777,47 +768,102 @@ describe("maintenance filesystem failure and restart commit points", () => {
       }
     },
   );
+  test.each(stages.filter((stage) => stage !== "rename").flatMap((stage) => [
+    { stage, operation: "begin" as const }, { stage, operation: "end" as const },
+  ]))(
+    "UNKNOWN during $operation $stage preserves its actual commit boundary",
+    async ({ stage, operation }) => {
+      const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "end-unknown-await-"));
+      const reservation = await MaintenanceReservation.create(home, async () => true);
+      const held = await reservation.begin(1, "uncertain-durability");
+      if (operation === "begin") await reservation.end(1, held.ownerToken);
+      let started!: () => void;
+      let finish!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      let paused = false;
+      const pause = async (matches: boolean) => {
+        if (matches && !paused) { paused = true; started(); await gate; }
+      };
+      vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
+        await pause((stage === "temp-open" && args[1] === "wx") || (stage === "directory-open" && args[1] === "r"));
+        const handle = await unmockedMaintenanceIo.open(...args);
+        if (args[1] === "wx" || args[1] === "r") {
+          const directory = args[1] === "r";
+          const write = handle.writeFile.bind(handle);
+          const sync = handle.sync.bind(handle);
+          const close = handle.close.bind(handle);
+          vi.spyOn(handle, "writeFile").mockImplementation(async (...writeArgs) => { await pause(stage === "write"); return write(...writeArgs); });
+          vi.spyOn(handle, "sync").mockImplementation(async () => { await pause((stage === "file-fsync" && !directory) || (stage === "directory-fsync" && directory)); return sync(); });
+          vi.spyOn(handle, "close").mockImplementation(async () => {
+            // Pause after actual close: file-close is immediately before the atomic commit section.
+            await close();
+            await pause((stage === "file-close" && !directory) || (stage === "directory-close" && directory));
+          });
+        }
+        return handle;
+      });
+      try {
+        const pending = operation === "begin"
+          ? reservation.begin(2, "unknown-during-prepare")
+          : reservation.end(1, held.ownerToken);
+        await entered;
+        const beforeUnknown = JSON.parse(readMaintenanceFile(maintenanceJoin(home, "maintenance-reservation.json"), "utf8"));
+        const afterCommit = stage.startsWith("directory-");
+        const hasToken = operation === "begin" ? afterCommit : !afterCommit;
+        expect(Boolean(beforeUnknown.tokenDigest)).toBe(hasToken);
+        // Actual rename, rather than operation acknowledgment, determines the on-disk commit.
+        reservation.holdForUnknownWork();
+        expect(() => reservation.enter()).toThrow();
+        finish();
+        await expect(pending).rejects.toThrow("unknown");
+        const restarted = await MaintenanceReservation.create(home, async () => true);
+        expect(restarted.status().state).toBe("recovery-required");
+        const stable = JSON.parse(readMaintenanceFile(maintenanceJoin(home, "maintenance-reservation.json"), "utf8"));
+        expect(stable.uncertain).toBe(true);
+        expect(Boolean(stable.tokenDigest)).toBe(hasToken);
+      } finally { finish(); resetFaults(); removeMaintenanceHome(home, { recursive: true, force: true }); }
+    },
+  );
   test("fresh differs from established missing authority; dangling and ENOTDIR cannot mean fresh", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "authority-missing-"));
     try {
-      const reservation = new MaintenanceReservation(home, async () => true);
+      const reservation = (await MaintenanceReservation.create(home, async () => true));
       expect(reservation.status().state).toBe("idle");
       await reservation.begin(1, "established");
       const path = maintenanceJoin(home, "maintenance-reservation.json");
       maintenanceFs.unlinkSync(path);
-      expect(() => new MaintenanceReservation(home, async () => true)).toThrow("missing");
+      await expect(MaintenanceReservation.create(home, async () => true)).rejects.toThrow("missing");
       maintenanceFs.symlinkSync(maintenanceJoin(home, "absent"), path);
-      expect(() => new MaintenanceReservation(home, async () => true)).toThrow();
+      await expect(MaintenanceReservation.create(home, async () => true)).rejects.toThrow();
       const nonDirectory = maintenanceJoin(home, "file");
       maintenanceFs.writeFileSync(nonDirectory, "file");
-      expect(
-        () => new MaintenanceReservation(maintenanceJoin(nonDirectory, "child"), async () => true),
-      ).toThrow();
+      await expect(MaintenanceReservation.create(maintenanceJoin(nonDirectory, "child"), async () => true)).rejects.toThrow();
     } finally {
       removeMaintenanceHome(home, { recursive: true, force: true });
     }
   });
-  test("EACCES is never treated as fresh authority", () => {
+  test("EACCES is never treated as fresh authority", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "authority-access-"));
     try {
-      vi.mocked(maintenanceFs.lstatSync).mockImplementationOnce(() => {
+      vi.mocked(maintenanceIo.lstat).mockImplementationOnce(async () => {
         throw Object.assign(new Error("denied"), { code: "EACCES" });
       });
-      expect(() => new MaintenanceReservation(home, async () => true)).toThrow("denied");
+      await expect(MaintenanceReservation.create(home, async () => true)).rejects.toThrow("denied");
     } finally {
-      vi.mocked(maintenanceFs.lstatSync).mockReset();
+      vi.mocked(maintenanceIo.lstat).mockReset();
       removeMaintenanceHome(home, { recursive: true, force: true });
     }
   });
   test("enrollment committed before a first-record failure prevents restart treating home as fresh", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "enrollment-fault-"));
     try {
-      const reservation = new MaintenanceReservation(home, async () => true);
+      const reservation = (await MaintenanceReservation.create(home, async () => true));
       inject("directory-fsync");
       await expect(reservation.begin(1, "first")).rejects.toThrow();
       expect(reservation.status().state).toBe("recovery-required");
       resetFaults();
-      expect(() => new MaintenanceReservation(home, async () => true)).toThrow("missing");
+      await expect(MaintenanceReservation.create(home, async () => true)).rejects.toThrow("missing");
     } finally {
       resetFaults();
       removeMaintenanceHome(home, { recursive: true, force: true });
@@ -827,7 +873,7 @@ describe("maintenance filesystem failure and restart commit points", () => {
 
 describe("protected offline maintenance authority", () => {
   const account = maintenanceOs.userInfo();
-  function fixture() {
+  async function fixture() {
     const home = makeMaintenanceHome(maintenanceJoin(account.homedir, "maintenance-proof-"));
     const directory = maintenanceJoin(home, ".paseo");
     maintenanceFs.mkdirSync(directory, { mode: 0o700 });
@@ -853,82 +899,82 @@ describe("protected offline maintenance authority", () => {
       verify: () => verifyOfflineMaintenance(7, "protected-journal"),
       close: () => {
         vi.mocked(maintenanceOs.userInfo).mockReset();
-        vi.mocked(maintenanceFs.readSync).mockReset();
+        vi.mocked(maintenanceIo.open).mockReset();
         vi.restoreAllMocks();
         removeMaintenanceHome(home, { recursive: true, force: true });
       },
     };
   }
-  test("accepts only matching protected persisted hold and returns no digest/token", () => {
-    const f = fixture();
+  test("accepts only matching protected persisted hold and returns no digest/token", async () => {
+    const f = await fixture();
     try {
-      expect(f.verify()).toEqual({
+      expect(await f.verify()).toEqual({
         schemaVersion: 1,
         generation: 7,
         transactionId: "protected-journal",
         state: "recovery-required",
         recoveryRequired: true,
       });
-      expect(() => verifyOfflineMaintenance(8, "protected-journal")).toThrow();
-      expect(() => verifyOfflineMaintenance(7, "candidate-transaction")).toThrow();
+      await expect(verifyOfflineMaintenance(8, "protected-journal")).rejects.toThrow();
+      await expect(verifyOfflineMaintenance(7, "candidate-transaction")).rejects.toThrow();
       maintenanceFs.writeFileSync(f.path, JSON.stringify({ ...f.record, tokenDigest: null }));
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
     } finally {
       f.close();
     }
   });
-  test("rejects writable directories and readable records", () => {
-    const f = fixture();
+  test("rejects writable directories and readable records", async () => {
+    const f = await fixture();
     try {
       maintenanceFs.chmodSync(f.directory, 0o777);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
       maintenanceFs.chmodSync(f.directory, 0o700);
       maintenanceFs.chmodSync(f.path, 0o644);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
     } finally {
       f.close();
     }
   });
-  test("rejects record ownership mismatch and size instability", () => {
-    const f = fixture();
+  test("rejects record ownership mismatch and size instability", async () => {
+    const f = await fixture();
     try {
-      vi.mocked(maintenanceFs.fstatSync).mockImplementationOnce(((
-        ...args: Parameters<typeof maintenanceFs.fstatSync>
-      ) => {
-        const stat = unmockedMaintenanceFs.fstatSync(...args);
-        return Object.assign(stat, { uid: account.uid + 1 });
-      }) as typeof maintenanceFs.fstatSync);
-      expect(f.verify).toThrow();
-      vi.mocked(maintenanceFs.fstatSync).mockReset();
+      vi.mocked(maintenanceIo.open).mockImplementationOnce(async (...args) => {
+        const handle = await unmockedMaintenanceIo.open(...args);
+        const stat = handle.stat.bind(handle);
+        vi.spyOn(handle, "stat").mockImplementationOnce(async () => Object.assign(await stat(), { uid: account.uid + 1 }));
+        return handle;
+      });
+      await expect(f.verify()).rejects.toThrow();
+      vi.mocked(maintenanceIo.open).mockReset();
       maintenanceFs.writeFileSync(f.path, "x".repeat(4097));
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
     } finally {
-      vi.mocked(maintenanceFs.fstatSync).mockReset();
+      vi.mocked(maintenanceIo.open).mockReset();
       f.close();
     }
   });
-  test("rejects final symlinks, ancestor symlinks and hardlinked authority", () => {
-    const f = fixture();
+  test("rejects final symlinks, ancestor symlinks and hardlinked authority", async () => {
+    const f = await fixture();
     try {
       const original = maintenanceJoin(f.home, "original");
       maintenanceFs.renameSync(f.path, original);
       maintenanceFs.symlinkSync(original, f.path);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
       maintenanceFs.unlinkSync(f.path);
       maintenanceFs.linkSync(original, f.path);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
       maintenanceFs.unlinkSync(f.path);
       maintenanceFs.renameSync(original, f.path);
       const previous = maintenanceJoin(f.home, "previous");
       maintenanceFs.renameSync(f.directory, previous);
       maintenanceFs.symlinkSync(previous, f.directory);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
     } finally {
       f.close();
     }
   });
-  test("rejects unknown schema, digest and candidate-added approval fields", () => {
-    const f = fixture();
+  test("rejects unknown schema, digest and candidate-added approval fields", async () => {
+    const f = await fixture();
     try {
       for (const record of [
         { ...f.record, schemaVersion: 2 },
@@ -936,89 +982,69 @@ describe("protected offline maintenance authority", () => {
         { ...f.record, approved: true },
       ]) {
         maintenanceFs.writeFileSync(f.path, JSON.stringify(record));
-        expect(f.verify).toThrow();
+        await expect(f.verify()).rejects.toThrow();
       }
     } finally {
       f.close();
     }
   });
   test("ignores HOME override, rejects missing enrollment/established record and nonregular FIFO promptly", async () => {
-    const f = fixture();
+    const f = await fixture();
     const previousHome = process.env.HOME;
     try {
       process.env.HOME = "/candidate-controlled-home";
-      expect(f.verify().generation).toBe(7);
+      expect((await f.verify()).generation).toBe(7);
       maintenanceFs.unlinkSync(maintenanceJoin(f.directory, "maintenance-enrollment.json"));
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
       maintenanceFs.writeFileSync(
         maintenanceJoin(f.directory, "maintenance-enrollment.json"),
         JSON.stringify({ schemaVersion: 1, component: "paseo-maintenance" }),
         { mode: 0o600 },
       );
       maintenanceFs.unlinkSync(f.path);
-      expect(f.verify).toThrow();
+      await expect(f.verify()).rejects.toThrow();
       const { execFileSync } = await import("node:child_process");
       execFileSync("mkfifo", [f.path], { timeout: 1000 });
-      const opened = vi.mocked(maintenanceFs.openSync).mock.calls.length;
-      expect(f.verify).toThrow("Nonregular");
-      expect(vi.mocked(maintenanceFs.openSync).mock.calls.length).toBe(opened + 1); // Enrollment alone opened; FIFO never opened.
+      const opened = vi.mocked(maintenanceIo.open).mock.calls.length;
+      await expect(f.verify()).rejects.toThrow("Nonregular");
+      expect(vi.mocked(maintenanceIo.open).mock.calls.length).toBe(opened + 1); // Enrollment alone opened; FIFO never opened.
     } finally {
       restoreEnv("HOME", previousHome);
       f.close();
     }
   }, 2000);
-  test("rejects record replacement during read", () => {
-    const f = fixture();
+  test.each(["record", "ancestor"] as const)("rejects %s replacement during async read", async (target) => {
+    const f = await fixture();
     try {
-      vi.mocked(maintenanceFs.readSync).mockImplementation(((
-        ...args: Parameters<typeof maintenanceFs.readSync>
-      ) => {
-        const bytes = unmockedMaintenanceFs.readSync(...args);
-        if (
-          !Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength)
-            .toString("utf8")
-            .includes("tokenDigest")
-        )
-          return bytes;
-        maintenanceFs.unlinkSync(f.path);
-        maintenanceFs.writeFileSync(f.path, JSON.stringify(f.record), { mode: 0o600 });
-        return bytes;
-      }) as typeof maintenanceFs.readSync);
-      expect(f.verify).toThrow();
-    } finally {
-      f.close();
-    }
-  });
-  test("rejects a protected ancestor replaced during read", () => {
-    const f = fixture();
-    try {
-      vi.mocked(maintenanceFs.readSync).mockImplementation(((
-        ...args: Parameters<typeof maintenanceFs.readSync>
-      ) => {
-        const bytes = unmockedMaintenanceFs.readSync(...args);
-        if (
-          !Buffer.from(args[1].buffer, args[1].byteOffset, args[1].byteLength)
-            .toString("utf8")
-            .includes("tokenDigest")
-        )
-          return bytes;
-        const previous = maintenanceJoin(f.home, "previous");
-        maintenanceFs.renameSync(f.directory, previous);
-        maintenanceFs.mkdirSync(f.directory, { mode: 0o700 });
-        maintenanceFs.renameSync(maintenanceJoin(previous, "maintenance-reservation.json"), f.path);
-        return bytes;
-      }) as typeof maintenanceFs.readSync);
-      expect(f.verify).toThrow();
-    } finally {
-      f.close();
-    }
+      vi.mocked(maintenanceIo.open).mockImplementation(async (...args) => {
+        const handle = await unmockedMaintenanceIo.open(...args);
+        if (args[0] === f.path) {
+          const read = handle.read.bind(handle);
+          vi.spyOn(handle, "read").mockImplementation(async (...readArgs: Parameters<typeof read>) => {
+            const result = await read(...readArgs);
+            if (target === "record") {
+              maintenanceFs.unlinkSync(f.path);
+              maintenanceFs.writeFileSync(f.path, JSON.stringify(f.record), { mode: 0o600 });
+            } else {
+              const previous = maintenanceJoin(f.home, "previous");
+              maintenanceFs.renameSync(f.directory, previous);
+              maintenanceFs.mkdirSync(f.directory, { mode: 0o700 });
+              maintenanceFs.renameSync(maintenanceJoin(previous, "maintenance-reservation.json"), f.path);
+            }
+            return result;
+          });
+        }
+        return handle;
+      });
+      await expect(f.verify()).rejects.toThrow();
+    } finally { f.close(); }
   });
 });
 
 describe("shared workspace setup maintenance admission", () => {
   test("tracks setup across awaits, then refuses a direct internal start while held", async () => {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "setup-maintenance-"));
-    const reservation = new MaintenanceReservation(home, async () => true);
+    const reservation = (await MaintenanceReservation.create(home, async () => true));
     const setup = new WorkspaceSetupRuntime(reservation);
     let started!: () => void;
     const began = new Promise<void>((resolve) => {
@@ -1055,17 +1081,17 @@ describe("shared workspace setup maintenance admission", () => {
 
 // Participant mechanism units only. These stubs are never production qualification evidence.
 describe("native maintenance participant serialization", () => {
-  function fixture(port: PluginMaintenancePort, quiet = async () => true) {
+  async function fixture(port: PluginMaintenancePort, quiet = async () => true) {
     const home = makeMaintenanceHome(maintenanceJoin(maintenanceTmpdir(), "participant-"));
     return {
       home,
-      reservation: new MaintenanceReservation(home, quiet, port),
+      reservation: (await MaintenanceReservation.create(home, quiet, port)),
       close: () => removeMaintenanceHome(home, { recursive: true, force: true }),
     };
   }
   test("known participant busy reopens only an unpublished attempt", async () => {
     const end = vi.fn(async () => {});
-    const f = fixture({ supportsV1: () => true, begin: async () => "known-busy", end });
+    const f = await fixture({ supportsV1: () => true, begin: async () => "known-busy", end });
     try {
       await expect(f.reservation.begin(1, "busy")).rejects.toThrow();
       expect(f.reservation.status().state).toBe("idle");
@@ -1088,7 +1114,7 @@ describe("native maintenance participant serialization", () => {
       });
       let calls = 0;
       const end = vi.fn(async () => {});
-      const f = fixture(
+      const f = await fixture(
         {
           supportsV1: () => true,
           begin: async () => {
@@ -1121,7 +1147,7 @@ describe("native maintenance participant serialization", () => {
         );
         expect(record.uncertain).toBe(true);
         expect(record.tokenDigest).toBeNull();
-        expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe(
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
         );
         expect(() => f.reservation.enter()).toThrow();
@@ -1149,7 +1175,7 @@ describe("native maintenance participant serialization", () => {
           await gate;
         }
       });
-      const f = fixture({
+      const f = await fixture({
         supportsV1: () => true,
         begin: async () => {
           if (ending && phase === "check") {
@@ -1174,7 +1200,7 @@ describe("native maintenance participant serialization", () => {
         );
         expect(record.uncertain).toBe(true);
         expect(Boolean(record.tokenDigest)).toBe(phase === "check");
-        expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe(
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
         );
         expect(() => f.reservation.enter()).toThrow();
@@ -1185,7 +1211,7 @@ describe("native maintenance participant serialization", () => {
     },
   );
   test("initial known-busy with unconfirmed rollback holds instead of reopening", async () => {
-    const f = fixture({
+    const f = await fixture({
       supportsV1: () => true,
       begin: async () => "known-busy",
       end: async () => {
@@ -1195,7 +1221,7 @@ describe("native maintenance participant serialization", () => {
     try {
       await expect(f.reservation.begin(1, "busy-rollback-failed")).rejects.toThrow("rollback");
       expect(f.reservation.status().state).toBe("recovery-required");
-      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe(
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
         "recovery-required",
       );
     } finally {
@@ -1207,7 +1233,7 @@ describe("native maintenance participant serialization", () => {
     const end = vi.fn(async () => {
       if (fail) throw new Error("lost rollback ACK");
     });
-    const f = fixture(
+    const f = await fixture(
       { supportsV1: () => true, begin: async () => "held", end },
       async () => false,
     );
@@ -1219,7 +1245,7 @@ describe("native maintenance participant serialization", () => {
       await expect(f.reservation.begin(1, "uncertain")).rejects.toThrow();
       expect(f.reservation.status().state).toBe("recovery-required");
       expect(() => f.reservation.enter()).toThrow();
-      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe(
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
         "recovery-required",
       );
     } finally {
@@ -1232,7 +1258,7 @@ describe("native maintenance participant serialization", () => {
       .mockResolvedValueOnce("held")
       .mockResolvedValueOnce("unknown");
     const end = vi.fn(async () => {});
-    const f = fixture({ supportsV1: () => true, begin, end });
+    const f = await fixture({ supportsV1: () => true, begin, end });
     try {
       await expect(f.reservation.begin(1, "changed-cohort")).rejects.toThrow();
       expect(end).not.toHaveBeenCalled();
@@ -1261,7 +1287,7 @@ describe("native maintenance participant serialization", () => {
         await gate;
       },
     };
-    const f = fixture(port);
+    const f = await fixture(port);
     try {
       const held = await f.reservation.begin(1, "owner");
       const count = calls.length;
@@ -1282,7 +1308,7 @@ describe("native maintenance participant serialization", () => {
     }
   });
   test("participant END uncertainty closes current process; restart honors actual authorized idle commit", async () => {
-    const f = fixture({
+    const f = await fixture({
       supportsV1: () => true,
       begin: async () => "held",
       end: async () => {
@@ -1294,7 +1320,7 @@ describe("native maintenance participant serialization", () => {
       await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow();
       expect(f.reservation.status().state).toBe("recovery-required");
       expect(() => f.reservation.enter()).toThrow();
-      expect(new MaintenanceReservation(f.home, async () => true).status().state).toBe("idle");
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("idle");
     } finally {
       f.close();
     }
@@ -1311,11 +1337,11 @@ describe("native maintenance participant serialization", () => {
         calls.push("end");
       },
     };
-    const f = fixture(port);
+    const f = await fixture(port);
     try {
       const owner = await f.reservation.begin(1, "restart");
       calls.length = 0;
-      const restored = new MaintenanceReservation(f.home, async () => true, port);
+      const restored = (await MaintenanceReservation.create(f.home, async () => true, port));
       restored.setReady(false);
       await restored.restoreParticipantBeforeStart();
       await restored.runQualifiedInitialization(async () => {

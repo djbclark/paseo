@@ -340,7 +340,7 @@ describe("ScheduleService", () => {
   });
 
   test("manual and timed schedule execution share admission across runner and persistence", async () => {
-    const reservation = new MaintenanceReservation(tempDir, async () => true);
+    const reservation = (await MaintenanceReservation.create(tempDir, async () => true));
     let started!: () => void;
     const began = new Promise<void>((resolve) => {
       started = resolve;

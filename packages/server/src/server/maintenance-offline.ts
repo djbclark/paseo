@@ -1,4 +1,5 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, type Stats } from "node:fs";
+import { constants, type Stats } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, parse } from "node:path";
 
@@ -43,17 +44,17 @@ function assertStableRecord(before: Stats, after: Stats, afterPath: Stats): void
 }
 
 /** The caller chooses only a trusted daemon configuration home, never a candidate path. */
-export function readProtectedMaintenanceJson(
+export async function readProtectedMaintenanceJson(
   home: string,
   name: "maintenance-enrollment.json" | "maintenance-reservation.json",
-): unknown {
+): Promise<unknown> {
   const account = userInfo();
   const path = join(home, name);
-  function checkAncestors() {
+  async function checkAncestors() {
     const snapshots: { path: string; dev: number; ino: number; mode: number; uid: number }[] = [];
     let ancestor = dirname(path);
     while (true) {
-      const stat = lstatSync(ancestor);
+      const stat = await lstat(ancestor);
       if (
         !stat.isDirectory() ||
         stat.isSymbolicLink() ||
@@ -73,13 +74,13 @@ export function readProtectedMaintenanceJson(
     }
     return snapshots;
   }
-  const ancestorsBefore = checkAncestors();
+  const ancestorsBefore = await checkAncestors();
   let beforePath;
   try {
-    beforePath = lstatSync(path);
+    beforePath = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      if (JSON.stringify(ancestorsBefore) !== JSON.stringify(checkAncestors()))
+      if (JSON.stringify(ancestorsBefore) !== JSON.stringify(await checkAncestors()))
         throw new Error("Maintenance authority changed", { cause: error });
       return MISSING_MAINTENANCE_AUTHORITY;
     }
@@ -87,24 +88,24 @@ export function readProtectedMaintenanceJson(
   }
   if (!beforePath.isFile() || beforePath.isSymbolicLink())
     throw new Error("Nonregular maintenance authority");
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const before = fstatSync(fd);
+    const before = await fd.stat();
     validateProtectedRecord(before, beforePath, account.uid);
     const bytes = Buffer.alloc(4097);
-    const length = readSync(fd, bytes, 0, bytes.length, null);
+    const { bytesRead: length } = await fd.read(bytes, 0, bytes.length, null);
     if (length !== before.size || length > 4096)
       throw new Error("Unstable maintenance authority size");
     const record: unknown = JSON.parse(bytes.subarray(0, length).toString("utf8"));
-    const after = fstatSync(fd);
-    const afterPath = lstatSync(path);
-    const ancestorsAfter = checkAncestors();
+    const after = await fd.stat();
+    const afterPath = await lstat(path);
+    const ancestorsAfter = await checkAncestors();
     if (JSON.stringify(ancestorsBefore) !== JSON.stringify(ancestorsAfter))
       throw new Error("Maintenance authority ancestors changed");
     assertStableRecord(before, after, afterPath);
     return record;
   } finally {
-    closeSync(fd);
+    await fd.close();
   }
 }
 
@@ -145,13 +146,13 @@ export function validateMaintenanceEnrollment(value: unknown): void {
 }
 
 /** Fixed real-account authority; HOME, CLI flags and artifacts cannot select this home. */
-export function verifyOfflineMaintenance(generation: number, transactionId: string) {
+export async function verifyOfflineMaintenance(generation: number, transactionId: string) {
   const home = join(userInfo().homedir, ".paseo");
-  validateMaintenanceEnrollment(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
+  validateMaintenanceEnrollment(await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
   const record = parseMaintenanceRecord(
-    readProtectedMaintenanceJson(home, "maintenance-reservation.json"),
+    await readProtectedMaintenanceJson(home, "maintenance-reservation.json"),
   );
-  validateMaintenanceEnrollment(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
+  validateMaintenanceEnrollment(await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"));
   if (
     !Number.isSafeInteger(generation) ||
     generation <= 0 ||

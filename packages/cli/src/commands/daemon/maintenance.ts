@@ -6,7 +6,7 @@ import { addJsonAndDaemonHostOptions, addJsonOption } from "../../utils/command-
 import { withOutput, type CommandOptions, type OutputSchema } from "../../output/index.js";
 
 type Status =
-  | ReturnType<typeof verifyOfflineMaintenance>
+  | Awaited<ReturnType<typeof verifyOfflineMaintenance>>
   | {
       schemaVersion: 1;
       state: "idle" | "held" | "recovery-required";
@@ -83,7 +83,7 @@ export function daemonMaintenanceCommand(): Command {
       try {
         return {
           type: "single" as const,
-          data: verifyOfflineMaintenance(
+          data: await verifyOfflineMaintenance(
             generation(String(options.generation ?? "")),
             String(options.transactionId ?? ""),
           ),

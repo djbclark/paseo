@@ -9599,9 +9599,9 @@ test.each(["archive", "unarchive"] as const)(
     }
     const client = new ControlledNativeClient();
     const manager = new AgentManager({ clients: { codex: client }, registry: storage, logger });
-    const reservation = new MaintenanceReservation(workdir, async () =>
+    const reservation = (await MaintenanceReservation.create(workdir, async () =>
       manager.isMaintenanceQuiet(),
-    );
+    ));
     manager.installMaintenanceReservation(reservation);
     try {
       const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {});

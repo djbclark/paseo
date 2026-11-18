@@ -12,7 +12,8 @@ import {
   type MaintenanceRecord,
 } from "./maintenance-offline.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { renameSync } from "node:fs";
+import { open, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface MaintenanceStatus {
@@ -44,20 +45,33 @@ export class MaintenanceReservation {
   private failed = false;
   private readonly path: string;
 
-  private ready = true;
+  private ready = false;
+  private revision = 0;
+  private storageTail: Promise<void> = Promise.resolve();
   private enrolled = false;
   private attempt: { generation: number; transactionId: string } | null = null;
-  constructor(
+  private constructor(
     private readonly home: string,
     private readonly isQuiet: () => Promise<boolean>,
     private participant: PluginMaintenancePort = emptyMaintenanceParticipant,
   ) {
     this.path = join(home, "maintenance-reservation.json");
-    const enrollment = readProtectedMaintenanceJson(home, "maintenance-enrollment.json");
-    const stored = readProtectedMaintenanceJson(home, "maintenance-reservation.json");
+  }
+
+  static async create(home: string, isQuiet: () => Promise<boolean>, participant: PluginMaintenancePort = emptyMaintenanceParticipant): Promise<MaintenanceReservation> {
+    const reservation = new MaintenanceReservation(home, isQuiet, participant);
+    await reservation.load();
+    reservation.ready = true;
+    return reservation;
+  }
+
+  private async load(): Promise<void> {
+    const home = this.home;
+    const enrollment = await readProtectedMaintenanceJson(home, "maintenance-enrollment.json");
+    const stored = await readProtectedMaintenanceJson(home, "maintenance-reservation.json");
     if (
       JSON.stringify(enrollment) !==
-      JSON.stringify(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"))
+      JSON.stringify(await readProtectedMaintenanceJson(home, "maintenance-enrollment.json"))
     )
       throw new Error("Maintenance enrollment changed");
     if (enrollment !== MISSING_MAINTENANCE_AUTHORITY) {
@@ -77,26 +91,31 @@ export class MaintenanceReservation {
   holdForUnknownWork(): void {
     this.failed = true;
     this.recovery = true;
-    this.enroll();
-    this.persist({
-      ...(this.record ?? {
-        schemaVersion: 1,
-        generation: 0,
-        transactionId: null,
-        tokenDigest: null,
-      }),
-      uncertain: true,
-    });
+    this.revision++;
+    let authority = this.record ?? { schemaVersion: 1 as const, generation: 0, transactionId: null, tokenDigest: null };
+    if (this.attempt && !this.record?.tokenDigest) authority = { schemaVersion: 1, ...this.attempt, tokenDigest: null };
+    this.record = { ...authority, uncertain: true };
+    // The synchronous latch closes admission immediately. The queued write is not
+    // crash proof until its actual rename; callers awaiting an operation drain it.
+    void this.storage(async () => {
+      await this.enroll(true);
+      await this.persist(this.record!, true);
+    }).catch(() => {});
   }
 
-  private enroll(): void {
+  async flushStorage(): Promise<void> { await this.storageTail; }
+
+  private storage<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.storageTail.then(operation);
+    this.storageTail = result.then(() => {}, () => {});
+    return result;
+  }
+
+  private async enroll(uncertain = false): Promise<void> {
     if (this.enrolled) return;
-    this.writeAtomically(join(this.home, "maintenance-enrollment.json"), {
-      schemaVersion: 1,
-      component: "paseo-maintenance",
-    });
+    await this.writeAtomically(join(this.home, "maintenance-enrollment.json"), { schemaVersion: 1, component: "paseo-maintenance" }, undefined, uncertain);
     this.enrolled = true;
-    this.persist({ schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null });
+    await this.persist(this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null }, uncertain);
   }
 
   isReady(): boolean {
@@ -304,35 +323,21 @@ export class MaintenanceReservation {
     this.attempt = identity;
     let knownBusy = false;
     try {
-      this.enroll();
+      await this.storage(() => this.enroll());
+      this.assertNoUnknownWork();
       knownBusy = !(await this.prepareParticipant(identity));
       if (knownBusy) throw new Error("Maintenance known busy");
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
-      this.persist({
-        schemaVersion: 1,
-        generation,
-        transactionId,
-        tokenDigest: digest(ownerToken),
-      });
+      await this.storage(() => this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) }));
+      this.assertNoUnknownWork();
       this.recovery = false;
       this.pending = false;
       return { ...this.status(), ownerToken };
     } catch (error) {
       if (!knownBusy) {
-        const failedPersistence = this.failed;
-        this.failed = true;
-        this.recovery = true;
-        // No owner token was issued. Preserve uncertainty across restart where
-        // storage works; do not retry/overwrite a failed persistence commit point.
-        if (!failedPersistence && !this.record?.tokenDigest)
-          this.persist({
-            schemaVersion: 1,
-            generation,
-            transactionId,
-            tokenDigest: null,
-            uncertain: true,
-          });
+        if (!this.failed) this.holdForUnknownWork();
+        await this.storageTail;
         // Unknown never releases a possibly established participant barrier.
       }
       throw error;
@@ -372,7 +377,8 @@ export class MaintenanceReservation {
       if (fresh !== "held" || !this.participant.supportsV1())
         throw new Error("Maintenance participant not safely held");
       this.assertNoUnknownWork();
-      this.persist({ ...record, tokenDigest: null });
+      await this.storage(() => this.persist({ ...record, tokenDigest: null }));
+      this.assertNoUnknownWork();
       await this.participant.end(identity);
       this.assertNoUnknownWork();
       this.recovery = false;
@@ -381,6 +387,7 @@ export class MaintenanceReservation {
         this.failed = true;
         this.recovery = true;
       }
+      await this.storageTail;
       // The stable idle rename remains authorized release on restart. No automatic
       // rollback, bearer replay, participant END retry or second journal is introduced.
       throw error;
@@ -390,47 +397,41 @@ export class MaintenanceReservation {
     return this.status();
   }
 
-  private persist(record: RecordV1): void {
-    this.writeAtomically(this.path, record, () => {
-      this.record = record;
-    });
+  private persist(record: RecordV1, uncertain = false): Promise<void> {
+    return this.writeAtomically(this.path, record, () => { this.record = record; }, uncertain);
   }
 
-  private writeAtomically(path: string, value: unknown, committed?: () => void): void {
+  private async writeAtomically(path: string, value: unknown, committed?: () => void, uncertain = false): Promise<void> {
     const temporary = `${path}.${randomBytes(12).toString("hex")}.tmp`;
-    let fd: number | null = null;
-    let directory: number | null = null;
+    const revision = this.revision;
+    let file: FileHandle | undefined;
+    let directory: FileHandle | undefined;
     try {
-      fd = openSync(temporary, "wx", 0o600);
-      writeFileSync(fd, JSON.stringify(value));
-      fsyncSync(fd);
-      closeSync(fd);
-      fd = null;
+      file = await open(temporary, "wx", 0o600);
+      await file.writeFile(JSON.stringify(value));
+      await file.sync();
+      await file.close();
+      file = undefined;
+      // The only synchronous IO: accepted actual-rename commit point. No yield
+      // between final revision/latch check, rename and committed-state update.
+      if (revision !== this.revision || (!uncertain && this.failed)) throw new Error("Maintenance activity became unknown before commit");
       renameSync(temporary, path);
-      committed?.(); // Logical commit: an idle tombstone follows owner-authorized release.
-      directory = openSync(this.home, "r");
-      fsyncSync(directory);
-      closeSync(directory);
-      directory = null;
+      committed?.();
+      directory = await open(this.home, "r");
+      await directory.sync();
+      await directory.close();
+      directory = undefined;
+      if (!uncertain) this.assertNoUnknownWork();
     } catch (error) {
       this.failed = true;
       this.recovery = true;
-      if (fd !== null) {
-        try {
-          closeSync(fd);
-        } catch {}
-      }
-      if (directory !== null) {
-        try {
-          closeSync(directory);
-        } catch {}
-      }
-      try {
-        unlinkSync(temporary);
-      } catch {}
+      if (file) await file.close().catch(() => {});
+      if (directory) await directory.close().catch(() => {});
+      await unlink(temporary).catch(() => {});
       throw error;
     }
   }
+
 }
 
 /** Install on the shared owner, before handing it to any internal or transport caller. */

@@ -535,6 +535,12 @@ test("routes plugin requests and releases its owned catalog subscription on clea
         message: "ready",
       },
     ],
+    getManagedPluginStatus: vi.fn(async () => ({
+      version: 1 as const,
+      pluginId: "example",
+      consistency: "uncertain" as const,
+      reason: "journal-missing" as const,
+    })),
     recoverPlugin: vi.fn(async () => plugin),
     installDirectory: async () => plugin,
     inspectDirectory: async () => ({ id: "example" }),
@@ -599,6 +605,12 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     expectedPath: "/plugins/example",
     expectedGeneration: 3,
   });
+  await session.handleMessage({
+    type: "plugins.managed.status.request",
+    requestId: "managed-status",
+    pluginId: "example",
+  });
+  expect(pluginRuntime.getManagedPluginStatus).toHaveBeenCalledWith("example");
   for (const listener of listeners) listener("example");
 
   expect(messages.map((message) => message.type)).toEqual([
@@ -609,6 +621,7 @@ test("routes plugin requests and releases its owned catalog subscription on clea
     "plugin.disable.response",
     "plugin.remove.response",
     "plugin.recovery.response",
+    "plugins.managed.status.response",
     "status",
   ]);
   expect(messages.at(-1)).toEqual({

@@ -1594,6 +1594,12 @@ export const PluginDirectoryInstallRequestSchema = z.object({
   id: PluginIdSchema.optional(),
 });
 
+export const ManagedPluginStatusRequestSchema = z.object({
+  type: z.literal("plugins.managed.status.request"),
+  requestId: z.string(),
+  pluginId: PluginIdSchema,
+});
+
 export const PluginRecoveryRequestSchema = z.object({
   type: z.literal("plugin.recovery.request"),
   requestId: z.string(),
@@ -3575,6 +3581,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   PluginLogsGetRequestSchema,
   PluginDirectoryInstallRequestSchema,
   PluginDirectoryReplaceRequestSchema,
+  ManagedPluginStatusRequestSchema,
   PluginRecoveryRequestSchema,
   PluginDirectoryInspectRequestSchema,
   PluginSourceInstallRequestSchema,
@@ -3991,6 +3998,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(pluginSourceInstallation): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports source identifiers.
         pluginSourceInstallation: z.boolean().optional(),
         managedPluginPromotions: z.boolean().optional(),
+        managedPluginStatus: z.boolean().optional(),
         // COMPAT(pluginSourceUpdates): added in v0.8.0; remove gate after 2027-03-16 once daemon floor supports reviewed updates.
         pluginSourceUpdates: z.boolean().optional(),
         // COMPAT(pluginThemes): added in v0.5.0, remove gate after 2027-08-20.
@@ -7202,6 +7210,52 @@ export const PluginLoadedReceiptSchema = z.object({
 });
 export type PluginLoadedReceipt = z.infer<typeof PluginLoadedReceiptSchema>;
 
+export const ManagedPluginJournalSchema = z
+  .object({
+    version: z.literal(1),
+    generation: z.number().int().nonnegative(),
+    phase: z.enum(["ready", "activating", "replacing", "held"]),
+    enrolled: z.boolean().optional(),
+    oldPath: z.string().optional(),
+    candidatePath: z.string().optional(),
+    baseline: z
+      .object({ source: PluginSourceSchema, receipt: PluginLoadedReceiptSchema })
+      .strict()
+      .optional(),
+    currentReceipt: PluginLoadedReceiptSchema.optional(),
+  })
+  .strict();
+export const ManagedPluginStatusReasonSchema = z.enum([
+  "busy",
+  "journal-missing",
+  "journal-unreadable",
+  "changed",
+  "policy-unconfigured",
+  "registration-missing",
+  "runtime-unavailable",
+]);
+export const ManagedPluginStatusSchema = z.discriminatedUnion("consistency", [
+  z
+    .object({
+      version: z.literal(1),
+      pluginId: PluginIdSchema,
+      consistency: z.literal("coherent"),
+      registration: PluginSourceSchema,
+      journal: ManagedPluginJournalSchema,
+      loaded: PluginLoadedReceiptSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      version: z.literal(1),
+      pluginId: PluginIdSchema,
+      consistency: z.literal("uncertain"),
+      reason: ManagedPluginStatusReasonSchema,
+    })
+    .strict(),
+]);
+export type ManagedPluginStatus = z.infer<typeof ManagedPluginStatusSchema>;
+
 export const PluginListItemSchema = z.object({
   loaded: PluginLoadedReceiptSchema.optional(),
   promotionState: z
@@ -7255,6 +7309,11 @@ export const PluginLogsGetResponseSchema = z.object({
 export const PluginDirectoryInstallResponseSchema = z.object({
   type: z.literal("plugin.directory.install.response"),
   payload: z.object({ requestId: z.string(), plugin: PluginListItemSchema }),
+});
+
+export const ManagedPluginStatusResponseSchema = z.object({
+  type: z.literal("plugins.managed.status.response"),
+  payload: z.object({ requestId: z.string(), status: ManagedPluginStatusSchema }).strict(),
 });
 
 export const PluginRecoveryResponseSchema = z.object({
@@ -7440,6 +7499,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   PluginLogsGetResponseSchema,
   PluginDirectoryInstallResponseSchema,
   PluginDirectoryReplaceResponseSchema,
+  ManagedPluginStatusResponseSchema,
   PluginRecoveryResponseSchema,
   PluginDirectoryInspectResponseSchema,
   PluginSourceInstallResponseSchema,

@@ -524,6 +524,9 @@ export interface SessionOptions {
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
     listPlugins(): Promise<import("@getpaseo/protocol/messages").PluginListItem[]>;
     getLogs(pluginId: string): import("@getpaseo/protocol/messages").PluginLogEntry[];
+    getManagedPluginStatus?(
+      pluginId: string,
+    ): Promise<import("@getpaseo/protocol/messages").ManagedPluginStatus>;
     recoverPlugin?(input: {
       pluginId: string;
       expectedPath: string;
@@ -2912,6 +2915,17 @@ export class Session {
   }
 
   private dispatchManagedPluginMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type === "plugins.managed.status.request") {
+      if (!this.pluginRuntime?.getManagedPluginStatus)
+        throw new Error("Managed plugin status unavailable");
+      return this.pluginRuntime.getManagedPluginStatus(msg.pluginId).then((status) => {
+        this.emit({
+          type: "plugins.managed.status.response",
+          payload: { requestId: msg.requestId, status },
+        });
+        return undefined;
+      });
+    }
     if (msg.type === "plugin.recovery.request") {
       if (!this.pluginRuntime?.recoverPlugin)
         throw new Error("Managed plugin recovery unavailable");

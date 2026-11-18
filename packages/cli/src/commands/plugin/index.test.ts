@@ -57,7 +57,15 @@ const recoverPlugin = vi.fn(async () => ({
   status: "running" as const,
 }));
 
+const getManagedPluginStatus = vi.fn(async () => ({
+  version: 1 as const,
+  pluginId: "managed",
+  consistency: "uncertain" as const,
+  reason: "journal-missing" as const,
+}));
+
 const features: {
+  managedPluginStatus?: boolean;
   managedPluginPromotions?: boolean;
   pluginManagement?: boolean;
   pluginLogs?: boolean;
@@ -71,6 +79,7 @@ vi.mock("../../utils/client.js", () => ({
     getLastServerInfoMessage: () => ({ features }),
     listPlugins,
     recoverPlugin,
+    getManagedPluginStatus,
     getPluginLogs,
     installDirectoryPlugin,
     installPluginSource,
@@ -87,11 +96,23 @@ import {
   runPluginListCommand,
   runPluginLogsCommand,
   runPluginRecoverCommand,
+  runManagedPluginStatusCommand,
 } from "./index.js";
 
 describe("plugin management commands", () => {
+  it("gates managed status once and preserves uncertain native evidence", async () => {
+    await expect(
+      runManagedPluginStatusCommand("managed", { daemonTarget }, {} as never),
+    ).rejects.toMatchObject({ code: "DAEMON_UPDATE_REQUIRED" });
+    expect(getManagedPluginStatus).not.toHaveBeenCalled();
+    features.managedPluginStatus = true;
+    const result = await runManagedPluginStatusCommand("managed", { daemonTarget }, {} as never);
+    expect(result.data).toMatchObject({ consistency: "uncertain", reason: "journal-missing" });
+    expect(getManagedPluginStatus).toHaveBeenCalledWith("managed");
+  });
   beforeEach(() => {
     features.managedPluginPromotions = false;
+    features.managedPluginStatus = false;
     features.pluginManagement = false;
     features.pluginLogs = false;
     features.pluginGitManagement = false;

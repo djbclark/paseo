@@ -13,6 +13,14 @@ interface ActivityLease {
   onSettled: () => void;
 }
 const activityScope = new AsyncLocalStorage<ActivityLease>();
+let qualifiedHelperAdmission: (() => void) | undefined;
+
+/** Trusted sealed startup installs this before any candidate code; it can never be replaced. */
+export function installQualifiedHelperAdmission(guard: () => void): void {
+  if (qualifiedHelperAdmission) throw new Error("Qualified helper admission is already installed");
+  if (typeof guard !== "function") throw new Error("Qualified helper admission requires a guard");
+  qualifiedHelperAdmission = guard;
+}
 
 /** Execution-owner accounting: callers timing out or aborting never settle these leases. */
 export class PluginActivityOwner {
@@ -110,6 +118,7 @@ export interface PluginActivityLease {
   release(): void;
 }
 export function acquirePluginHelper(): () => void {
+  qualifiedHelperAdmission?.();
   const lease = activityScope.getStore();
   return lease ? lease.owner.helper(lease) : () => {};
 }

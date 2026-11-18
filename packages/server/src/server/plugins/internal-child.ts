@@ -13,7 +13,7 @@ export class InternalPluginChild extends EventEmitter {
   private readonly workerMessages = new Set<(message: PluginProcessRequest) => void>();
   private closing: Promise<void> | null = null;
 
-  constructor(contribute: PluginServerContribution) {
+  constructor(loadContribution: (source: string) => PluginServerContribution) {
     super();
     const channel: PluginWorkerChannel = {
       send: (message: PluginProcessMessage, callback?: () => void) => {
@@ -29,7 +29,7 @@ export class InternalPluginChild extends EventEmitter {
       },
       disconnect: () => this.disconnect(),
     };
-    this.worker = createPluginWorker({ channel, contribute });
+    this.worker = createPluginWorker({ channel, loadContribution });
   }
 
   send(message: PluginProcessRequest, callback?: (error: Error | null) => void): boolean {

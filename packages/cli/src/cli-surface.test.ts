@@ -108,6 +108,7 @@ describe("canonical CLI surface", () => {
     const plugin = createCli().commands.find((command) => command.name() === "plugin");
 
     expect(plugin?.commands.map((command) => command.name())).toEqual([
+      "managed-status",
       "recover",
       "replace",
       "init",

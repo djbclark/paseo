@@ -64,6 +64,46 @@ async function createPlugin(id: string, source: string): Promise<string> {
   return directory;
 }
 
+async function createQueueBlocker(begun: string, release: string): Promise<string> {
+  const directory = await createPlugin(
+    "blocker",
+    "export default function contribute() { return () => {}; }",
+  );
+  const script = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(begun)}, 'started'); const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) clearInterval(timer); }, 10);`;
+  await writeFile(
+    path.join(directory, "paseo-plugin.json"),
+    JSON.stringify({ id: "blocker", build: [[process.execPath, "-e", script]] }),
+  );
+  for (const args of [
+    ["init", "-b", "main"],
+    ["config", "user.name", "Paseo Tests"],
+    ["config", "user.email", "paseo@example.test"],
+    ["add", "-A"],
+    ["commit", "-m", "queue blocker"],
+  ])
+    await runGitCommand(args, { cwd: directory });
+  return directory;
+}
+
+async function waitForQueueBlocker(
+  operation: ReturnType<PluginService["installSource"]>,
+  begun: string,
+): Promise<void> {
+  let failure: unknown;
+  void operation.catch((error) => {
+    failure = error;
+  });
+  await expect
+    .poll(
+      async () => {
+        if (failure) throw failure;
+        return readManagedSignal(begun);
+      },
+      { timeout: 10_000 },
+    )
+    .toBe("started");
+}
+
 function createStore(
   home: string,
   plugins: Record<string, { source: "directory"; path: string; enabled?: boolean }> = {},
@@ -2125,7 +2165,7 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   });
-  it("rechecks replacement requests after a real child startup holds the operation queue", async () => {
+  it("rechecks replacement requests while an unmanaged native build holds the operation queue", async () => {
     const f = await fixture();
     const old = await createPlugin(
       "managed",
@@ -2137,26 +2177,23 @@ describe("managed plugin promotion boundary", () => {
     );
     const begun = path.join(f.home, "begun");
     const release = path.join(f.home, "release");
-    const blocker = await createPlugin(
-      "blocker",
-      `import { writeFileSync, existsSync } from 'node:fs';
-      export default async function register() { writeFileSync(${JSON.stringify(begun)}, 'started');
-        while (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); return () => {}; }`,
-    );
+    const blocker = await createQueueBlocker(begun, release);
     await allow(f.policyFile, [await authorization(old, 0)]);
     const service = createService(
       f.home,
       {
         managed: { source: "directory", path: old },
-        blocker: { source: "directory", path: blocker, enabled: false },
       },
-      { activationPolicy: f.policy },
+      { activationPolicy: f.policy, managedSources: new ManagedPluginSources(f.home) },
     );
     try {
       await service.start();
       await allow(f.policyFile, [await authorization(candidate, 1)]);
-      const blocking = service.enablePlugin("blocker");
-      await expect.poll(() => readManagedSignal(begun)).toBe("started");
+      const blocking = service.installSource({
+        source: pathToFileURL(blocker).href,
+        id: "blocker",
+      });
+      await waitForQueueBlocker(blocking, begun);
       const before = (await service.listPlugins()).find((item) => item.id === "managed")?.loaded;
       const queued = Promise.allSettled([
         service.replaceDirectory({
@@ -2213,10 +2250,7 @@ describe("managed plugin promotion boundary", () => {
     const begun = path.join(f.home, "begun");
     const release = path.join(f.home, "release");
     const sentinel = path.join(f.home, "must-not-build");
-    const blocker = await createPlugin(
-      "blocker",
-      `import { writeFileSync, existsSync } from 'node:fs'; export default async function() { writeFileSync(${JSON.stringify(begun)}, 'started'); while(!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); return () => {}; }`,
-    );
+    const blocker = await createQueueBlocker(begun, release);
     try {
       await service.start();
       const baseline = await service.installSource({
@@ -2244,10 +2278,13 @@ describe("managed plugin promotion boundary", () => {
       if (!preview.proposal) throw new Error("Expected Git proposal");
       await writeFile(path.join(repository, "moving-ref"), "changed");
       await commit("move branch after review");
+      const blocking = service.installSource({
+        source: pathToFileURL(blocker).href,
+        id: "blocker",
+      });
+      await waitForQueueBlocker(blocking, begun);
       const preparing = vi.spyOn(sources, "prepareUpdate");
       const installing = vi.spyOn(sources, "prepareInstall");
-      const blocking = service.installDirectory({ path: blocker });
-      await expect.poll(() => readManagedSignal(begun)).toBe("started");
       const manual = service.applyUpdates([preview.proposal]);
       const automatic = service.applyUpdates([preview.proposal]);
       await allow(f.policyFile, []);

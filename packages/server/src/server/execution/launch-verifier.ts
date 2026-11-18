@@ -1,3 +1,4 @@
+/* oxlint-disable paseo/no-sync-io -- Isolated Linux qualification boundary: finish observations before publishing the synchronous branded capability. Daemon/main-thread roles remain unsupported; this is not a general server IO exemption. */
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -61,12 +62,10 @@ function verifyFile(root: string, expected: FileIdentity): void {
   const file = path.isAbsolute(expected.path) ? expected.path : path.resolve(root, expected.path);
   linuxRetainedRoot.verifyPath(file);
   const stat = lstatSync(file);
-  if (
-    stat.size !== expected.size ||
-    (stat.mode & 0o777) !== expected.mode ||
-    digest(regular(file, expected.size)) !== expected.sha256
-  )
-    return fail();
+  if (stat.size !== expected.size || (stat.mode & 0o777) !== expected.mode)
+    throw new Error("Qualified artifact metadata mismatch");
+  if (digest(regular(file, expected.size)) !== expected.sha256)
+    throw new Error("Qualified artifact bytes mismatch");
 }
 export function mappedLibraries(): string[] {
   return [
@@ -111,13 +110,12 @@ export function processIdentity(): {
     executableIdentity,
   };
 }
-export function verifyQualifiedRoot(root: string): {
-  manifest: HostManifest;
+interface Enrollment {
   manifestSha256: string;
-  root: string;
-} {
-  if (process.platform !== "linux" || process.getuid?.() === 0) return fail();
-  linuxRetainedRoot.verifyPath(root);
+  distributionBuildId: string;
+  roleBuildId: string;
+}
+function readEnrollment(root: string): Enrollment {
   const account = userInfo();
   const authority = path.join(
     realpathSync(account.homedir),
@@ -145,6 +143,12 @@ export function verifyQualifiedRoot(root: string): {
   if (enrolled.length !== 1) return fail();
   const expected = enrolled[0];
   if (expected.immutabilityAdapter !== linuxRetainedRoot.kind) return fail();
+  return expected;
+}
+function readManifest(
+  root: string,
+  expected: Enrollment,
+): { manifest: HostManifest; manifestSha256: string } {
   const manifestPath = `${root}.manifest.json`;
   linuxRetainedRoot.verifyPath(manifestPath);
   const raw = regular(manifestPath, 1024 * 1024);
@@ -165,6 +169,9 @@ export function verifyQualifiedRoot(root: string): {
     return fail();
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return fail();
+  return { manifest, manifestSha256 };
+}
+function verifyInventory(root: string, manifest: HostManifest): void {
   const names: string[] = [];
   function visit(directory: string): void {
     for (const name of readdirSync(directory)) {
@@ -194,8 +201,20 @@ export function verifyQualifiedRoot(root: string): {
     if (!path.isAbsolute(file.path)) return fail();
     verifyFile(root, file);
   }
+}
+export function verifyQualifiedRoot(root: string): {
+  manifest: HostManifest;
+  manifestSha256: string;
+  root: string;
+} {
+  if (process.platform !== "linux" || process.getuid?.() === 0) return fail();
+  linuxRetainedRoot.verifyPath(root);
+  const expected = readEnrollment(root);
+  const { manifest, manifestSha256 } = readManifest(root, expected);
+  verifyInventory(root, manifest);
   return { manifest, manifestSha256, root };
 }
+
 export function verifyQualifiedLaunch(
   roleFile: string,
 ): ReturnType<typeof verifyQualifiedRoot> & { process: ReturnType<typeof processIdentity> } {

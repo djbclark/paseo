@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID, createHash } from "node:crypto";
-import { cp, mkdir, readFile, rm, symlink, unlink, writeFile, chmod } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, unlink, writeFile, stat } from "node:fs/promises";
 import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { userInfo } from "node:os";
@@ -94,13 +94,25 @@ test(
     };
     const rejected = async (root, env) => {
       const child = launch(root, env);
-      const result = await Promise.race([
-        waitExit(child),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Unsupported host did not exit")), 10000),
-        ),
-      ]);
-      assert.notEqual(result.code, 0);
+      let diagnostic = "";
+      child.stderr.on("data", (chunk) => {
+        diagnostic += chunk.toString();
+      });
+      let timer;
+      try {
+        const result = await Promise.race([
+          new Promise((resolve) =>
+            child.once("close", (code, signal) => resolve({ code, signal })),
+          ),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Unsupported host did not exit")), 10000);
+          }),
+        ]);
+        assert.notEqual(result.code, 0);
+        return diagnostic;
+      } finally {
+        clearTimeout(timer);
+      }
     };
     try {
       sudo("mkdir", "-p", retained);
@@ -172,7 +184,8 @@ test(
       await rejected(`${retained}/A`, { ESBUILD_BINARY_PATH: "/bin/false" });
       await rejected(path.join(stage, "A")); // Mutable source/staging root.
       const manifestFile = `${retained}/A.manifest.json`;
-      const manifest = JSON.parse(await readFile(manifestFile, "utf8"));
+      const originalManifest = await readFile(manifestFile, "utf8");
+      const manifest = JSON.parse(originalManifest);
       for (const patch of [
         { helpers: [{ helperId: "unqualified", artifactId: "wrong-interpreter" }] },
         { externalLibraries: [] },
@@ -188,11 +201,28 @@ test(
         await writePolicy([{ ...qualifications[0], manifestSha256: sha(raw) }]);
         await rejected(`${retained}/A`);
       }
-      // A host with SDK bytes replaced by B cannot initialize under A qualification.
+      // Restore prior mutations and prove a supported fresh baseline before changing SDK bytes.
+      sudo("chown", `${process.getuid()}:${process.getgid()}`, manifestFile);
+      await writeFile(manifestFile, originalManifest);
+      sudo("chown", "root:root", manifestFile);
+      await writePolicy(qualifications);
+      const baseline = await observe(launch(`${retained}/A`));
+      assert.equal(baseline.supported, true);
+      assert.equal(baseline.bindingProbe, true);
+      const originalPolicy = await readFile(policy, "utf8");
+      const originalHost = manifest.files.find((file) => file.path === "host.cjs");
+      assert.ok(originalHost);
+      // Change ONLY host bytes, retaining size/mode, manifest and controller authority.
       sudo("chmod", "u+w", `${retained}/A/host.cjs`);
       sudo("cp", `${retained}/B/host.cjs`, `${retained}/A/host.cjs`);
-      await writePolicy(qualifications);
-      await rejected(`${retained}/A`);
+      sudo("chmod", originalHost.mode.toString(8), `${retained}/A/host.cjs`);
+      const replaced = await stat(`${retained}/A/host.cjs`);
+      assert.equal(replaced.mode & 0o777, originalHost.mode);
+      assert.equal(replaced.size, originalHost.size);
+      assert.notEqual(sha(await readFile(`${retained}/A/host.cjs`)), originalHost.sha256);
+      assert.equal(await readFile(manifestFile, "utf8"), originalManifest);
+      assert.equal(await readFile(policy, "utf8"), originalPolicy);
+      assert.match(await rejected(`${retained}/A`), /Qualified artifact bytes mismatch/);
     } finally {
       for (const child of children)
         if (child.exitCode === null && child.signalCode === null) {

@@ -1,3 +1,4 @@
+/* oxlint-disable paseo/no-sync-io -- Isolated Linux qualification boundary: finish observations before publishing the synchronous branded capability. Daemon/main-thread roles remain unsupported; this is not a general server IO exemption. */
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 const fail = (): never => {

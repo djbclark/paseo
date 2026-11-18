@@ -1431,7 +1431,7 @@ describe("native maintenance participant serialization", () => {
   });
   test("native held result binds loaded target digests and native CAS independently of activationGeneration", () => {
     const claim: HeldPluginOperationClaim = { generation: 1, transactionId: "unit", operation: "verify", pluginId: "unit", path: "/retained/B", expectedPath: "/retained/B", expectedGeneration: 5, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64) };
-    const result = { nativeGeneration: 7, plugin: { id: "unit", path: claim.path, enabled: true, status: "running" as const, promotionState: { generation: 7, phase: "idle" }, loaded: { pluginId: "unit", sourcePath: claim.path, snapshotSha256: claim.snapshotSha256, serverBundleSha256: claim.serverBundleSha256, processStartToken: "fresh-incarnation", activationGeneration: 123, startedAt: "fixture" } } };
+    const result = { nativeGeneration: 7, plugin: { id: "unit", path: claim.path, enabled: true, status: "running" as const, promotionState: { generation: 7, phase: "ready" }, loaded: { pluginId: "unit", sourcePath: claim.path, snapshotSha256: claim.snapshotSha256, serverBundleSha256: claim.serverBundleSha256, processStartToken: "fresh-incarnation", activationGeneration: 123, startedAt: "fixture" } } };
     assertHeldPluginOperationResult(claim, result);
     expect(() => assertHeldPluginOperationResult(claim, { ...result, nativeGeneration: 123 })).toThrow("CAS");
     expect(() => assertHeldPluginOperationResult(claim, { ...result, plugin: { ...result.plugin, loaded: { ...result.plugin.loaded, snapshotSha256: "c".repeat(64) } } })).toThrow("receipt");

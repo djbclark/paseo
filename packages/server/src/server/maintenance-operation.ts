@@ -30,5 +30,5 @@ export function assertHeldPluginOperationResult(claim: HeldPluginOperationClaim,
   const loaded = plugin.loaded;
   if (!Number.isSafeInteger(result.nativeGeneration) || result.nativeGeneration < claim.expectedGeneration || plugin.id !== claim.pluginId || plugin.path !== claim.path || !plugin.enabled || plugin.status !== "running") throw new Error("Invalid held plugin operation result");
   if (!loaded || loaded.pluginId !== claim.pluginId || loaded.sourcePath !== claim.path || loaded.snapshotSha256 !== claim.snapshotSha256 || loaded.serverBundleSha256 !== claim.serverBundleSha256 || !loaded.processStartToken) throw new Error("Held plugin operation target receipt mismatch");
-  if (plugin.promotionState && plugin.promotionState.generation !== result.nativeGeneration) throw new Error("Held plugin operation CAS mismatch");
+  if (plugin.promotionState && (plugin.promotionState.generation !== result.nativeGeneration || plugin.promotionState.phase !== "ready")) throw new Error("Held plugin operation CAS mismatch");
 }

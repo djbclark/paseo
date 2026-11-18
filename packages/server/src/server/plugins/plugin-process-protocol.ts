@@ -43,6 +43,7 @@ const maintenanceIdentityFields = {
   instanceId: z.string().min(1),
 };
 export type PluginProcessRequest =
+  | ({ type: "initialization.retire"; requestId: string } & PluginMaintenanceIdentity)
   | ({
       type: "maintenance.begin" | "maintenance.end";
       requestId: string;
@@ -107,6 +108,8 @@ export type PluginProcessRequest =
   | { type: "paseo_close" };
 
 export type PluginProcessMessage =
+  | { type: "initialization.rejected"; instanceId: string }
+  | ({ type: "initialization.retired"; requestId: string } & PluginMaintenanceIdentity)
   | { type: "execution.unknown"; instanceId: string }
   | { type: "execution.settled"; requestKey: string; instanceId: string }
   | { type: "settings.changed"; settingsId: string }
@@ -179,6 +182,13 @@ const frameFields = {
 export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.discriminatedUnion(
   "type",
   [
+    z
+      .object({
+        type: z.literal("initialization.retire"),
+        requestId: z.string(),
+        ...maintenanceIdentityFields,
+      })
+      .strict(),
     z
       .object({
         type: z.literal("maintenance.begin"),
@@ -335,6 +345,16 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
 export const PluginProcessMessageSchema: z.ZodType<PluginProcessMessage> = z.discriminatedUnion(
   "type",
   [
+    z
+      .object({ type: z.literal("initialization.rejected"), instanceId: z.string().min(1) })
+      .strict(),
+    z
+      .object({
+        type: z.literal("initialization.retired"),
+        requestId: z.string(),
+        ...maintenanceIdentityFields,
+      })
+      .strict(),
     z.object({ type: z.literal("execution.unknown"), instanceId: z.string() }).strict(),
     z
       .object({

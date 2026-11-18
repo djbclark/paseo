@@ -1,7 +1,7 @@
 import { InternalPluginChild, readInternalPluginExecution } from "./internal-child.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,4 +127,92 @@ it("does not acknowledge internal child closure after uncertain actual worker re
   await expect(child.retire()).rejects.toThrow("retirement is uncertain");
   expect(closed).toBe(false);
   expect(child.connected).toBe(true);
+});
+
+it.each([
+  {
+    name: "fixed registration validation with valid cleanup",
+    outcome: "initialization.rejected",
+    bundle: `(require) => { const {z} = require("zod"); return {default: context => {
+    context.handle({name:"InvalidMethod",input:z.unknown(),output:z.unknown()},()=>null);
+    return ()=>{};
+  }}; }`,
+  },
+  { name: "malformed cleanup", outcome: "fatal", bundle: "(require) => ({default:()=>undefined})" },
+  {
+    name: "arbitrary candidate throw",
+    outcome: "fatal",
+    bundle: "(require) => ({default:()=>{throw new Error('candidate throw')}})",
+  },
+])("separates $name from actual settled retirement", async ({ bundle, outcome }) => {
+  const root = await realpath(await mkdtemp(nodePath.join(tmpdir(), "plugin-init-rejection-")));
+  const { evaluateBundle } = await import("./bundle-evaluator.js");
+  const child = new InternalPluginChild(evaluateBundle);
+  const events: string[] = [];
+  const identity = { generation: 7, transactionId: "sdk-unit", instanceId: "actual-sdk-instance" };
+  const rejected = new Promise<string>((resolve) =>
+    child.on("message", (message) => {
+      events.push(message.type);
+      if (message.type === "paseo_frame" && typeof message.data === "string") {
+        const frame = JSON.parse(message.data);
+        if (frame.type === "hello")
+          child.send({
+            type: "paseo_frame",
+            isBinary: false,
+            data: JSON.stringify({
+              type: "session",
+              message: {
+                type: "status",
+                payload: {
+                  status: "server_info",
+                  serverId: "sdk-unit",
+                  hostname: "sdk-unit",
+                  version: "0.4.0",
+                  features: {},
+                },
+              },
+            }),
+          });
+      }
+      if (message.type === "initialization.rejected" || message.type === "fatal")
+        resolve(message.type);
+    }),
+  );
+  const closed = new Promise<void>((resolve) =>
+    child.once("close", () => {
+      events.push("close");
+      resolve();
+    }),
+  );
+  try {
+    // SDK transport/state proof only. No genuine producer owner or qualification is minted.
+    child.send({
+      type: "initialize",
+      pluginId: "rejected",
+      pluginDirectory: root,
+      hostInstanceId: identity.instanceId,
+      appVersion: "0.4.0",
+      bundle,
+      passiveInitialization: { contract: "native-passive-contract-1", hold: identity },
+    });
+    expect(await rejected).toBe(outcome);
+    if (outcome === "fatal") {
+      expect(events).not.toContain("initialization.rejected");
+      expect(events).not.toContain("initialization.retired");
+      await child.retire();
+      return;
+    }
+    expect(child.connected).toBe(true);
+    child.send({ type: "initialization.retire", requestId: "retire", ...identity });
+    await closed;
+    expect(events.indexOf("initialization.retired")).toBeGreaterThan(
+      events.indexOf("initialization.rejected"),
+    );
+    expect(events.indexOf("close")).toBeGreaterThan(events.indexOf("initialization.retired"));
+    expect(events).not.toContain("ready");
+    expect(events).not.toContain("fatal");
+  } finally {
+    if (child.connected) await child.retire();
+    await rm(root, { recursive: true, force: true });
+  }
 });

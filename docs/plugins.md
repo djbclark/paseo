@@ -96,15 +96,24 @@ unit tests. The genuine producer and native bootstrap integration must verify
 actual executing bindings, immutable artifacts, incarnation, and fresh child ACK
 before enabling support or restricted initialization.
 
-A compiler rejection can become `known_failed_held` only as a normal return from
-the native driver after the actual owned Worker and every helper settle, while
-current authority, baseline, CAS, and the full held cohort remain valid. A private
-provenance table binds that result to its original live scope and incarnation;
-wire tags and exception properties cannot create it. The native owner retains the
-same reservation with a durable recovery-only restriction. Generic errors,
-unsettled work, and existing uncertainty remain UNKNOWN. Baseline recovery and a
-separate verification require current authority; neither END nor restart is
-implicit. See [native maintenance](development.md) for the gated CLI outcome.
+A compiler rejection can become `known_failed_held` only as a normal return after
+actual owned Worker and helper settlement. Initialization rejection additionally
+requires a private host validation error, a valid returned cleanup function,
+actual cleanup and activity drain, a fresh identity-bound retirement ACK and
+natural child exit with no signal or forced kill. Candidate throws, malformed or
+failed cleanup, timeouts, stale ACKs and partial drainage remain UNKNOWN. A private
+provenance table binds the result to its original live scope and incarnation;
+wire tags and exception properties cannot create it.
+
+The native owner retains the same reservation with a durable recovery-only
+restriction. A named failed directory target may be absent only in that current
+hold's private recovery lane. Global support stays false while a configured target
+is missing. The private lane rechecks current policy, journal CAS, registration,
+owner and epochs, and the entire remaining cohort's actual barriers. Builtin or
+non-target absence, restart, lost bearer and prior uncertainty cannot use it.
+Baseline recovery and separate verification require current authority; neither END
+nor restart is implicit. An installed recovery API feature grants no permission.
+See [native maintenance](development.md) for the gated CLI outcome.
 
 ## Managed activation policy (fork)
 

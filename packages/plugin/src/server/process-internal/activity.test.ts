@@ -326,3 +326,34 @@ it("preserves actual Git execFile stdin, NUL output and exit-1 errors through a 
   );
   expect(stdout).toBe("actual-git-output-without-qualification");
 });
+
+it("preserves the original command after postlaunch observation failure while holding unknown", async () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import {PluginActivityOwner,installQualifiedHelperAdmission} from '@getpaseo/plugin/internal/activity';
+    import {execCommand} from '@getpaseo/plugin/server';
+    const owner=new PluginActivityOwner();
+    let bound=0;
+    installQualifiedHelperAdmission(()=>({
+      settled:new Promise(()=>{}),
+      bind(child){assert.ok(child.pid>0);bound++;throw new Error('postlaunch observation lost')},
+      failed(){},
+    }));
+    const root=owner.acquire();
+    const result=await root.run(()=>execCommand(process.execPath,['-e','process.stdout.write("original-command-finished")']));
+    root.release();
+    assert.equal(result.stdout,'original-command-finished');
+    assert.equal(bound,1);
+    assert.equal(owner.begin({generation:1,transactionId:'failed-proof',instanceId:'actual'}),'unknown');
+    process.stdout.write('original-finished-still-unknown');
+  `;
+  const { stdout } = await promisify(nativeExecFile)(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    {
+      cwd: new URL("../../../", import.meta.url),
+      env: { PATH: process.env.PATH },
+    },
+  );
+  expect(stdout).toBe("original-finished-still-unknown");
+});

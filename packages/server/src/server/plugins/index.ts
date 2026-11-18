@@ -30,6 +30,7 @@ import {
   samePluginMaintenanceIdentity,
   type NativePluginAdmission,
   type PluginMaintenanceIdentity,
+  type PluginHeldRecoveryIdentity,
   type PluginMaintenancePort,
 } from "./maintenance.js";
 import { isDeepStrictEqual } from "node:util";
@@ -67,7 +68,11 @@ import { type ManagedPluginCandidate, ManagedPluginSources } from "./managed-sou
 import { readPluginManifest } from "./manifest.js";
 import { expandTilde } from "../../utils/path.js";
 import { runPluginBuild } from "./preparation.js";
-import { PluginRuntime } from "./runtime.js";
+import {
+  PluginRuntime,
+  readSettledQualifiedInitializationFailure,
+  type SettledQualifiedInitializationFailure,
+} from "./runtime.js";
 import type { PluginRuntimeSubscription } from "./runtime-subscription.js";
 import { BuiltinPluginLoader, type BuiltinPlugin } from "./builtin/index.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
@@ -80,6 +85,17 @@ import {
 import type { PluginUsageSourceMetadata } from "./plugin-process-protocol.js";
 
 type HeldPluginDriverResult = HeldPluginOperationResult | KnownFailedHeldObservation;
+type KnownFailureEvidence =
+  | { kind: "compiler_error"; value: SettledQualifiedCompilerFailure }
+  | { kind: "initialization_rejected"; value: SettledQualifiedInitializationFailure };
+interface HeldAbsentTarget {
+  identity: PluginHeldRecoveryIdentity;
+  owner: QualifiedDaemonOwner;
+  config: ReturnType<DaemonConfigStore["get"]>;
+  journalIdentity: string;
+  nativeGeneration: number;
+  epoch: number | null;
+}
 
 interface DirectoryReplacementInput {
   pluginId: string;
@@ -163,6 +179,7 @@ interface PluginRuntimePort {
     held?: PluginHeldOperation,
     initialization?: QualifiedPluginInitialization,
   ): Promise<void>;
+  startHeldPluginAttempt?: PluginRuntime["startHeldPluginAttempt"];
   startBuiltinPlugin?(
     plugin: BuiltinPlugin,
     initialization?: QualifiedPluginInitialization,
@@ -210,6 +227,8 @@ export class PluginService {
       this.maintenanceIdentity = { ...identity };
       return this.beginQualifiedMaintenance(identity);
     },
+    supportsHeldRecoveryV1: (identity) => this.supportsHeldRecovery(identity),
+    beginHeldRecoveryV1: (identity) => this.beginHeldRecovery(identity),
     end: async (identity) => {
       if (
         !this.maintenanceIdentity ||
@@ -236,6 +255,81 @@ export class PluginService {
       if (!this.runtime.observeQualifiedExecutions) return "unknown";
       await this.runtime.observeQualifiedExecutions();
       return result;
+    } catch {
+      return "unknown";
+    }
+  }
+
+  private heldAbsentTarget: HeldAbsentTarget | undefined;
+  private supportsHeldRecovery(identity: PluginHeldRecoveryIdentity): boolean {
+    const proof = this.heldAbsentTarget;
+    if (
+      !proof ||
+      proof.identity.pluginId !== identity.pluginId ||
+      !samePluginMaintenanceIdentity(proof.identity, identity) ||
+      !this.maintenanceIdentity ||
+      !samePluginMaintenanceIdentity(this.maintenanceIdentity, identity) ||
+      this.maintenanceUncertain ||
+      proof.owner !== this.dependencies.qualifiedDaemonOwner ||
+      this.hasPendingQualifiedMutation() ||
+      proof.config !== this.configStore.get() ||
+      proof.epoch === null ||
+      proof.epoch !== this.getQualifiedObservationEpoch(proof.owner)
+    )
+      return false;
+    return (
+      this.hasCompleteOtherHosts(identity.pluginId) &&
+      this.runtime.maintenance?.supportsHeldRecoveryV1?.(identity) === true
+    );
+  }
+  private hasCompleteOtherHosts(target: string): boolean {
+    const loaded = new Set(this.runtime.catalog().map((item) => item.id));
+    for (const id of this.builtinPluginIds) if (!loaded.has(id)) return false;
+    const config = this.configStore.get();
+    for (const [id, source] of Object.entries(config.plugins ?? {}))
+      if (
+        id !== target &&
+        config.pluginsEnabled === true &&
+        source.enabled !== false &&
+        !loaded.has(id)
+      )
+        return false;
+    return true;
+  }
+  private async beginHeldRecovery(
+    identity: PluginHeldRecoveryIdentity,
+  ): Promise<"held" | "known-busy" | "unknown"> {
+    const proof = this.heldAbsentTarget;
+    const policy = this.dependencies.activationPolicy;
+    if (
+      !proof ||
+      !policy ||
+      !this.supportsHeldRecovery(identity) ||
+      !this.runtime.maintenance?.beginHeldRecoveryV1
+    )
+      return "unknown";
+    try {
+      await policy.observeEnrollment();
+      const before = await policy.observeStatus(identity.pluginId);
+      if (
+        before.identity !== proof.journalIdentity ||
+        before.state.generation !== proof.nativeGeneration ||
+        !this.supportsHeldRecovery(identity)
+      )
+        return "unknown";
+      const result = await this.runtime.maintenance.beginHeldRecoveryV1(identity);
+      if (result !== "held") return result;
+      await this.runtime.observeQualifiedExecutions!();
+      await policy.observeEnrollment();
+      const after = await policy.observeStatus(identity.pluginId);
+      await proof.owner.refresh();
+      if (
+        this.heldAbsentTarget !== proof ||
+        after.identity !== before.identity ||
+        !this.supportsHeldRecovery(identity)
+      )
+        return "unknown";
+      return "held";
     } catch {
       return "unknown";
     }
@@ -815,6 +909,10 @@ export class PluginService {
           assertHeldPluginOperation(scope, claim);
           record.epoch = this.getQualifiedObservationEpoch(record.owner);
           if (record.epoch === null) throw new Error("Known failure observation unavailable");
+          if (this.heldAbsentTarget?.identity.pluginId === claim.pluginId)
+            this.heldAbsentTarget.epoch = record.epoch;
+        } else if (this.runtime.getLoadedReceipt?.(claim.pluginId)) {
+          this.heldAbsentTarget = undefined;
         }
         return result;
       });
@@ -901,7 +999,12 @@ export class PluginService {
     }
     try {
       await this.stopHeldPlugin(held);
-      await this.launchHeldPlugin(held, "activate");
+      const failure = await this.launchHeldPlugin(held, "activate");
+      if (failure)
+        return this.certifyKnownFailure(held, failure.ticket, {
+          kind: "initialization_rejected",
+          value: failure,
+        });
       await this.assertHeldSource(held, source.path);
       await this.patchSource(claim.pluginId, { ...source, path: claim.path });
       await policy.committedReplacement(claim.pluginId);
@@ -949,7 +1052,12 @@ export class PluginService {
     await policy.recovering(claim.pluginId, claim.expectedGeneration);
     try {
       await this.stopHeldPlugin(held);
-      await this.launchHeldPlugin(held, "recover");
+      const failure = await this.launchHeldPlugin(held, "recover");
+      if (failure)
+        return this.certifyKnownFailure(held, failure.ticket, {
+          kind: "initialization_rejected",
+          value: failure,
+        });
       await this.assertHeldSource(held, source.path);
       await this.patchSource(claim.pluginId, { ...baseline.source, enabled: true });
       await policy.committedReplacement(claim.pluginId);
@@ -981,15 +1089,51 @@ export class PluginService {
     return result;
   }
 
-  private async certifyKnownCompilerFailure(
+  private certifyKnownCompilerFailure(
     held: PluginHeldOperation,
     ticket: import("./activation-policy.js").ActivationTicket,
     failure: SettledQualifiedCompilerFailure,
   ): Promise<KnownFailedHeldObservation> {
+    return this.certifyKnownFailure(held, ticket, { kind: "compiler_error", value: failure });
+  }
+  private observeKnownFailureTarget(
+    held: PluginHeldOperation,
+    evidence: KnownFailureEvidence,
+    owner: QualifiedDaemonOwner,
+    config: ReturnType<DaemonConfigStore["get"]>,
+    state: ManagedPluginActivationState,
+  ) {
+    const current = this.runtime.getLoadedReceipt?.(held.claim.pluginId) ?? null;
+    if (
+      !current &&
+      evidence.kind === "compiler_error" &&
+      (!this.heldAbsentTarget ||
+        this.heldAbsentTarget.identity.pluginId !== held.claim.pluginId ||
+        this.heldAbsentTarget.owner !== owner ||
+        this.heldAbsentTarget.config !== config ||
+        this.heldAbsentTarget.nativeGeneration !== state.generation ||
+        !samePluginMaintenanceIdentity(this.heldAbsentTarget.identity, held.claim) ||
+        this.runtime.maintenance?.supportsHeldRecoveryV1?.({
+          generation: held.claim.generation,
+          transactionId: held.claim.transactionId,
+          pluginId: held.claim.pluginId,
+        }) !== true)
+    )
+      throw new Error("Known compiler failure lacks actual absent-target proof");
+    if (current && !isDeepStrictEqual(current, state.currentReceipt))
+      throw new Error("Known failure loaded receipt ambiguous");
+    return current;
+  }
+
+  private async certifyKnownFailure(
+    held: PluginHeldOperation,
+    ticket: import("./activation-policy.js").ActivationTicket,
+    evidence: KnownFailureEvidence,
+  ): Promise<KnownFailedHeldObservation> {
     const owner = this.dependencies.qualifiedDaemonOwner!;
     const policy = this.dependencies.activationPolicy!;
-    if (!readSettledQualifiedCompilerFailure(failure, owner, held))
-      throw new Error("Missing actual compiler settlement");
+    if (!readKnownFailureEvidence(evidence, owner, held))
+      throw new Error("Missing actual failure settlement");
     const config = this.configStore.get();
     const first = await policy.observeStatus(held.claim.pluginId);
     const baseline = first.state.baseline;
@@ -997,9 +1141,9 @@ export class PluginService {
       throw new Error("Known failure retained baseline unavailable");
     await owner.refresh();
     await this.runtime.observeQualifiedExecutions!();
-    const current = this.runtime.getLoadedReceipt?.(held.claim.pluginId) ?? null;
-    if (current && !isDeepStrictEqual(current, first.state.currentReceipt))
-      throw new Error("Known failure loaded receipt ambiguous");
+    if (!this.hasCompleteOtherHosts(held.claim.pluginId))
+      throw new Error("Known failure cohort incomplete");
+    const current = this.observeKnownFailureTarget(held, evidence, owner, config, first.state);
     const latest = await policy.authorize(
       held.claim.pluginId,
       held.claim.path,
@@ -1015,7 +1159,7 @@ export class PluginService {
       first.identity !== last.identity ||
       this.configStore.get() !== config ||
       current !== (this.runtime.getLoadedReceipt?.(held.claim.pluginId) ?? null) ||
-      !readSettledQualifiedCompilerFailure(failure, owner, held)
+      !readKnownFailureEvidence(evidence, owner, held)
     )
       throw new Error("Known failure changed during certification");
     const incarnation = owner.binding.expectedIncarnation;
@@ -1023,7 +1167,7 @@ export class PluginService {
       throw new Error("Known failure owner incarnation unavailable");
     const observation = freezeKnownFailedHeld({
       outcome: "known_failed_held",
-      reason: "compiler_error",
+      reason: evidence.kind,
       pluginId: held.claim.pluginId,
       nativeGeneration: last.state.generation,
       current: {
@@ -1042,9 +1186,22 @@ export class PluginService {
       service: this,
       held,
       observation,
-      compilerFailure: failure,
+      evidence,
       epoch: null,
     });
+    if (!current)
+      this.heldAbsentTarget = {
+        identity: {
+          generation: held.claim.generation,
+          transactionId: held.claim.transactionId,
+          pluginId: held.claim.pluginId,
+        },
+        owner,
+        config,
+        journalIdentity: last.identity,
+        nativeGeneration: last.state.generation,
+        epoch: null,
+      };
     return observation;
   }
 
@@ -1069,9 +1226,11 @@ export class PluginService {
   private async launchHeldPlugin(
     held: PluginHeldOperation,
     operation: ActivationOperation,
-  ): Promise<void> {
+  ): Promise<SettledQualifiedInitializationFailure | undefined> {
     const { claim } = held;
-    await this.runtime.startPlugin(
+    if (!this.runtime.startHeldPluginAttempt)
+      throw new Error("Actual held initialization attempt unavailable");
+    const failure = await this.runtime.startHeldPluginAttempt(
       claim.pluginId,
       claim.path,
       () => {
@@ -1085,8 +1244,10 @@ export class PluginService {
       operation,
       held,
     );
+    if (failure) return failure;
     await this.publishProviderRegistrations(claim.pluginId, claim.path);
     this.publishUsageSources(claim.pluginId);
+    return undefined;
   }
   private stopHeldPlugin(held: PluginHeldOperation): Promise<boolean> {
     this.removeProviderRegistrations(held.claim.pluginId);
@@ -2164,13 +2325,23 @@ async function recheckCohortJournals(
   }
 }
 
+function readKnownFailureEvidence(
+  evidence: KnownFailureEvidence,
+  owner: QualifiedDaemonOwner,
+  held: PluginHeldOperation,
+): boolean {
+  return evidence.kind === "compiler_error"
+    ? readSettledQualifiedCompilerFailure(evidence.value, owner, held) !== undefined
+    : readSettledQualifiedInitializationFailure(evidence.value, owner, held) !== undefined;
+}
+
 interface KnownFailedHeldRecord {
   owner: QualifiedDaemonOwner;
   incarnation: string;
   service: PluginService;
   held: PluginHeldOperation;
   observation: KnownFailedHeldObservation;
-  compilerFailure: SettledQualifiedCompilerFailure;
+  evidence: KnownFailureEvidence;
   epoch: number | null;
 }
 const knownFailedHeldResults = new WeakMap<object, KnownFailedHeldRecord>();
@@ -2207,7 +2378,7 @@ export function readKnownFailedHeld(
     qualifiedServices.get(record.owner) !== record.service ||
     record.epoch === null ||
     record.epoch !== record.service.getQualifiedObservationEpoch(record.owner) ||
-    !readSettledQualifiedCompilerFailure(record.compilerFailure, record.owner, record.held)
+    !readKnownFailureEvidence(record.evidence, record.owner, record.held)
   )
     throw new Error("Stale known held outcome");
   record.owner.assertFresh();

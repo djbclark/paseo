@@ -411,6 +411,7 @@ export function createPluginWorker(
         : null;
       const context: PluginServerContext = {
         sourceDirectory,
+        managedSource: message.managedSource === true,
         handle,
         registerProvider,
         registerUsageSource,
@@ -426,6 +427,12 @@ export function createPluginWorker(
         enumerable: true,
       });
       // Load/evaluate top-level code only after owner, inherited hold and initialization scope exist.
+      Object.defineProperty(context, "managedSource", {
+        value: message.managedSource === true,
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
       const contribute = initializationActivity.run(() =>
         "contribute" in options ? options.contribute : options.loadContribution(message.bundle),
       );

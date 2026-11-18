@@ -297,6 +297,37 @@ function nextNotification(service: PluginService, pluginId: string): Promise<voi
 }
 
 describe("PluginService", () => {
+  it("marks a normal writable checkout as unmanaged while binding its canonical source directory", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-unmanaged-context-"));
+    roots.push(home);
+    const observed = path.join(home, "context.json");
+    const directory = await createPlugin(
+      "plain",
+      `import { writeFileSync } from 'node:fs';
+      export default function contribute(context) {
+        const descriptor = Object.getOwnPropertyDescriptor(context, 'managedSource');
+        const changed = Reflect.set(context, 'managedSource', true);
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ sourceDirectory: context.sourceDirectory,
+          managedSource: context.managedSource, writable: descriptor?.writable,
+          configurable: descriptor?.configurable, changed }));
+        return () => {};
+      }`,
+    );
+    const service = createService(home, { plain: { source: "directory", path: directory } });
+    try {
+      await service.start();
+      expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
+        sourceDirectory: await realpath(directory),
+        managedSource: false,
+        writable: false,
+        configurable: false,
+        changed: false,
+      });
+    } finally {
+      await service.stopAllPlugins();
+    }
+  });
+
   it("restores an unsupported maintenance hold before any plugin initialization and retains it", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-held-"));
     roots.push(home);
@@ -2176,9 +2207,13 @@ describe("managed plugin promotion boundary", () => {
     const release = path.join(f.home, "release");
     const blocker = await createQueueBlocker(begun, release);
     await allow(f.policyFile, []);
-    const service = createService(f.home, {}, { activationPolicy: f.policy });
+    const service = createService(
+      f.home,
+      {},
+      { activationPolicy: f.policy, managedSources: new ManagedPluginSources(f.home) },
+    );
     await service.start();
-    const operation = service.installSource({ source: blocker, id: "blocker" });
+    const operation = service.installSource({ source: pathToFileURL(blocker).href, id: "blocker" });
     try {
       await waitForQueueBlocker(operation, begun);
       expect(await service.getManagedPluginStatus("managed")).toMatchObject({
@@ -2242,6 +2277,49 @@ describe("managed plugin promotion boundary", () => {
       }
     },
   );
+
+  it("retains managed context identity after revocation and holds restart without configured policy", async () => {
+    const f = await fixture();
+    const observed = path.join(f.home, "managed-context.json");
+    const directory = await createPlugin(
+      "managed",
+      `import { z } from 'zod'; import { writeFileSync } from 'node:fs';
+      export default function contribute(context) {
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ managedSource: context.managedSource }));
+        context.handle({ name: 'managedIdentity', input: z.unknown(), output: z.boolean() }, () => context.managedSource);
+        return () => {};
+      }`,
+    );
+    await allow(f.policyFile, [await authorization(directory, 0)]);
+    const service = createService(
+      f.home,
+      { managed: { source: "directory", path: directory } },
+      { activationPolicy: f.policy },
+    );
+    try {
+      await service.start();
+      expect(await service.invokePluginRpc("managed", "managedIdentity", null)).toBe(true);
+      await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+      expect(await service.invokePluginRpc("managed", "managedIdentity", null)).toBe(true);
+      await expect(service.reloadPlugin("managed")).rejects.toThrow();
+    } finally {
+      await service.stopAllPlugins();
+    }
+    await rm(observed);
+    const missing = new ManagedPluginActivationPolicy(undefined, path.join(f.home, "promotions"));
+    const restarted = createService(
+      f.home,
+      { managed: { source: "directory", path: directory } },
+      { activationPolicy: missing },
+    );
+    try {
+      await restarted.start();
+      expect(catalogIds(restarted)).not.toContain("managed");
+      expect(await readManagedSignal(observed)).toBe("");
+    } finally {
+      await restarted.stopAllPlugins();
+    }
+  });
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();
     const directory = await createPlugin(
@@ -2926,9 +3004,13 @@ describe("managed plugin promotion boundary", () => {
       import type { PluginServerContext } from '@getpaseo/plugin/server';
       export default function contribute(context: PluginServerContext) {
         const descriptor = Object.getOwnPropertyDescriptor(context, 'sourceDirectory');
+        const managedDescriptor = Object.getOwnPropertyDescriptor(context, 'managedSource');
+        const managedChanged = Reflect.set(context, 'managedSource', false);
         const changed = Reflect.set(context, 'sourceDirectory', '/incorrect');
         const redefined = Reflect.defineProperty(context, 'sourceDirectory', { value: '/incorrect' });
         writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ sourceDirectory: context.sourceDirectory,
+          managedSource: context.managedSource, managedWritable: managedDescriptor?.writable,
+          managedConfigurable: managedDescriptor?.configurable, managedChanged,
           registeredPath: JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8')).plugins.managed.path,
           writable: descriptor?.writable, configurable: descriptor?.configurable, enumerable: descriptor?.enumerable, changed, redefined }));
         return () => writeFileSync(${JSON.stringify(cleanupMarker)}, 'cleaned');
@@ -2949,6 +3031,10 @@ describe("managed plugin promotion boundary", () => {
       });
       expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
         sourceDirectory: await realpath(candidate),
+        managedSource: true,
+        managedWritable: false,
+        managedConfigurable: false,
+        managedChanged: false,
         registeredPath: old,
         writable: false,
         configurable: false,

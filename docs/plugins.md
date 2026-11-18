@@ -16,6 +16,14 @@ initialize paths before invoking the contribution. Contribution cleanup remains 
 
 > **Trust every plugin you add.** `paseo plugin add` and `paseo plugin install` mean “I trust this codebase.” Plugins are unsandboxed: server code and preparation commands run with the daemon user's access on the daemon host, and client contributions run inside Paseo. The repository's dependencies and future updates are part of that trust decision. With `--host`, preparation runs on that remote daemon host.
 
+`context.managedSource` is a readonly native boolean alongside `sourceDirectory`.
+It identifies protected managed enrollment, not writability, manifest content,
+permission or qualification. Ordinary checkout sources receive `false`. Managed
+activation receives `true`; revocation never relabels an already loaded managed
+source as ordinary, and retained history holds restart if its policy disappears.
+Always bind resources to `sourceDirectory`; use `managedSource === true` only to
+select managed snapshot validation rules. It cannot bypass native policy gates.
+
 ## Passive maintenance prototype (fork)
 
 `PluginService.maintenance` exposes the native V1 port. This source slice always

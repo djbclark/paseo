@@ -4099,8 +4099,10 @@ export class AgentManager {
       return null;
     }
 
+    const orderedChunks: string[] = [];
+    for (let i = chunks.length - 1; i >= 0; i--) orderedChunks.push(chunks[i]);
     return {
-      text: [...chunks].reverse().join(""),
+      text: orderedChunks.join(""),
       startsAtBeginning,
     };
   }

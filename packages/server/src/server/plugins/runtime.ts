@@ -494,17 +494,30 @@ export class PluginRuntime {
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
+    const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
     const bundles = await compileDirectoryPlugin(directory, this.daemonVersion, input.id);
     const { manifest } = bundles;
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
-    const loaded = await this.launchPlugin({
-      pluginId: input.id,
-      pluginDirectory: directory,
-      requirements: manifest.requirements,
-      child: new InternalPluginChild(evaluateBundle),
-      bundle: bundles.serverBundle,
-      clientBundle: bundles.clientBundle ?? "",
-    });
+    const loaded = ticket
+      ? await this.launchPreparedPlugin({
+          pluginId: input.id,
+          configuredPath: directory,
+          directory,
+          ticket,
+          operation: "activate",
+          canPublish: () => this.maintenanceIdentity === null && !this.maintenanceUncertain,
+          requirements: manifest.requirements,
+          serverBundle: bundles.serverBundle,
+          clientBundle: bundles.clientBundle ?? "",
+        })
+      : await this.launchPlugin({
+          pluginId: input.id,
+          pluginDirectory: directory,
+          requirements: manifest.requirements,
+          child: new InternalPluginChild(evaluateBundle),
+          bundle: bundles.serverBundle,
+          clientBundle: bundles.clientBundle ?? "",
+        });
     this.observationEpoch++;
     this.plugins.set(input.id, loaded);
     this.notifySessionOpenChange(loaded);
@@ -1061,6 +1074,7 @@ export class PluginRuntime {
       const loaded = await this.launchPlugin({
         pluginId,
         pluginDirectory: directory,
+        managedSource: ticket !== undefined,
         requirements,
         child: ticket && !this.dependencies.spawnChild ? spawnPluginChild({}) : this.spawnChild(),
         bundle: serverBundle,
@@ -1142,6 +1156,7 @@ export class PluginRuntime {
   private async launchPlugin(input: {
     pluginId: string;
     pluginDirectory: string;
+    managedSource?: boolean;
     requirements: PluginRequirements | undefined;
     child: PluginChild;
     bundle: string;
@@ -1252,6 +1267,7 @@ export class PluginRuntime {
               type: "initialize",
               pluginId,
               pluginDirectory: input.pluginDirectory,
+              managedSource: input.managedSource === true,
               hostInstanceId: instanceId,
               appVersion: this.daemonVersion,
               bundle,

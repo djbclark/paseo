@@ -398,11 +398,15 @@ export async function compilePlugin(entryPaths: {
   clientBundle: string | null;
   serverBundle: string | null;
 }> {
-  const [clientBundle, serverBundle] = await Promise.all([
+  // A failed target must not report task settlement while its sibling still
+  // owns esbuild work. Retirement drains both targets before helper shutdown.
+  const [client, server] = await Promise.allSettled([
     entryPaths.client ? compileTarget(entryPaths.client, "client") : null,
     entryPaths.server ? compileTarget(entryPaths.server, "server") : null,
   ]);
-  return { clientBundle, serverBundle };
+  if (client.status === "rejected") throw client.reason;
+  if (server.status === "rejected") throw server.reason;
+  return { clientBundle: client.value, serverBundle: server.value };
 }
 
 const CLIENT_ENTRY_FILENAMES = ["index.client.ts", "index.client.tsx"] as const;

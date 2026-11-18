@@ -1,4 +1,7 @@
 import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1122,3 +1125,79 @@ it("preserves filesystem error metadata for a missing entry", async () => {
     path: server,
   });
 });
+
+it("drains an admitted real compile and rejects later task ingress", async () => {
+  const plugin = await createSplitPlugin();
+  const loader = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm/api")).href;
+  const entry = new URL("./compiler-worker.ts", import.meta.url).href;
+  // This listener runs after the actual compiler ingress handler. The second
+  // task has entered its real filesystem/esbuild work before retirement closes
+  // admission; no timer or compiler replacement stands in for that lifetime.
+  const worker = new Worker(
+    `const { parentPort } = require("node:worker_threads");
+(async () => {
+  const { register } = await import(${JSON.stringify(loader)});
+  register();
+  const compiler = await import(${JSON.stringify(entry)});
+  let count = 0;
+  parentPort.on("message", () => {
+    if (++count !== 2) return;
+    const drained = compiler.retireQualifiedCompilerTasks();
+    parentPort.postMessage({ test: "retiring" });
+    void drained.then(() => parentPort.postMessage({ test: "drained" }));
+  });
+  parentPort.postMessage({ test: "ready" });
+})();`,
+    { eval: true, execArgv: [] },
+  );
+  const messages: Array<Record<string, unknown>> = [];
+  const waiters = new Set<() => void>();
+  let workerFailure: Error | undefined;
+  worker.on("error", (error) => {
+    workerFailure = error;
+    for (const notify of waiters) notify();
+  });
+  worker.on("message", (message: Record<string, unknown>) => {
+    messages.push(message);
+    for (const notify of waiters) notify();
+  });
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    while (!predicate()) {
+      if (workerFailure) throw workerFailure;
+      await new Promise<void>((resolve) => {
+        const notify = () => {
+          waiters.delete(notify);
+          resolve();
+        };
+        waiters.add(notify);
+      });
+    }
+  };
+  const results = () => messages.filter((message) => message.kind === "result");
+  const task = { kind: "entries", entries: { client: plugin.client, server: plugin.server } };
+  try {
+    await waitFor(() => messages.some((message) => message.test === "ready"));
+    worker.postMessage(task, []);
+    await waitFor(() => results().length === 1);
+    worker.postMessage(task, []);
+    await waitFor(() => messages.some((message) => message.test === "retiring"));
+    worker.postMessage(
+      { kind: "entries", entries: { client: null, server: "/absent/late.ts" } },
+      [],
+    );
+    await waitFor(
+      () =>
+        messages.some((message) => message.test === "drained") &&
+        messages.some((message) => message.kind === "error"),
+    );
+    expect(results()).toHaveLength(2);
+    expect(results()[1]?.value).toMatchObject({ serverBundle: expect.stringContaining("probe") });
+    const failure = messages.find((message) => message.kind === "error");
+    expect(failure?.error).toMatchObject({ message: "Plugin compiler is retiring" });
+    expect(messages.findIndex((message) => message.test === "drained")).toBeGreaterThan(
+      messages.lastIndexOf(results()[1]!),
+    );
+  } finally {
+    await worker.terminate();
+  }
+}, 20_000);

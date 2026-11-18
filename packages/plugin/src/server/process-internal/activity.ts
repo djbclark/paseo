@@ -29,12 +29,18 @@ export interface PluginHelperAdmissionRequest {
   readonly root: object | undefined;
   readonly operation: PluginHelperOperation;
 }
+export interface PluginBuiltinExecFileLaunch {
+  /** Producer-private, once-only fixed launch; no supplied command, options or authority. */
+  start(): ChildProcess;
+}
 export interface PluginHelperAdmissionPermit {
   readonly settled: Promise<void>;
+  readonly builtinExecFile?: PluginBuiltinExecFileLaunch;
   bind(child: ChildProcess): void;
   failed(error: unknown): void;
 }
 export interface PluginHelperLease {
+  readonly builtinExecFile?: PluginBuiltinExecFileLaunch;
   bind(child: ChildProcess): void;
   failed(error: unknown): void;
   release(): void;
@@ -227,6 +233,7 @@ export function acquirePluginHelper(operation: PluginHelperOperation): PluginHel
       },
     );
   return {
+    builtinExecFile: permit?.builtinExecFile,
     bind(child) {
       if (bound || released) throw new Error("Plugin helper handle already bound or settled");
       bound = true;

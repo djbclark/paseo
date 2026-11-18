@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID, createHash } from "node:crypto";
-import { mkdir, readFile, rm, symlink, unlink, writeFile, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, unlink, writeFile, stat, lstat } from "node:fs/promises";
 import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { userInfo } from "node:os";
@@ -65,7 +65,9 @@ test(
     assert.notEqual(process.getuid(), 0);
     const id = randomUUID();
     const stage = path.resolve(`.qualified-host-ci-${id}`);
-    const retained = `/opt/paseo-qualified-host-ci-${id}`;
+    // Do not inherit hosted-runner tool-directory permissions (notably /opt).
+    // This unique directory and its children are the only privileged fixture writes.
+    const retained = `/paseo-qualified-host-ci-${id}`;
     const policy = path.join(
       userInfo().homedir,
       ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json",
@@ -114,7 +116,23 @@ test(
         clearTimeout(timer);
       }
     };
+    async function ancestry(file) {
+      const rows = [];
+      for (let current = file; ; current = path.dirname(current)) {
+        const observed = await lstat(current);
+        rows.push({
+          path: current,
+          uid: observed.uid,
+          gid: observed.gid,
+          mode: (observed.mode & 0o777).toString(8),
+          symlink: observed.isSymbolicLink(),
+        });
+        if (current === path.dirname(current)) break;
+      }
+      return rows;
+    }
     try {
+      console.error("Previous fixture ancestor evidence", JSON.stringify(await ancestry("/opt")));
       sudo("mkdir", "-p", retained);
       sudo("chown", `${process.getuid()}:${process.getgid()}`, retained);
       const qualifications = [];
@@ -144,6 +162,17 @@ test(
       await writePolicy(qualifications);
       await symlink(`${retained}/A`, path.join(stage, "visible"));
       const launcher = createRequire(import.meta.url)(`${retained}/A/launcher.cjs`);
+      const retainedAncestry = await ancestry(`${retained}/A`);
+      console.error("Retained fixture ancestry evidence", JSON.stringify(retainedAncestry));
+      for (const observed of retainedAncestry) {
+        assert.equal(observed.uid, 0, `non-root fixture ancestor: ${observed.path}`);
+        assert.equal(
+          parseInt(observed.mode, 8) & 0o022,
+          0,
+          `writable fixture ancestor: ${observed.path}`,
+        );
+        assert.equal(observed.symlink, false);
+      }
       const invocation = launcher.createQualifiedHostInvocation(`${retained}/A`);
       assert.deepEqual(invocation.env, { PATH: "/usr/bin:/bin" });
       const childA = launcher.launchQualifiedPluginHost(`${retained}/A`);

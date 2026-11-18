@@ -1816,6 +1816,8 @@ describe("native maintenance participant serialization", () => {
       serverBundleSha256: "b".repeat(64),
     };
     let retained!: HeldPluginOperationScope;
+    const assertRetained = () => assertHeldPluginOperation(retained, claim);
+    const assertForged = () => assertHeldPluginOperation({} as HeldPluginOperationScope, claim);
     try {
       await expect(
         f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
@@ -1823,9 +1825,9 @@ describe("native maintenance participant serialization", () => {
           globalReady = false;
           assertHeldPluginOperation(scope, claim);
           await expect(f.reservation.begin(2, "ordinary")).rejects.toThrow();
-          expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
+          expect(assertForged).toThrow();
           f.reservation.holdForUnknownWork();
-          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+          expect(assertRetained).toThrow();
           return { nativeGeneration: 2 };
         }),
       ).rejects.toThrow();
@@ -1854,12 +1856,15 @@ describe("native maintenance participant serialization", () => {
       snapshotSha256: "a".repeat(64),
       serverBundleSha256: "b".repeat(64),
     };
+    let retained!: HeldPluginOperationScope;
+    const assertRetained = () => assertHeldPluginOperation(retained, claim);
     try {
       await expect(
         f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
+          retained = scope;
           f.reservation.setReady(false);
           f.reservation.setReady(true);
-          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+          expect(assertRetained).toThrow();
         }),
       ).rejects.toThrow();
     } finally {

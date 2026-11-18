@@ -714,6 +714,16 @@ class Distribution:
         require(text(path) and path.startswith("/") and not path.startswith("//"), "invalid-loader-route")
         budget = {"steps": 0, "links": 0}
         bind_targets = set(self.external) | {"/etc/ld.so.cache"}
+        # realpath is an index hint only. Every associated declaration's parent
+        # is traversed below before the row can authorize the actual leaf inode.
+        physical_aliases = {}
+        for logical, row in self.aliases.items():
+            parent = os.path.realpath(os.path.dirname(logical))
+            physical = parent.rstrip("/") + "/" + os.path.basename(logical)
+            rows = physical_aliases.setdefault(physical, [])
+            require(all(previous["linkText"] == row["linkText"] and previous["target"] == row["target"]
+                        for previous in rows), "conflicting-physical-alias")
+            rows.append(row)
 
         def inspect(current):
             budget["steps"] += 1
@@ -748,8 +758,14 @@ class Distribution:
                 if stat.S_ISLNK(info.st_mode):
                     budget["links"] += 1
                     require(budget["links"] <= 40 and current not in active, "loader-link-cycle-or-bound")
-                    row = self.aliases.get(current)
-                    require(row is not None and os.readlink(current) == row["linkText"], "undeclared-path-alias")
+                    rows = physical_aliases.get(current)
+                    require(rows is not None, "undeclared-path-alias")
+                    for declaration in rows:
+                        parent = walk(os.path.dirname(declaration["path"]), {*active, current})
+                        require(parent == os.path.dirname(current), "alias-parent-mismatch")
+                        require(identity(inspect(declaration["path"])) == identity(info), "alias-inode-mismatch")
+                    row = rows[0]
+                    require(os.readlink(current) == row["linkText"], "undeclared-path-alias")
                     link = row["linkText"]
                     require(text(link) and link, "invalid-link-text")
                     # current's containing directory is already physically resolved.
@@ -895,6 +911,61 @@ def launch_recipe(value, root, manifest_digest, caller):
     require(absolute(harness.get("path")) != root and
             not harness["path"].startswith(root + "/"), "candidate-controlled-harness")
     return {**environment, "HOME": caller.home, "USER": caller.name, "LOGNAME": caller.name}
+
+
+def verify_existing_namespace(root: str, expected_manifest_sha256: str) -> None:
+    """Read-only current-namespace recheck; no execution/owner qualification grant.
+
+    The caller authenticates the sealed bytes before importing this fixed member.
+    All exceptions are refusal. No Admin, privilege, mount or exec effects occur.
+    """
+    root = absolute(root)
+    digest = sha256(expected_manifest_sha256)
+    require(os.path.abspath(__file__) == root + "/system-closure/namespace-bootstrap.py",
+            "unexpected-verifier-member")
+    checks = []
+    distribution = None
+    try:
+        manifest = checked_file(root + ".manifest.json", 4 * 1024 * 1024, immutable=False)
+        checks.append(manifest)
+        require(hashlib.sha256(manifest.data).hexdigest() == digest, "unapproved-manifest")
+        namespace = namespace_identity()
+        mounts = verify_private_mounts()
+        # Keep the partially initialized object's descriptors reachable on refusal.
+        distribution = Distribution.__new__(Distribution)
+        distribution.__init__(root, decode_json(manifest.data))
+        bootstrap = distribution.open_member("system-closure/namespace-bootstrap.py")
+        require(stat.S_IMODE(bootstrap.before[2]) == 0o444, "unexpected-verifier-mode")
+        distribution.absent_selection.add("/etc/ld.so.preload")
+        targets = [(target, row["retainedPath"], row) for target, row in distribution.external.items()]
+        cache = distribution.loader["cache"]
+        targets.append((cache["path"], cache["retainedPath"], cache))
+        for target, member, row in targets:
+            source = distribution.open_member(member)
+            mounted = [mount for mount in mounts if mount["path"] == target]
+            require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"] and
+                    "noexec" not in mounted[0]["options"], "readonly-bind-unproved")
+            actual = checked_file(target, 512 * 1024 * 1024,
+                                  {key: row[key] for key in ("mode", "size", "sha256")})
+            checks.append(actual)
+            require(actual.before == source.before, "existing-bind-inode-mismatch")
+        distribution.verify_layout()
+        distribution.verify_search(distribution.loader["elf"])
+        for source in checks:
+            source.check()
+        distribution.check_sources()
+        distribution.check_layout()
+        require(namespace_identity() == namespace and verify_private_mounts() == mounts,
+                "existing-namespace-changed")
+    finally:
+        close_failed = False
+        sources = checks + list(getattr(distribution, "opened", {}).values())
+        for source in sources:
+            try:
+                source.close()
+            except OSError:
+                close_failed = True
+        require(not close_failed, "readonly-descriptor-close-failed")
 
 
 def execute_namespace(distribution, admin, caller, checks, executable, arguments, environment):

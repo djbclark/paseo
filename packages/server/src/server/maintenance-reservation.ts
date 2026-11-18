@@ -310,15 +310,15 @@ export class MaintenanceReservation {
       serverBundleSha256: input.serverBundleSha256,
     };
     const result = await this.ownerPluginOperation(claim, input.ownerToken, async (scope) => {
-      const result = await driver(claim, scope);
+      const operationResult = await driver(claim, scope);
       this.assertTransport(input);
       assertHeldPluginOperation(scope, claim);
-      if (!readPrivateKnownFailedHeld(result, scope, claim))
+      if (!readPrivateKnownFailedHeld(operationResult, scope, claim))
         assertHeldPluginOperationResult(
           claim,
-          result as import("./maintenance-operation.js").HeldPluginOperationResult,
+          operationResult as import("./maintenance-operation.js").HeldPluginOperationResult,
         );
-      return result;
+      return operationResult;
     });
     try {
       this.assertNoUnknownWork();
@@ -484,7 +484,8 @@ export class MaintenanceReservation {
   }
 
   status(): MaintenanceStatus {
-    const recoveryRequired = this.failed || this.recovery || Boolean(this.record?.recoveryOnly);
+    const recoveryOnly = this.record?.recoveryOnly;
+    const recoveryRequired = this.failed || this.recovery || Boolean(recoveryOnly);
     const closed = this.pending || recoveryRequired || Boolean(this.record?.tokenDigest);
     let state: MaintenanceStatus["state"] = "idle";
     if (closed) state = "held";
@@ -497,9 +498,7 @@ export class MaintenanceReservation {
       generation: this.attempt?.generation ?? (this.record?.generation || null),
       transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
       recoveryRequired,
-      ...(this.record?.recoveryOnly
-        ? { recoveryOnly: structuredClone(this.record.recoveryOnly) }
-        : {}),
+      ...(recoveryOnly ? { recoveryOnly: structuredClone(recoveryOnly) } : {}),
     };
   }
 

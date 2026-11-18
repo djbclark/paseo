@@ -230,9 +230,12 @@ export class MaintenanceReservation {
   status(): MaintenanceStatus {
     const recoveryRequired = this.failed || this.recovery;
     const closed = this.pending || recoveryRequired || Boolean(this.record?.tokenDigest);
+    let state: MaintenanceStatus["state"] = "idle";
+    if (closed) state = "held";
+    if (recoveryRequired) state = "recovery-required";
     return {
       schemaVersion: 1,
-      state: recoveryRequired ? "recovery-required" : closed ? "held" : "idle",
+      state,
       generation: this.attempt?.generation ?? (this.record?.generation || null),
       transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null,
       recoveryRequired,
@@ -241,6 +244,38 @@ export class MaintenanceReservation {
 
   private assertNoUnknownWork(): void {
     if (this.failed) throw new Error("Maintenance activity became unknown");
+  }
+
+  private async prepareParticipant(identity: MaintenanceIdentity): Promise<boolean> {
+      const initial = await this.participant.begin(identity);
+      this.assertNoUnknownWork();
+      if (initial === "known-busy") {
+        // Only a confirmed qualified rollback can discard an unpublished attempt.
+        await this.participant.end(identity);
+        this.assertNoUnknownWork();
+        return false;
+      }
+      if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
+      const quiet = await this.isQuiet();
+      this.assertNoUnknownWork();
+      if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
+      if (!quiet || this.inFlight) {
+        await this.participant.end(identity);
+        this.assertNoUnknownWork();
+        return false;
+      }
+      // Recheck current policy, cohort and incarnation after authoritative awaits.
+      const rechecked = await this.participant.begin(identity);
+      this.assertNoUnknownWork();
+      if (rechecked === "known-busy") {
+        await this.participant.end(identity);
+        this.assertNoUnknownWork();
+        return false;
+      }
+      if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
+        throw new Error("Plugin maintenance cohort changed or unknown");
+      this.assertNoUnknownWork();
+      return true;
   }
 
   async begin(
@@ -270,36 +305,8 @@ export class MaintenanceReservation {
     let knownBusy = false;
     try {
       this.enroll();
-      const initial = await this.participant.begin(identity);
-      this.assertNoUnknownWork();
-      if (initial === "known-busy") {
-        // Only a confirmed qualified rollback can discard an unpublished attempt.
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        knownBusy = true;
-        throw new Error("Maintenance known busy");
-      }
-      if (initial !== "held") throw new Error("Unknown plugin maintenance barrier");
-      const quiet = await this.isQuiet();
-      this.assertNoUnknownWork();
-      if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
-      if (!quiet || this.inFlight) {
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        knownBusy = true;
-        throw new Error("Maintenance known busy");
-      }
-      // Recheck current policy, cohort and incarnation after authoritative awaits.
-      const rechecked = await this.participant.begin(identity);
-      this.assertNoUnknownWork();
-      if (rechecked === "known-busy") {
-        await this.participant.end(identity);
-        this.assertNoUnknownWork();
-        knownBusy = true;
-        throw new Error("Maintenance known busy");
-      }
-      if (rechecked !== "held" || !this.participant.supportsV1() || this.inFlight)
-        throw new Error("Plugin maintenance cohort changed or unknown");
+      knownBusy = !(await this.prepareParticipant(identity));
+      if (knownBusy) throw new Error("Maintenance known busy");
       this.assertNoUnknownWork();
       const ownerToken = randomBytes(32).toString("base64url");
       this.persist({

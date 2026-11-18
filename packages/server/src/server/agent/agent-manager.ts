@@ -1367,17 +1367,7 @@ export class AgentManager {
         }
         return await session.listCommands();
       } finally {
-        try {
-          await session.close();
-        } catch (error) {
-          this.logger.warn(
-            { err: error, provider: normalizedConfig.provider },
-            "Failed to close draft command listing session",
-          );
-          if (this.maintenanceReservation) {
-            throw error;
-          }
-        }
+        await this.closeDiscoverySession(session, normalizedConfig.provider, "draft command listing");
       }
     });
   }
@@ -1413,19 +1403,18 @@ export class AgentManager {
           options: this.openedEffectiveOptions({ session, launchedOptions: options }),
         };
       } finally {
-        try {
-          await session.close();
-        } catch (error) {
-          this.logger.warn(
-            { err: error, provider: normalizedConfig.provider },
-            "Failed to close draft feature listing session",
-          );
-          if (this.maintenanceReservation) {
-            throw error;
-          }
-        }
+        await this.closeDiscoverySession(session, normalizedConfig.provider, "draft feature listing");
       }
     });
+  }
+
+  private async closeDiscoverySession(session: AgentSession, provider: AgentSessionConfig["provider"], operation: string): Promise<void> {
+    try {
+      await session.close();
+    } catch (error) {
+      this.logger.warn({ err: error, provider }, `Failed to close ${operation} session`);
+      if (this.maintenanceReservation) throw error;
+    }
   }
 
   usageSession(id: string) {
@@ -3024,11 +3013,9 @@ export class AgentManager {
     cleanup = false,
   ): Promise<T> {
     const run = () => this.runLifecycleMutationAdmitted(agentId, mutation);
-    return this.maintenanceReservation
-      ? cleanup
-        ? this.maintenanceReservation.runCleanup(run)
-        : this.maintenanceReservation.run(run)
-      : run();
+    if (!this.maintenanceReservation) return run();
+    if (cleanup) return this.maintenanceReservation.runCleanup(run);
+    return this.maintenanceReservation.run(run);
   }
 
   private async runLifecycleMutationAdmitted<T>(

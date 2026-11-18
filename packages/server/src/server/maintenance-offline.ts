@@ -1,4 +1,4 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, type Stats } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join, parse } from "node:path";
 
@@ -10,6 +10,36 @@ export interface MaintenanceRecord {
   transactionId: string | null;
   tokenDigest: string | null;
   uncertain?: boolean;
+}
+
+function validateProtectedRecord(before: Stats, beforePath: Stats, uid: number): void {
+    if (
+      !before.isFile() ||
+      before.uid !== uid ||
+      before.mode & 0o077 ||
+      before.nlink !== 1 ||
+      before.size > 4096 ||
+      before.dev !== beforePath.dev ||
+      before.ino !== beforePath.ino
+    )
+      throw new Error("Unprotected maintenance record");
+}
+
+function assertStableRecord(before: Stats, after: Stats, afterPath: Stats): void {
+    if (
+      before.dev !== afterPath.dev ||
+      before.ino !== afterPath.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs ||
+      after.mode !== before.mode ||
+      before.uid !== after.uid ||
+      before.nlink !== after.nlink ||
+      afterPath.mode !== after.mode ||
+      afterPath.uid !== after.uid ||
+      afterPath.nlink !== after.nlink
+    )
+      throw new Error("Maintenance authority changed");
 }
 
 /** The caller chooses only a trusted daemon configuration home, never a candidate path. */
@@ -50,7 +80,7 @@ export function readProtectedMaintenanceJson(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       if (JSON.stringify(ancestorsBefore) !== JSON.stringify(checkAncestors()))
-        throw new Error("Maintenance authority changed");
+        throw new Error("Maintenance authority changed", { cause: error });
       return MISSING_MAINTENANCE_AUTHORITY;
     }
     throw error;
@@ -60,16 +90,7 @@ export function readProtectedMaintenanceJson(
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = fstatSync(fd);
-    if (
-      !before.isFile() ||
-      before.uid !== account.uid ||
-      before.mode & 0o077 ||
-      before.nlink !== 1 ||
-      before.size > 4096 ||
-      before.dev !== beforePath.dev ||
-      before.ino !== beforePath.ino
-    )
-      throw new Error("Unprotected maintenance record");
+    validateProtectedRecord(before, beforePath, account.uid);
     const bytes = Buffer.alloc(4097);
     const length = readSync(fd, bytes, 0, bytes.length, null);
     if (length !== before.size || length > 4096)
@@ -80,20 +101,7 @@ export function readProtectedMaintenanceJson(
     const ancestorsAfter = checkAncestors();
     if (JSON.stringify(ancestorsBefore) !== JSON.stringify(ancestorsAfter))
       throw new Error("Maintenance authority ancestors changed");
-    if (
-      before.dev !== afterPath.dev ||
-      before.ino !== afterPath.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs ||
-      after.mode !== before.mode ||
-      before.uid !== after.uid ||
-      before.nlink !== after.nlink ||
-      afterPath.mode !== after.mode ||
-      afterPath.uid !== after.uid ||
-      afterPath.nlink !== after.nlink
-    )
-      throw new Error("Maintenance authority changed");
+    assertStableRecord(before, after, afterPath);
     return record;
   } finally {
     closeSync(fd);

@@ -1,3 +1,4 @@
+import type { MaintenanceReservation } from "../maintenance-reservation.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-messages/index.js";
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -251,6 +252,7 @@ interface ScheduleWorkspaceCreateInput {
 }
 
 export interface ScheduleServiceOptions {
+  maintenance?: MaintenanceReservation;
   paseoHome: string;
   logger: Logger;
   agentManager: ScheduleAgentManager;
@@ -285,6 +287,7 @@ export class ScheduleService {
     schedule: StoredSchedule,
     runId: string,
   ) => Promise<ScheduleExecutionResult>;
+  private readonly maintenance?: MaintenanceReservation;
   private readonly runningScheduleIds = new Set<string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -298,6 +301,7 @@ export class ScheduleService {
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
     this.now = options.now ?? (() => new Date());
+    this.maintenance = options.maintenance;
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
 
@@ -712,7 +716,16 @@ export class ScheduleService {
     });
   }
 
-  private async runSchedule(
+  private runSchedule(
+    schedule: StoredSchedule,
+    now: Date,
+    options?: { manual?: boolean },
+  ): Promise<void> {
+    const run = () => this.runScheduleAdmitted(schedule, now, options);
+    return this.maintenance ? this.maintenance.run(run) : run();
+  }
+
+  private async runScheduleAdmitted(
     schedule: StoredSchedule,
     now: Date,
     options?: { manual?: boolean },

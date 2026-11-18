@@ -1,3 +1,4 @@
+import { MaintenanceReservation } from "../maintenance-reservation.js";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -336,6 +337,57 @@ describe("ScheduleService", () => {
     // ENOTEMPTY races when AgentManager flushes a snapshot mid-cleanup.
     await agentStorage.flush();
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("manual and timed schedule execution share admission across runner and persistence", async () => {
+    const reservation = await MaintenanceReservation.create(tempDir, async () => true);
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const runner = vi.fn(async () => {
+      started();
+      await completion;
+      return { agentId: null, output: "done" };
+    });
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      maintenance: reservation,
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner,
+    });
+    const schedule = await service.create({
+      prompt: "maintenance",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "new-agent", config: { provider: "claude", cwd: tempDir } },
+    });
+    const running = service.runOnce(schedule.id);
+    try {
+      await began;
+      await expect(reservation.begin(1, "running-schedule")).rejects.toThrow();
+      finish();
+      await running;
+      const held = await reservation.begin(1, "quiet-schedule");
+      const previous = await service.inspect(schedule.id);
+      await expect(service.runOnce(schedule.id)).rejects.toThrow("maintenance");
+      now = new Date("2026-01-01T00:01:00.000Z");
+      await expect(service.tick()).rejects.toThrow("maintenance");
+      expect(runner).toHaveBeenCalledTimes(1);
+      expect((await service.inspect(schedule.id)).runs).toEqual(previous.runs);
+      await reservation.end(1, held.ownerToken);
+    } finally {
+      finish();
+      await running;
+      await service.stop();
+    }
   });
 
   test("ticks due schedules and records run history on disk", async () => {

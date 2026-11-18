@@ -29,6 +29,11 @@
       "source": "./src/terminal/agent-hooks/provider-registry.ts",
       "default": "./dist/server/terminal/agent-hooks/provider-registry.js"
     },
+    "./maintenance-offline": {
+      "types": "./dist/server/server/maintenance-offline.d.ts",
+      "source": "./src/server/maintenance-offline.ts",
+      "default": "./dist/server/server/maintenance-offline.js"
+    },
     "./daemon-control": {
       "types": "./dist/server/server/daemon-instance.d.ts",
       "source": "./src/server/daemon-instance.ts",

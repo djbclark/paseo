@@ -1,3 +1,4 @@
+import { maintenanceFor } from "../../maintenance-reservation.js";
 import type { FinishSubscriptions } from "../finish-subscriptions/index.js";
 import type { AgentPromptSource } from "../agent-messages/index.js";
 import type { Logger } from "pino";
@@ -170,7 +171,7 @@ interface ResolvedCreateAgent {
   createdWorktree?: CreatePaseoWorktreeWorkflowResult;
 }
 
-export async function createAgentCommand(
+async function createAgentCommandUnreserved(
   dependencies: CreateAgentCommandDependencies,
   input: CreateAgentCommandInput,
 ): Promise<CreateAgentCommandResult> {
@@ -593,4 +594,13 @@ function requireFinishSubscriptions(
 ): FinishSubscriptions {
   if (!dependencies.finishSubscriptions) throw new Error("Finish subscriptions are not configured");
   return dependencies.finishSubscriptions;
+}
+
+export function createAgentCommand(
+  ...args: Parameters<typeof createAgentCommandUnreserved>
+): ReturnType<typeof createAgentCommandUnreserved> {
+  const reservation = maintenanceFor(args[0].agentManager);
+  return reservation
+    ? reservation.run(() => createAgentCommandUnreserved(...args))
+    : createAgentCommandUnreserved(...args);
 }

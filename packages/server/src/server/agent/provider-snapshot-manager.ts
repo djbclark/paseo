@@ -1,3 +1,5 @@
+import { guardProviderClient } from "../provider-maintenance.js";
+import { guardMaintenanceMethod, type MaintenanceReservation } from "../maintenance-reservation.js";
 import { normalizeAgentModelCatalog, type ProviderOptions } from "@getpaseo/protocol/agent-types";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -112,6 +114,7 @@ export interface ProviderSnapshotTransition {
 type ProviderSnapshotChangeListener = (transition: ProviderSnapshotTransition) => void;
 
 export interface ProviderSnapshotManagerOptions {
+  maintenance?: MaintenanceReservation;
   logger: Logger;
   runtimeSettings?: AgentProviderRuntimeSettingsMap;
   providerOverrides?: Record<string, ProviderOverride>;
@@ -245,6 +248,7 @@ export class ProviderSnapshotManager {
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly openCodeBridge?: OpenCodeBridge;
   private readonly isDev: boolean;
+  private readonly maintenance?: MaintenanceReservation;
   private readonly extraClients: Partial<Record<AgentProvider, AgentClient>>;
   private runtimeSettings: AgentProviderRuntimeSettingsMap | undefined;
   private providerOverrides: Record<string, ProviderOverride> | undefined;
@@ -257,6 +261,7 @@ export class ProviderSnapshotManager {
 
   constructor(options: ProviderSnapshotManagerOptions) {
     this.logger = options.logger;
+    this.maintenance = options.maintenance;
     this.pluginProviders = new PluginAgentClientRegistry(
       options.logger.child({ module: "plugin-providers" }),
     );
@@ -264,7 +269,12 @@ export class ProviderSnapshotManager {
     this.managedProcesses = options.managedProcesses;
     this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
-    this.extraClients = options.extraClients ?? {};
+    this.extraClients = Object.fromEntries(
+      Object.entries(options.extraClients ?? {}).map(([id, client]) => [
+        id,
+        guardProviderClient(client!, this.maintenance),
+      ]),
+    );
     this.runtimeSettings = options.runtimeSettings;
     this.providerOverrides = options.providerOverrides;
     this.baseProviderOverrides = options.providerOverrides;
@@ -281,6 +291,18 @@ export class ProviderSnapshotManager {
       ...this.extraClients,
     } as Record<AgentProvider, AgentClient>;
     for (const client of Object.values(this.providerClients)) this.ownedClients.add(client);
+    if (this.maintenance) {
+      // Workflow leases include queueing and sequential refresh targets. The exhaustive
+      // client boundary and actual-child leases enforce execution for every provider caller.
+      for (const key of [
+        "refreshSnapshotForCwd",
+        "refreshSettingsSnapshot",
+        "warmUpSnapshotForCwd",
+        "getProviderDiagnostic",
+      ] as const) {
+        guardMaintenanceMethod(this, key, this.maintenance);
+      }
+    }
   }
 
   getSnapshot(cwd?: string): ProviderSnapshot {
@@ -455,7 +477,11 @@ export class ProviderSnapshotManager {
     if (existing) {
       return existing;
     }
-    const client = definition.createClient(this.logger);
+    const create = () => definition.createClient(this.logger);
+    const client = guardProviderClient(
+      this.maintenance ? this.maintenance.execute(create) : create(),
+      this.maintenance,
+    );
     clients[provider] = client;
     this.ownedClients.add(client);
     return client;
@@ -709,6 +735,7 @@ export class ProviderSnapshotManager {
     providerOverrides: Record<string, ProviderOverride> | undefined,
   ): Record<AgentProvider, ProviderDefinition> {
     const registry = buildProviderRegistry(this.logger, {
+      maintenance: this.maintenance,
       runtimeSettings,
       providerOverrides,
       pluginProviders: this.pluginProviders.definitions(),
@@ -897,7 +924,12 @@ export class ProviderSnapshotManager {
     return providers ?? this.getProviderIds();
   }
 
-  private async loadProviders(options: ProviderLoadOptions): Promise<void> {
+  private loadProviders(options: ProviderLoadOptions): Promise<void> {
+    const load = () => this.loadProvidersAdmitted(options);
+    return this.maintenance ? this.maintenance.run(load) : load();
+  }
+
+  private async loadProvidersAdmitted(options: ProviderLoadOptions): Promise<void> {
     await Promise.allSettled(
       options.providers.map((provider) => this.loadProvider({ ...options, provider })),
     );

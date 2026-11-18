@@ -1,3 +1,4 @@
+import { maintenanceFor } from "./maintenance-reservation.js";
 import type { Logger } from "pino";
 import { basename } from "node:path";
 import {
@@ -338,7 +339,7 @@ export async function handleCreatePaseoWorktreeRequest(
   }
 }
 
-export async function createPaseoWorktreeWorkflow(
+async function createPaseoWorktreeWorkflowUnreserved(
   dependencies: CreatePaseoWorktreeWorkflowDependencies,
   input: CreatePaseoWorktreeInput,
   options?: {
@@ -611,4 +612,13 @@ export async function runWorktreeSetupInBackground(
   } finally {
     await dependencies.emitWorkspaceUpdateForWorkspaceId(options.workspaceId);
   }
+}
+
+export function createPaseoWorktreeWorkflow(
+  ...args: Parameters<typeof createPaseoWorktreeWorkflowUnreserved>
+): ReturnType<typeof createPaseoWorktreeWorkflowUnreserved> {
+  const reservation = maintenanceFor(args[0].terminalManager);
+  return reservation
+    ? reservation.run(() => createPaseoWorktreeWorkflowUnreserved(...args))
+    : createPaseoWorktreeWorkflowUnreserved(...args);
 }

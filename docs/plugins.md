@@ -64,8 +64,11 @@ after its private execution validation. Contribution loading runs inside the
 already-created initialization activity owner. Its build defines
 `__PASEO_QUALIFIED_PLUGIN_ENTRY__` to suppress legacy direct-entry auto-wiring;
 this literal supplies no execution authority. The internal SDK's one-shot
-`installQualifiedHelperAdmission` hook runs before async activity lookup, so a
-sealed zero-helper profile rejects module-level helper launches too. Candidate
+`installQualifiedHelperAdmission` hook receives the current private activity root
+before helper launch or unscoped fallback. A sealed zero-helper profile rejects
+module-level helper launches too. Builtin admission uses the same live root and
+retains it through actual child close AND the producer's helper/descendant
+settlement; a callback, abort, timeout, or leader exit alone cannot release it. Candidate
 imports must not expose that internal namespace. These entry points alone supply
 no qualified binding or permission.
 

@@ -22,6 +22,12 @@ export class PluginExecutionOwner {
     this.releases.set(key, release);
     this.changed();
   }
+  runAdmitted<T>(message: PluginExecutionRoot, operation: () => T): T {
+    const release = this.releases.get(pluginExecutionKey(message));
+    if (!release) throw new Error("Missing admitted plugin execution root");
+    if (this.native?.runAdmittedWork) return this.native.runAdmittedWork(release, operation);
+    return operation();
+  }
   settled(instanceId: string, key: string): void {
     if (instanceId !== this.instanceId) {
       this.markUnknown();

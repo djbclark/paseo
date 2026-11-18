@@ -1,3 +1,4 @@
+import { InternalPluginChild, readInternalPluginExecution } from "./internal-child.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -89,4 +90,27 @@ it("keeps the sealed worker import inert until the producer calls the exported i
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("exposes only the original internal worker/activity association before any contribution evaluation", async () => {
+  let evaluated = false;
+  const child = new InternalPluginChild(() => {
+    evaluated = true;
+    return () => () => {};
+  });
+  const binding = readInternalPluginExecution(child);
+  expect(binding).toBeDefined();
+  expect(binding).toBe(readInternalPluginExecution(child));
+  expect(Object.isFrozen(binding)).toBe(true);
+  expect(evaluated).toBe(false);
+  expect(readInternalPluginExecution(Object.create(InternalPluginChild.prototype))).toBeUndefined();
+  expect(
+    readInternalPluginExecution({
+      workerIdentity: binding?.workerIdentity,
+      activityOwner: binding?.activityOwner,
+    }),
+  ).toBeUndefined();
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  child.disconnect();
+  await closed;
 });

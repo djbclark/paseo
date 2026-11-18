@@ -87,14 +87,12 @@ export async function qualifiedDaemonExecutionAccess(
   const assertQualified = () => {
     if (
       !owner ||
-      !isOwner ||
-      !isBinding ||
       isOwner(owner) !== true ||
       isBinding(owner.binding, "daemon") !== true
     )
       throw new Error("Qualified enclosing daemon unavailable");
     owner.assertFresh();
-    if (!terminalManager || !assertTerminal)
+    if (!terminalManager)
       throw new Error("Qualified terminal worker unavailable");
     assertTerminal(terminalManager, owner);
     const binding = owner.binding;

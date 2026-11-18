@@ -117,6 +117,7 @@ function workspace(
     subtitle,
     project: { viewKey: "project", name: "project", iconDataUri: null },
     changeRequestNumber: null,
+    agentIds: [],
     activityAt,
     run: () => undefined,
   };

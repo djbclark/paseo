@@ -1,0 +1,35 @@
+name: Fork Qualified Desktop
+on:
+  push:
+    branches: [fork/qualified-desktop-updates]
+  workflow_dispatch:
+permissions:
+  contents: read
+# Preserve paid runs when a later source commit arrives.
+concurrency:
+  group: qualified-desktop-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+jobs:
+  desktop-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies using repository retry and patch pattern
+        run: node scripts/npm-retry.mjs ci
+      - name: Build workspace declarations before desktop typecheck
+        run: npm run build:server
+      - name: Desktop typecheck
+        run: npm run typecheck --workspace=@getpaseo/desktop
+      - name: Focused lint
+        run: npm run lint -- packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts
+      - name: Focused formatting
+        run: npm run format:check:files -- packages/desktop/src/features/managed-bundle.ts packages/desktop/src/features/managed-desktop-policy.ts packages/desktop/src/features/managed-desktop-policy.test.ts packages/desktop/src/features/app-update-service.ts packages/desktop/src/features/app-update-service.test.ts packages/desktop/src/features/auto-updater.ts packages/desktop/src/features/auto-updater.test.ts .github/workflows/fork-qualified-desktop.yml
+      - name: Updater integration and Python Unicode bundle parity
+        working-directory: packages/desktop
+        run: npx vitest run src/features/app-update-service.test.ts src/features/auto-updater.test.ts src/features/managed-desktop-policy.test.ts --bail=1

@@ -1,3 +1,4 @@
+import { isManagedDesktop, ManagedDesktopAuthority } from "./managed-desktop-policy.js";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -140,11 +141,39 @@ export function shouldInstallAppUpdateOnQuit(input: {
   return !(input.platform === "linux" && input.isAppImage);
 }
 
-class ElectronAppUpdateRuntime implements AppUpdateRuntime {
+export class ElectronAppUpdateRuntime implements AppUpdateRuntime {
+  private readonly authority: ManagedDesktopAuthority | null;
+  private info: RuntimeUpdateInfo | null = null;
+  private archive: string | null = null;
+  private configuration: AppUpdateRuntimeConfiguration | null = null;
+
+  constructor(
+    authority: ManagedDesktopAuthority | null = isManagedDesktop(process.resourcesPath ?? "")
+      ? new ManagedDesktopAuthority()
+      : null,
+  ) {
+    this.authority = authority;
+  }
+
+  prepareInstall(targetVersion: string): void {
+    if (!this.authority) return;
+    if (!this.info || this.info.version !== targetVersion || !this.archive)
+      throw new Error("Managed desktop staged artifact unavailable");
+    this.authority.downloadMetadata(targetVersion, this.info.files ?? []);
+    this.authority.verifyArchive(this.archive);
+    this.authority.verifyInstalledBundle(
+      path.resolve(process.resourcesPath ?? "", "../.."),
+      targetVersion,
+    );
+    // The native maintenance bridge is supplied by the separate reservation slice.
+    // No metadata or grant can substitute for that adapter.
+    throw new Error("Managed desktop activation held: native reservation adapter unavailable");
+  }
   private configured = false;
 
   configure(input: AppUpdateRuntimeConfiguration): void {
-    autoUpdater.autoDownload = true;
+    this.configuration = input;
+    autoUpdater.autoDownload = this.authority === null;
     autoUpdater.autoRunAppAfterInstall = true;
     // Paseo revalidates the current manifest before explicitly installing on quit.
     // Electron's built-in handler would install an older download without checking
@@ -157,7 +186,7 @@ class ElectronAppUpdateRuntime implements AppUpdateRuntime {
       try {
         return await input.shouldAdmitUpdate(info as RuntimeUpdateInfo);
       } catch {
-        return true;
+        return this.authority === null;
       }
     };
 
@@ -179,23 +208,44 @@ class ElectronAppUpdateRuntime implements AppUpdateRuntime {
     autoUpdater.on("update-available", (info) => {
       const updateInfo = info as RuntimeUpdateInfo;
       updateLifecycleLog.updateAvailable(updateInfo.version);
-      input.onUpdateAvailable(updateInfo);
+      this.configuration?.onUpdateAvailable(updateInfo);
     });
     autoUpdater.on("update-downloaded", (info) => {
       const updateInfo = info as RuntimeUpdateInfo;
       updateLifecycleLog.updateDownloaded(updateInfo.version);
-      input.onUpdateDownloaded(updateInfo);
+      if (this.authority) {
+        try {
+          this.authority.downloadMetadata(updateInfo.version, updateInfo.files ?? []);
+          if (!updateInfo.downloadedFile) throw new Error("Managed desktop archive path missing");
+          this.authority.verifyArchive(updateInfo.downloadedFile);
+          this.archive = updateInfo.downloadedFile;
+          this.info = updateInfo;
+        } catch {
+          this.archive = null;
+          this.configuration?.onError(new Error("Managed desktop staged artifact rejected"));
+          return;
+        }
+      }
+      this.configuration?.onUpdateDownloaded(updateInfo);
     });
     autoUpdater.on("error", (error) => {
       if (isUpdateChannelNotPublished(error)) return;
-      input.onError(error);
+      this.configuration?.onError(error);
     });
   }
 
   async checkForUpdates(): Promise<RuntimeUpdateCheckResult | null> {
     try {
+      if (this.authority) {
+        const packageUrl = this.authority.packageUrl();
+        autoUpdater.setFeedURL({ provider: "generic", url: new URL(".", packageUrl).href });
+      }
       const result = await autoUpdater.checkForUpdates();
       if (!result) return null;
+      if (this.authority && result.isUpdateAvailable) {
+        this.authority.downloadMetadata(result.updateInfo.version, result.updateInfo.files);
+        this.info = result.updateInfo as RuntimeUpdateInfo;
+      }
       return {
         isUpdateAvailable: result.isUpdateAvailable,
         updateInfo: result.updateInfo as RuntimeUpdateInfo,
@@ -206,12 +256,27 @@ class ElectronAppUpdateRuntime implements AppUpdateRuntime {
     }
   }
 
-  downloadUpdate(targetVersion: string): Promise<unknown> {
+  async downloadUpdate(targetVersion: string): Promise<unknown> {
+    if (this.authority) {
+      if (!this.info || this.info.version !== targetVersion)
+        throw new Error("Managed desktop target changed");
+      this.authority.downloadMetadata(targetVersion, this.info.files ?? []);
+    }
     updateLifecycleLog.downloadRequested(targetVersion);
-    return autoUpdater.downloadUpdate();
+    const files = await autoUpdater.downloadUpdate();
+    if (this.authority) {
+      // Re-read AFTER any in-flight download wait, even when updater reused cache.
+      this.authority.assertUnchanged();
+      if (files.length !== 1 || !files[0])
+        throw new Error("Managed desktop ZIP archive unavailable");
+      this.authority.verifyArchive(files[0]);
+      this.archive = files[0];
+    }
+    return files;
   }
 
   quitAndInstall({ targetVersion, isSilent, isForceRunAfter }: AppUpdateInstallRequest): void {
+    this.prepareInstall(targetVersion);
     autoUpdater.autoRunAppAfterInstall = isForceRunAfter;
     updateLifecycleLog.quitAndInstallRequested({
       targetVersion,

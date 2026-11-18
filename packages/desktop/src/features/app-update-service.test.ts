@@ -26,6 +26,10 @@ class FakeAppUpdateRuntime implements AppUpdateRuntime {
     resolve(): void;
     reject(error: Error): void;
   } | null = null;
+  installGuard: () => void = () => undefined;
+  prepareInstall(): void {
+    this.installGuard();
+  }
   checkCount = 0;
   downloadCallCount = 0;
   requestedDownloadVersions: string[] = [];
@@ -840,5 +844,49 @@ describe("app update service", () => {
       date: "2026-04-28T00:00:00.000Z",
       errorMessage: null,
     });
+  });
+});
+
+describe("managed install boundary", () => {
+  const input = { currentVersion: "1.2.3", releaseChannel: "stable" as const };
+  it("holds a downloaded update before pre-quit side effects", async () => {
+    const { runtime, service } = createService();
+    runtime.nextCheck({ isUpdateAvailable: true, updateInfo: rolledOutUpdate });
+    runtime.finishUpdateDownload(rolledOutUpdate);
+    runtime.installGuard = () => {
+      throw new Error("reservation unavailable");
+    };
+    let quit = false;
+    const result = await service.downloadAndInstallUpdate(input, async () => {
+      quit = true;
+    });
+    expect(result.installed).toBe(false);
+    expect(quit).toBe(false);
+    expect(runtime.installedVersions).toEqual([]);
+  });
+  it("rechecks after an asynchronous pre-quit wait", async () => {
+    const { runtime, service } = createService();
+    runtime.nextCheck({ isUpdateAvailable: true, updateInfo: rolledOutUpdate });
+    const result = await service.downloadAndInstallUpdate(input, async () => {
+      runtime.installGuard = () => {
+        throw new Error("revoked during wait");
+      };
+    });
+    expect(result.installed).toBe(false);
+    expect(runtime.installedVersions).toEqual([]);
+  });
+  it("holds explicit install-on-quit for staged files", async () => {
+    const { runtime, service } = createService({ bucket: async () => 0 });
+    runtime.nextCheck({ isUpdateAvailable: true, updateInfo: rolledOutUpdate });
+    await service.checkForAppUpdate({ ...input, intent: "manual" });
+    runtime.finishUpdateDownload(rolledOutUpdate);
+    runtime.installGuard = () => {
+      throw new Error("revoked staged file");
+    };
+    runtime.nextCheck({ isUpdateAvailable: true, updateInfo: rolledOutUpdate });
+    expect(
+      await service.installUpdateOnQuit({ ...input, signal: new AbortController().signal }),
+    ).toBe(false);
+    expect(runtime.installedVersions).toEqual([]);
   });
 });

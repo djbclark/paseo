@@ -264,6 +264,25 @@ Use the beta path when you need to:
 
 ## Staged rollout (stable channel)
 
+Fork managed desktop builds opt in with `Contents/Resources/managed-release.json`.
+The packaging adapter stamps this marker before signing; it grants no update permission.
+Unmarked upstream builds keep their existing updater behavior. Managed builds require
+protected controller policy at the real account home's
+`.local/state/djbclark-ade/forks/paseo-desktop-policy.json`; environment home overrides
+cannot select a grant. Missing, revoked or invalid policy holds updates. A changed
+transaction or generation holds the captured update until a fresh app process checks it.
+The managed feed must list only the exact qualified ZIP, with matching version and
+SHA512; the runtime verifies cached or downloaded archive SHA256 before installation.
+
+Managed activation currently holds because the native maintenance reservation bridge
+is not wired into the desktop runtime. Keep this hold until the bridge verifies the
+reservation and extracted candidate bundle identity, then rechecks policy immediately
+before installation. A policy grant alone cannot authorize a daemon interruption.
+`bundleSha256` identifies the entire artifact on disk; it does not attest loaded daemon
+or plugin code. The Python reference encoder in the desktop test utilities checks
+JSONL v1 parity, including Unicode code-point ordering, directories, modes and symlinks.
+No automatic first-cutover exception exists for old daemons without reservations.
+
 Stable desktop releases go out via a linear time-based rollout for automatic update checks: 0% admitted when the updater manifests appear, 100% admitted 36 hours later, linear ramp in between. Manual checks bypass the rollout so a user can install immediately when they click **Check**. Beta releases bypass the rollout entirely — beta users always receive updates immediately.
 
 The rollout is driven by a `rolloutHours` field stamped into the GitHub Release manifests (`latest-mac.yml`, `latest-linux.yml`, `latest.yml`) by the `finalize-rollout` job in `desktop-release.yml`.

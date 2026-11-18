@@ -26,6 +26,8 @@ export interface RuntimeUpdateInfo {
   releaseNotes?: unknown;
   releaseDate?: unknown;
   rolloutHours?: unknown;
+  files?: Array<{ url: string; sha512: string }>;
+  downloadedFile?: string;
 }
 
 export interface RuntimeUpdateCheckResult {
@@ -51,6 +53,7 @@ export interface AppUpdateRuntime {
   configure(input: AppUpdateRuntimeConfiguration): void;
   checkForUpdates(): Promise<RuntimeUpdateCheckResult | null>;
   downloadUpdate(targetVersion: string): Promise<unknown>;
+  prepareInstall?(targetVersion: string): void;
   quitAndInstall(input: AppUpdateInstallRequest): void;
 }
 
@@ -116,7 +119,9 @@ async function performQuitAndInstall(
     restart: boolean;
   },
 ): Promise<void> {
+  runtime.prepareInstall?.(targetVersion);
   if (onBeforeQuit) await onBeforeQuit();
+  runtime.prepareInstall?.(targetVersion);
   runtime.quitAndInstall({
     targetVersion,
     isSilent: !restart,
@@ -415,19 +420,6 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     const readyVersion = cachedUpdateInfo.version;
     if (signal?.aborted) {
       return buildDeferredInstallResult(currentVersion);
-    }
-
-    if (isReadyToInstallVersion(readyVersion)) {
-      await performQuitAndInstall(deps.runtime, {
-        targetVersion: readyVersion,
-        onBeforeQuit,
-        restart,
-      });
-      return {
-        installed: true,
-        version: readyVersion,
-        message: "Update downloaded. The app will restart shortly.",
-      };
     }
 
     try {

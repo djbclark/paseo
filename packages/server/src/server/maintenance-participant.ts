@@ -1,3 +1,4 @@
+import * as retainedTerminal from "../terminal/worker-terminal-manager.js";
 import type {
   HeldPluginOperationClaim,
   HeldPluginOperationScope,
@@ -92,14 +93,9 @@ export async function qualifiedDaemonExecutionAccess(
   } catch {
     /* Missing genuine enclosing daemon producer remains unsupported. */
   }
-  try {
-    const terminalModule = "../terminal/worker-terminal-manager.js";
-    const terminal: Record<string, unknown> = await import(terminalModule);
-    if (typeof terminal.assertQualifiedWorkerTerminalManager === "function")
-      assertTerminal = terminal.assertQualifiedWorkerTerminalManager as typeof assertTerminal;
-  } catch {
-    /* Missing retained terminal seam is unsupported. */
-  }
+  const terminal: Record<string, unknown> = retainedTerminal;
+  if (typeof terminal.assertQualifiedWorkerTerminalManager === "function")
+    assertTerminal = terminal.assertQualifiedWorkerTerminalManager as typeof assertTerminal;
   const assertQualified = () => {
     if (
       !owner ||

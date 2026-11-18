@@ -19,6 +19,8 @@ export interface PluginMaintenancePort {
 
 export interface NativePluginAdmission {
   enterWork(): () => void;
+  /** Reenter only the actual still-live native root; never creates new admission. */
+  runAdmittedWork<T>(lease: () => void, operation: () => T): T;
   holdForUnknownWork(): void;
   runHeldOperation<T>(
     scope: HeldPluginOperationScope,

@@ -200,10 +200,13 @@ class LoaderTraversalTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         stack.enter_context(mock.patch.object(ns.os, "lstat", side_effect=self.inspect))
-        stack.enter_context(mock.patch.object(ns.os, "readlink", side_effect=self.links.__getitem__))
+        stack.enter_context(mock.patch.object(ns.os, "readlink", side_effect=lambda path:
+            self.links[self.resolve(path, follow_leaf=False)]))
+        stack.enter_context(mock.patch.object(ns.os.path, "realpath", side_effect=self.resolve))
         stack.enter_context(mock.patch.object(ns.os, "scandir", side_effect=lambda path:
             contextlib.nullcontext(iter(types.SimpleNamespace(name=name) for name in self.children(path)))))
-        stack.enter_context(mock.patch.object(ns.os.path, "lexists", side_effect=lambda path: path in self.nodes))
+        stack.enter_context(mock.patch.object(ns.os.path, "lexists", side_effect=lambda path:
+            self.resolve(path, follow_leaf=False) in self.nodes))
 
     def add(self, path, kind, uid=0, mode=0o755):
         self.nodes[path] = types.SimpleNamespace(st_dev=1, st_ino=len(self.nodes) + 1,
@@ -222,13 +225,40 @@ class LoaderTraversalTests(unittest.TestCase):
         if declared:
             self.distribution.aliases[path] = {"path": path, "target": target, "linkText": link_text}
 
+    def resolve(self, path, follow_leaf=True):
+        # Virtual kernel-path behavior for source observations only; production
+        # always uses the actual filesystem and independently walks every route.
+        parts = path.split("/")[1:]
+        resolved = []
+        links = 0
+        while parts:
+            part = parts.pop(0)
+            if part in ("", "."):
+                continue
+            if part == "..":
+                resolved = resolved[:-1]
+                continue
+            candidate = "/" + "/".join([*resolved, part])
+            if candidate in self.links and (parts or follow_leaf):
+                links += 1
+                if links > 40:
+                    raise OSError("virtual link bound")
+                target = self.links[candidate]
+                if target.startswith("/"):
+                    resolved = []
+                parts = target.split("/") + parts
+            else:
+                resolved.append(part)
+        return "/" + "/".join(resolved)
+
     def inspect(self, path):
-        if path not in self.nodes:
+        physical = self.resolve(path, follow_leaf=False)
+        if physical not in self.nodes:
             raise FileNotFoundError(path)
-        return self.nodes[path]
+        return self.nodes[physical]
 
     def children(self, path):
-        prefix = path.rstrip("/") + "/"
+        prefix = self.resolve(path).rstrip("/") + "/"
         return [candidate[len(prefix):] for candidate in self.nodes
                 if candidate.startswith(prefix) and "/" not in candidate[len(prefix):]]
 
@@ -282,6 +312,54 @@ class LoaderTraversalTests(unittest.TestCase):
         self.distribution.verify_search([row])
         self.assertEqual(self.distribution.check_path_aliases("/declared/lib/libx.so"), "/usr/lib/libx-real.so")
         self.distribution.check_layout()
+
+    def directory_alias_layout(self):
+        self.link("/alias-one", "/declared/lib", "/declared/lib")
+        self.link("/alias-two", "/alias-one", "/declared/lib")
+        self.link("/declared/lib/libx.so", "/usr/lib/libx-real.so", "/usr/lib/libx-real.so", declared=False)
+        self.distribution.aliases["/alias-one/libx.so"] = {"path": "/alias-one/libx.so",
+            "linkText": "/usr/lib/libx-real.so", "target": "/usr/lib/libx-real.so"}
+        self.distribution.directories += ["/alias-one", "/alias-two"]
+
+    def test_logical_leaf_alias_under_multiple_directory_aliases_is_same_stable_inode(self):
+        self.directory_alias_layout()
+        for path in ("/alias-one/libx.so", "/alias-two/libx.so", "/declared/lib/libx.so"):
+            self.assertEqual(self.distribution.check_path_aliases(path), "/usr/lib/libx-real.so")
+        self.distribution.verify_search([])
+        self.distribution.check_layout()
+        self.nodes["/declared/lib/libx.so"].st_ino += 100
+        with self.assertRaisesRegex(ns.Hold, "loader-route-changed-before-exec"):
+            self.distribution.check_layout()
+
+    def test_logical_leaf_missing_or_changed_declaration_refuses(self):
+        self.directory_alias_layout()
+        row = self.distribution.aliases.pop("/alias-one/libx.so")
+        with self.assertRaisesRegex(ns.Hold, "undeclared-path-alias"):
+            self.distribution.check_path_aliases("/alias-two/libx.so")
+        for change in ({"linkText": "/wrong/text"}, {"target": "/other/inner"}):
+            self.distribution.aliases[row["path"]] = {**row, **change}
+            with self.subTest(change=change), self.assertRaises(ns.Hold):
+                self.distribution.check_path_aliases("/alias-two/libx.so")
+
+    def test_conflicting_logical_rows_for_one_physical_alias_refuse(self):
+        self.directory_alias_layout()
+        row = self.distribution.aliases["/alias-one/libx.so"]
+        self.distribution.aliases["/alias-two/libx.so"] = {**row,
+            "path": "/alias-two/libx.so", "target": "/other/inner"}
+        with self.assertRaisesRegex(ns.Hold, "conflicting-physical-alias"):
+            self.distribution.check_path_aliases("/alias-one/libx.so")
+
+    def test_logical_parent_through_writable_or_undeclared_bridge_refuses(self):
+        self.directory_alias_layout()
+        self.directory("/bridge-base", uid=1001)
+        self.link("/bridge-base/link", "/declared/lib", "/declared/lib", declared=False)
+        self.links["/alias-one"] = "/bridge-base/link"
+        self.distribution.aliases["/alias-one"]["linkText"] = "/bridge-base/link"
+        for owner in (1001, 0):
+            self.nodes["/bridge-base"].st_uid = owner
+            self.distribution.layout_snapshot.clear()
+            with self.subTest(owner=owner), self.assertRaises(ns.Hold):
+                self.distribution.check_path_aliases("/alias-two/libx.so")
 
     def test_undeclared_empty_protected_selection_child_refuses(self):
         self.directory("/declared/lib/tls")

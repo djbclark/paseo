@@ -383,6 +383,11 @@ export class PluginService {
           await policy.committedReplacement(pluginId);
         } catch (error) {
           await this.stopPlugin(pluginId);
+          if (this.configStore.get().plugins?.[pluginId]?.path !== source.path) {
+            throw new Error("Replacement registration changed; recovery required", {
+              cause: error,
+            });
+          }
           if (wasRunning && this.canPublish(pluginId)) {
             try {
               await this.startExplicit(pluginId, source.path, "recover");

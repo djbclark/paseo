@@ -15,7 +15,7 @@ import { describeHookWorkspace } from "./plugins/lifecycle/index.js";
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
-import { open, rm, stat } from "fs/promises";
+import { mkdir, open, rm, stat } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { getHostName } from "./host-name.js";
 import path from "node:path";
@@ -629,6 +629,17 @@ export async function createPaseoDaemon(
 ): Promise<PaseoDaemon> {
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
+  await mkdir(config.paseoHome, { recursive: true, mode: 0o700 });
+  const maintenance = new MaintenanceReservation(config.paseoHome, async () => {
+    const unavailable = terminalManager.getUnavailableError?.();
+    if (unavailable) throw unavailable;
+    if (!agentManager.isMaintenanceQuiet()) return false;
+    // Open terminals can accept input and run arbitrary commands: treat every one as busy.
+    const terminals = await terminalManager.adoptTerminals();
+    if (!Number.isSafeInteger(terminals) || terminals < 0) throw new Error("Unknown terminal observation");
+    return terminals === 0 && agentManager.isMaintenanceQuiet();
+  });
+  maintenance.setReady(false);
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
   await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
     logger.warn(
@@ -669,7 +680,7 @@ export async function createPaseoDaemon(
     },
   });
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
-  void orchestrationSkills.autoUpdate().catch((error) => {
+  void maintenance.run(() => orchestrationSkills.autoUpdate()).catch((error) => {
     logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
   });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
@@ -697,7 +708,7 @@ export async function createPaseoDaemon(
   // Reconcile the helper-process ledger in the background so it never blocks the
   // daemon from coming up; terminating a live leftover can take a few seconds.
   // Best-effort, so a failure is logged here rather than crashing startup.
-  void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
+  void maintenance.run(() => reconcileManagedProcessLedger(managedProcesses, logger)).catch((error) => {
     logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
   });
   let relayRuntime: RelayRuntime | null = null;
@@ -727,13 +738,6 @@ export async function createPaseoDaemon(
   });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
-  let maintenanceReady = false;
-  const maintenance = new MaintenanceReservation(config.paseoHome, async () => {
-    if (!maintenanceReady || terminalManager.getUnavailableError?.() || !agentManager.isMaintenanceQuiet()) return false;
-    // Open terminals can accept input and run arbitrary commands: treat every one as busy.
-    const terminals = await terminalManager.adoptTerminals();
-    return terminals === 0 && agentManager.isMaintenanceQuiet();
-  });
   const terminalManager = await startWorkerTerminalManager({
     paseoHome: config.paseoHome,
     paseoVersion: daemonVersion,
@@ -1923,6 +1927,7 @@ export async function createPaseoDaemon(
             providerSnapshotManager.settlePluginProviders();
             restartRecovery.resumePending();
             await finishSubscriptions.start();
+            maintenance.setReady(true);
             wsServer.beginAcceptingConnections();
             const relaySecurityLogger = logger.child({ module: "relay-security" });
             relayRuntime = createRelayRuntime({
@@ -1996,6 +2001,7 @@ export async function createPaseoDaemon(
   };
 
   const stop = async (options?: { keepTerminals?: boolean }) => {
+    maintenance.setReady(false);
     const keepTerminals = options?.keepTerminals === true;
     let terminalShutdownError: unknown = null;
     localCredential = null;

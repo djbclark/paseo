@@ -741,16 +741,34 @@ and all live provider sessions (including idle sessions whose autonomous work ca
 quiet). It never closes sessions or cancels work to obtain a reservation. Create/resume/prompt,
 worktree creation, workspace setup/scripts, and scheduled execution share that admission owner.
 
-The daemon stores only the token digest, generation and transaction in
-`maintenance-reservation.json` inside its home, with atomic replacement and fsync. Restart keeps
-the hold as recovery-required until matching token and generation explicitly end it. Generations
-must increase, including after rollback.
+The daemon stores the token digest, generation and transaction in
+`maintenance-reservation.json`, with a permanent private `maintenance-enrollment.json` alongside
+it. A fresh home has neither file. Enrollment precedes the first reservation attempt; its private
+zero-generation idle record is not a controller generation. Missing established authority,
+malformed records, unsafe paths and uncertain reads refuse startup. Never delete the enrollment
+marker to clear a hold.
+
+Known busy work refuses begin and reopens admission without cancelling anything. Unknown
+observations persist an uncertain recovery hold where storage permits; any persistence lifecycle
+failure latches the current process closed. Pending status reports held; failure status reports
+recovery-required even before a token exists. An uncertain hold without an issued owner token
+requires separately authorized operator recovery; this API cannot manufacture a replacement token.
+
+Restart keeps a protected held record as recovery-required until its matching owner ends it.
+For end, token/generation validation authorizes release and atomic rename of the idle generation
+record is the logical commit point; directory fsync establishes durability. A lost response is not
+the commit point. After an I/O failure the current process stays closed, while restart reads the
+protected stable record: held remains held, a valid idle record is committed release, and missing
+established or malformed authority refuses startup. Generations increase after release and rollback.
 
 After independently verifying daemon exit, the external installer runs
 `paseo daemon maintenance verify-offline --generation N --transaction-id ID --json` using its
 trusted installed CLI. This read-only check fixes authority to the real account's `.paseo` directory;
 `HOME`, `--home`, artifact paths and candidate code cannot select a substitute authority. It checks
-ownership, permissions, symlinks, file identity and stability. A successful offline check proves a
+ownership, permissions, symlinks, file identity and stability, including both enrollment and record.
+Root-owned sticky ancestors may contain the protected user-owned authority directory; the authority
+directory itself must never be writable by other users. Nonregular entries are rejected before a
+nonblocking no-follow open, and reads are bounded. A successful offline check proves a
 persisted hold, not daemon exit or candidate qualification. The installer's protected journal must
 bind the same transaction/generation to exact old/new hashes and current activation/recovery consent
 at every swap/start boundary. Existing daemons without this feature require separately reviewed

@@ -67,6 +67,57 @@ describe("paseo daemon bootstrap", () => {
     vi.restoreAllMocks();
   });
 
+  test("production maintenance acquisition serializes fallback provider RPC discovery through close", async () => {
+    let armed = false;
+    let failClose = false;
+    let entered!: () => void;
+    const creating = new Promise<void>(resolve => { entered = resolve; });
+    let allowCreate!: () => void;
+    const creationGate = new Promise<void>(resolve => { allowCreate = resolve; });
+    let closing!: () => void;
+    const closeStarted = new Promise<void>(resolve => { closing = resolve; });
+    let allowClose!: () => void;
+    const closeGate = new Promise<void>(resolve => { allowClose = resolve; });
+    const clients = createTestAgentClients({
+      beforeCreateSession: async () => { if (armed) { entered(); await creationGate; } },
+      closeSession: async () => { if (failClose) throw new Error("unknown discovery close"); if (armed) { closing(); await closeGate; } },
+    });
+    Object.defineProperty(clients.codex, "listControls", { value: undefined });
+    const handle = await createTestPaseoDaemon({ agentClients: clients, relayEnabled: false });
+    const client = new DaemonClient({ url: `ws://127.0.0.1:${handle.port}/ws` });
+    try {
+      await client.connect();
+      expect(handle.daemon.agentManager.maintenanceReservation?.isReady()).toBe(true);
+      let initial = await client.maintenanceBegin({ generation: 1, transactionId: "production-bootstrap" });
+      await expect.poll(async () => {
+        if (!initial.result) initial = await client.maintenanceBegin({ generation: 1, transactionId: "production-bootstrap" });
+        return initial.result?.state;
+      }, { timeout: 10000 }).toBe("held");
+      expect(initial.error).toBeNull();
+      expect(initial.result?.state).toBe("held");
+      const token = initial.result!.ownerToken;
+      expect((await client.maintenanceStatus()).result).not.toHaveProperty("ownerToken");
+      expect((await client.maintenanceEnd({ generation: 1, ownerToken: token })).result?.state).toBe("idle");
+      armed = true;
+      const create = vi.spyOn(clients.codex!, "createSession");
+      const discovery = client.listProviderControls({ provider: "codex", cwd: handle.paseoHome, model: "test-model" });
+      await creating;
+      expect((await client.maintenanceBegin({ generation: 2, transactionId: "while-creating" })).result).toBeNull();
+      allowCreate(); await closeStarted;
+      expect((await client.maintenanceBegin({ generation: 2, transactionId: "while-closing" })).result).toBeNull();
+      allowClose(); await discovery;
+      const held = await client.maintenanceBegin({ generation: 2, transactionId: "after-close" });
+      expect(held.result?.state).toBe("held");
+      const calls = create.mock.calls.length;
+      expect((await client.listProviderControls({ provider: "codex", cwd: handle.paseoHome, model: "test-model" })).error).toContain("maintenance");
+      expect(create.mock.calls.length).toBe(calls);
+      expect((await client.maintenanceEnd({ generation: 2, ownerToken: held.result!.ownerToken })).result?.state).toBe("idle");
+      armed = false; failClose = true;
+      expect((await client.listProviderControls({ provider: "codex", cwd: handle.paseoHome, model: "test-model" })).error).toContain("unknown discovery close");
+      expect((await client.maintenanceStatus()).result).toMatchObject({ state: "recovery-required", recoveryRequired: true });
+    } finally { armed = false; allowCreate(); allowClose(); await client.close(); await handle.close(); }
+  }, 30000);
+
   test("starts and serves health endpoint", async () => {
     const daemonHandle = await createTestPaseoDaemon({
       openai: { stt: { apiKey: "test-openai-api-key" }, tts: { apiKey: "test-openai-api-key" } },

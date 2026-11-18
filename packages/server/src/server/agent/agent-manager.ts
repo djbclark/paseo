@@ -1311,12 +1311,22 @@ export class AgentManager {
     }
   }
 
+  private withDiscoveryAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    const reservation = this.maintenanceReservation;
+    if (!reservation) return operation();
+    return reservation.run(async () => {
+      try { return await operation(); }
+      catch (error) { reservation.holdForUnknownWork(); throw error; }
+    });
+  }
+
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
     const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
     const client = this.requireClient(normalizedConfig.provider);
     if (!normalizedConfig.model) {
       return [];
     }
+    return this.withDiscoveryAdmission(async () => {
     const available = await client.isAvailable();
     if (!available) {
       throw new Error(
@@ -1344,8 +1354,12 @@ export class AgentManager {
           { err: error, provider: normalizedConfig.provider },
           "Failed to close draft command listing session",
         );
+        if (this.maintenanceReservation) {
+          throw error;
+        }
       }
     }
+    });
   }
 
   async listDraftControls(config: AgentSessionConfig): Promise<AgentDraftControls> {
@@ -1358,6 +1372,7 @@ export class AgentManager {
     if (!normalizedConfig.model && !client.listControls) {
       return { controls: [], options };
     }
+    return this.withDiscoveryAdmission(async () => {
     const available = await client.isAvailable();
     if (!available) {
       throw new Error(
@@ -1385,8 +1400,12 @@ export class AgentManager {
           { err: error, provider: normalizedConfig.provider },
           "Failed to close draft feature listing session",
         );
+        if (this.maintenanceReservation) {
+          throw error;
+        }
       }
     }
+    });
   }
 
   usageSession(id: string) {

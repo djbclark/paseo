@@ -287,6 +287,7 @@ export class ScheduleService {
     schedule: StoredSchedule,
     runId: string,
   ) => Promise<ScheduleExecutionResult>;
+  private readonly maintenance?: MaintenanceReservation;
   private readonly runningScheduleIds = new Set<string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -300,10 +301,8 @@ export class ScheduleService {
     this.createPaseoWorktreeWorkspace = options.createPaseoWorktreeWorkspace;
     this.archiveWorkspace = options.archiveWorkspace;
     this.now = options.now ?? (() => new Date());
-    const runner = options.runner ?? ((schedule: StoredSchedule, runId: string) => this.executeSchedule(schedule, runId));
-    this.runner = options.maintenance
-      ? (schedule, runId) => options.maintenance!.run(() => runner(schedule, runId))
-      : runner;
+    this.maintenance = options.maintenance;
+    this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
 
   async start(): Promise<void> {
@@ -717,7 +716,12 @@ export class ScheduleService {
     });
   }
 
-  private async runSchedule(
+  private runSchedule(schedule: StoredSchedule, now: Date, options?: { manual?: boolean }): Promise<void> {
+    const run = () => this.runScheduleAdmitted(schedule, now, options);
+    return this.maintenance ? this.maintenance.run(run) : run();
+  }
+
+  private async runScheduleAdmitted(
     schedule: StoredSchedule,
     now: Date,
     options?: { manual?: boolean },

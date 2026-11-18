@@ -1,5 +1,6 @@
+import { MISSING_MAINTENANCE_AUTHORITY, readProtectedMaintenanceJson, parseMaintenanceRecord, validateMaintenanceEnrollment, type MaintenanceRecord } from "./maintenance-offline.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface MaintenanceStatus {
@@ -9,12 +10,7 @@ export interface MaintenanceStatus {
   transactionId: string | null;
   recoveryRequired: boolean;
 }
-interface RecordV1 {
-  schemaVersion: 1;
-  generation: number;
-  transactionId: string;
-  tokenDigest: string | null;
-}
+type RecordV1 = MaintenanceRecord;
 const digest = (token: string) => createHash("sha256").update(token).digest("hex");
 
 /** Single daemon event-loop admission lane. Acquiring a lease never yields. */
@@ -26,24 +22,42 @@ export class MaintenanceReservation {
   private failed = false;
   private readonly path: string;
 
-  constructor(home: string, private readonly isQuiet: () => Promise<boolean>) {
+  private ready = true;
+  private enrolled = false;
+  private attempt: { generation: number; transactionId: string } | null = null;
+  constructor(private readonly home: string, private readonly isQuiet: () => Promise<boolean>) {
     this.path = join(home, "maintenance-reservation.json");
-    if (existsSync(this.path)) {
-      const metadata = lstatSync(this.path);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 ||
-          (metadata.mode & 0o077) || (process.getuid && metadata.uid !== process.getuid())) {
-        throw new Error("Unprotected maintenance record; admission unavailable");
-      }
-      const value = JSON.parse(readFileSync(this.path, "utf8")) as RecordV1;
-      if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.generation) || value.generation <= 0 ||
-          typeof value.transactionId !== "string" || !value.transactionId ||
-          !(value.tokenDigest === null || (typeof value.tokenDigest === "string" && /^[a-f0-9]{64}$/.test(value.tokenDigest)))) {
-        throw new Error("Invalid maintenance reservation; admission unavailable");
-      }
-      this.record = value;
-      this.recovery = value.tokenDigest !== null;
+    const enrollment = readProtectedMaintenanceJson(home, "maintenance-enrollment.json");
+    const stored = readProtectedMaintenanceJson(home, "maintenance-reservation.json");
+    if (JSON.stringify(enrollment) !== JSON.stringify(readProtectedMaintenanceJson(home, "maintenance-enrollment.json"))) throw new Error("Maintenance enrollment changed");
+    if (enrollment !== MISSING_MAINTENANCE_AUTHORITY) {
+      validateMaintenanceEnrollment(enrollment);
+      this.enrolled = true;
+      if (stored === MISSING_MAINTENANCE_AUTHORITY) throw new Error("Established maintenance authority missing");
+    } else if (stored !== MISSING_MAINTENANCE_AUTHORITY) throw new Error("Maintenance enrollment missing");
+    if (stored !== MISSING_MAINTENANCE_AUTHORITY) {
+      this.record = parseMaintenanceRecord(stored);
+      this.recovery = Boolean(this.record.tokenDigest) || this.record.uncertain === true;
+      this.failed = this.record.uncertain === true;
     }
   }
+
+  holdForUnknownWork(): void {
+    this.failed = true;
+    this.recovery = true;
+    this.enroll();
+    this.persist({ ...(this.record ?? { schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null }), uncertain: true });
+  }
+
+  private enroll(): void {
+    if (this.enrolled) return;
+    this.writeAtomically(join(this.home, "maintenance-enrollment.json"), { schemaVersion: 1, component: "paseo-maintenance" });
+    this.enrolled = true;
+    this.persist({ schemaVersion: 1, generation: 0, transactionId: null, tokenDigest: null });
+  }
+
+  isReady(): boolean { return this.ready; }
+  setReady(ready: boolean): void { this.ready = ready; }
 
   enter(): () => void {
     if (this.failed || this.pending || this.record?.tokenDigest) throw new Error("Daemon maintenance admission held");
@@ -58,10 +72,11 @@ export class MaintenanceReservation {
   }
 
   status(): MaintenanceStatus {
-    const held = Boolean(this.record?.tokenDigest);
-    return { schemaVersion: 1, state: held ? (this.recovery ? "recovery-required" : "held") : "idle",
-      generation: this.record?.generation ?? null, transactionId: this.record?.transactionId ?? null,
-      recoveryRequired: held && this.recovery };
+    const recoveryRequired = this.failed || this.recovery;
+    const closed = this.pending || recoveryRequired || Boolean(this.record?.tokenDigest);
+    return { schemaVersion: 1, state: recoveryRequired ? "recovery-required" : closed ? "held" : "idle",
+      generation: this.attempt?.generation ?? (this.record?.generation || null),
+      transactionId: this.attempt?.transactionId ?? this.record?.transactionId ?? null, recoveryRequired };
   }
 
   async begin(generation: number, transactionId: string): Promise<MaintenanceStatus & { ownerToken: string }> {
@@ -69,15 +84,36 @@ export class MaintenanceReservation {
       throw new Error("Invalid maintenance transaction");
     if (this.failed || this.pending || this.record?.tokenDigest || this.inFlight || generation <= (this.record?.generation ?? 0))
       throw new Error("Maintenance busy or stale generation");
-    // Close admission BEFORE asynchronous observation; entrants cannot race the snapshot.
+    if (!this.ready) throw new Error("Maintenance startup not ready");
     this.pending = true;
+    this.attempt = { generation, transactionId };
+    let knownBusy = false;
     try {
-      if (!(await this.isQuiet()) || this.inFlight) throw new Error("Maintenance busy or unknown work");
+      this.enroll();
+      let quiet: boolean;
+      try {
+        quiet = await this.isQuiet();
+        if (quiet !== true && quiet !== false) throw new Error("Unknown maintenance observation");
+      }
+      catch (error) {
+        this.failed = true;
+        this.recovery = true;
+        this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: null, uncertain: true });
+        throw error;
+      }
+      if (!quiet || this.inFlight) { knownBusy = true; throw new Error("Maintenance known busy"); }
       const ownerToken = randomBytes(32).toString("base64url");
       this.persist({ schemaVersion: 1, generation, transactionId, tokenDigest: digest(ownerToken) });
       this.recovery = false;
+      this.pending = false;
       return { ...this.status(), ownerToken };
-    } finally { this.pending = false; }
+    } catch (error) {
+      if (!knownBusy) { this.failed = true; this.recovery = true; }
+      throw error;
+    } finally {
+      this.pending = false;
+      if (!this.failed) this.attempt = null;
+    }
   }
 
   end(generation: number, ownerToken: string): MaintenanceStatus {
@@ -92,24 +128,33 @@ export class MaintenanceReservation {
   }
 
   private persist(record: RecordV1): void {
-    const temporary = `${this.path}.${randomBytes(12).toString("hex")}.tmp`;
-    const fd = openSync(temporary, "wx", 0o600);
-    try { writeFileSync(fd, JSON.stringify(record)); fsyncSync(fd); }
-    finally { closeSync(fd); }
-    // After a rename error admission remains closed until explicit recovery.
+    this.writeAtomically(this.path, record, () => { this.record = record; });
+  }
+
+  private writeAtomically(path: string, value: unknown, committed?: () => void): void {
+    const temporary = `${path}.${randomBytes(12).toString("hex")}.tmp`;
+    let fd: number | null = null;
+    let directory: number | null = null;
     try {
-      renameSync(temporary, this.path);
-      this.record = record;
-      const directory = openSync(join(this.path, ".."), "r");
-      try { fsyncSync(directory); } finally { closeSync(directory); }
+      fd = openSync(temporary, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify(value));
+      fsyncSync(fd);
+      closeSync(fd); fd = null;
+      renameSync(temporary, path);
+      committed?.(); // Logical commit: an idle tombstone follows owner-authorized release.
+      directory = openSync(this.home, "r");
+      fsyncSync(directory);
+      closeSync(directory); directory = null;
     } catch (error) {
       this.failed = true;
-      this.record = record;
       this.recovery = true;
-      if (existsSync(temporary)) unlinkSync(temporary);
+      if (fd !== null) { try { closeSync(fd); } catch {} }
+      if (directory !== null) { try { closeSync(directory); } catch {} }
+      try { unlinkSync(temporary); } catch {}
       throw error;
     }
   }
+
 }
 
 /** Install on the shared owner, before handing it to any internal or transport caller. */

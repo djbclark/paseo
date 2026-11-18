@@ -40,6 +40,7 @@ export function isTargetElf(bytes: Buffer, machine: number): boolean {
     bytes.readUInt32BE(0) === 0x7f454c46 &&
     bytes[4] === 2 &&
     bytes[5] === 1 &&
+    [2, 3].includes(bytes.readUInt16LE(16)) &&
     bytes.readUInt16LE(18) === machine
   );
 }
@@ -85,12 +86,7 @@ interface ElfSegment {
   address: number;
   size: number;
 }
-function applyDynamic(
-  bytes: Buffer,
-  dynamic: ElfSegment,
-  segments: ElfSegment[],
-  result: ElfDescription,
-): void {
+function dynamicEntries(bytes: Buffer, dynamic: ElfSegment): { tag: bigint; value: number }[] {
   const entries = [];
   let terminated = false;
   for (let current = dynamic.offset; current + 16 <= dynamic.offset + dynamic.size; current += 16) {
@@ -105,6 +101,15 @@ function applyDynamic(
     entries.push({ tag, value: number64(bytes, current + 8) });
   }
   if (!terminated) return fail();
+  return entries;
+}
+function applyDynamic(
+  bytes: Buffer,
+  dynamic: ElfSegment,
+  segments: ElfSegment[],
+  result: ElfDescription,
+): void {
+  const entries = dynamicEntries(bytes, dynamic);
   const tables = entries.filter((row) => row.tag === 5n);
   const sizes = entries.filter((row) => row.tag === 10n);
   if (!entries.some((row) => [1n, 14n, 15n, 29n].includes(row.tag))) return;

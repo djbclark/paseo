@@ -1,3 +1,4 @@
+import { runQualifiedPluginInitialization } from "./qualified-initialization.js";
 import { constants as fsConstants } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -34,7 +35,7 @@ import {
   getQualifiedRuntimeMeasurementEpoch,
   getQualifiedRuntimeMeasurement,
 } from "./index.js";
-import { BuiltinPluginLoader } from "./builtin/index.js";
+import { BuiltinPluginLoader, createQualifiedBuiltinPluginLoader } from "./builtin/index.js";
 import { ManagedPluginSources } from "./managed-source.js";
 import type { PluginProviderMetadata } from "./plugin-process-protocol.js";
 import {
@@ -3129,4 +3130,32 @@ it("rejects a forged held plugin mutation scope before source preparation or lif
   const scope = {} as import("../maintenance-operation.js").HeldPluginOperationScope;
   expect(() => service.heldPluginOperation(claim, scope)).toThrow();
   expect(await service.listPlugins()).toEqual(before);
+});
+
+it("cannot open restricted bootstrap initialization from a forged producer or callback", async () => {
+  const owner = {} as import("../execution/daemon-types.js").QualifiedDaemonOwner;
+  const initialization = vi.fn(async () => undefined);
+  let nativeInitializationCalled = false;
+  const native: import("./maintenance.js").NativePluginAdmission = {
+    enterWork: vi.fn(() => () => {}),
+    holdForUnknownWork: vi.fn(),
+    runQualifiedInitialization: async (operation) => {
+      nativeInitializationCalled = true;
+      return operation();
+    },
+  };
+  await expect(
+    runQualifiedPluginInitialization(owner, native, "probe", "/candidate", initialization),
+  ).rejects.toThrow("Qualified initialization owner unavailable");
+  expect(initialization).not.toHaveBeenCalled();
+  expect(nativeInitializationCalled).toBe(false);
+});
+
+it("rejects a source-provided owner for the fixed sealed builtin inventory", () => {
+  const forged = {
+    root: "/candidate",
+  } as import("../execution/daemon-types.js").QualifiedDaemonOwner;
+  expect(() => createQualifiedBuiltinPluginLoader(forged)).toThrow(
+    "Qualified builtin owner unavailable",
+  );
 });

@@ -51,8 +51,13 @@ fresh bound passive closure. Missing producer or runtime evidence returns false.
 it cannot qualify a running host by itself. A restored `begin({ generation,
 transactionId })` closes normal and lifecycle admission synchronously and returns
 `unknown`. Repeating the same identity retains the hold. `end` refuses release
-without executing-closure qualification. Startup under this unsupported hold
-leaves plugin code uninitialized.
+without executing-closure qualification. Startup under an unsupported hold
+leaves plugin code uninitialized. Genuine sealed startup may initialize only an
+explicitly authorized registration-only passive snapshot through the native
+initialization lease. The same private owner accounts real compiler/helper
+settlement and actual child initialization plus a fresh incarnation-bound barrier
+ACK. A restored reservation stays held; startup cannot END it. Ordinary source/dev
+launches cannot create this initialization scope.
 
 The producer imports `attachPluginWorkerChannel(channel, loadContribution)` only
 after its private execution validation. Contribution loading runs inside the

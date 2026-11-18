@@ -1,3 +1,5 @@
+import { isQualifiedDaemonOwner } from "../../execution/qualified-host.js";
+import type { QualifiedDaemonOwner } from "../../execution/daemon-types.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,4 +56,13 @@ export class BuiltinPluginLoader {
       await start({ id, directory: path.join(this.root, id) });
     }
   }
+}
+
+/** Fixed sealed distribution inventory. Missing files fail; source-relative fallbacks never apply. */
+export function createQualifiedBuiltinPluginLoader(
+  owner: QualifiedDaemonOwner,
+): BuiltinPluginLoader {
+  if (!isQualifiedDaemonOwner(owner)) throw new Error("Qualified builtin owner unavailable");
+  owner.assertFresh();
+  return new BuiltinPluginLoader(path.join(owner.root, "builtin-plugins"), builtinPlugins);
 }

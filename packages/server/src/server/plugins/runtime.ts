@@ -1,3 +1,7 @@
+import {
+  assertQualifiedPluginInitialization,
+  type QualifiedPluginInitialization,
+} from "./qualified-initialization.js";
 import { assertPluginHeldOperation, type PluginHeldOperation } from "./held-operation.js";
 import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner, QualifiedOwnedChild } from "../execution/daemon-types.js";
@@ -45,7 +49,12 @@ import {
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
-import { compileDirectoryPlugin, compileQualifiedDirectoryPlugin } from "./compiler.js";
+import {
+  compileDirectoryPlugin,
+  compileQualifiedDirectoryPlugin,
+  compileQualifiedInitialDirectoryPlugin,
+  tryCompileQualifiedDirectoryPlugin,
+} from "./compiler.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import type {
   PluginProcessMessage,
@@ -102,6 +111,7 @@ interface DirectoryCompilation {
 }
 interface ServerPluginActivation {
   held?: PluginHeldOperation;
+  initialization?: QualifiedPluginInitialization;
   canPublish: () => boolean;
   pluginId: string;
   configuredPath: string;
@@ -501,7 +511,21 @@ export class PluginRuntime {
     this.maintenanceIdentity = null;
   }
 
-  private requireLifecycleAdmission(held?: PluginHeldOperation): void {
+  private requireLifecycleAdmission(
+    held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
+    pluginId?: string,
+    sourcePath?: string,
+  ): void {
+    if (held && initialization) throw new Error("Ambiguous plugin operation scope");
+    if (initialization) {
+      const owner = this.dependencies.qualifiedDaemonOwner;
+      const native = this.dependencies.nativeMaintenance;
+      if (!owner || !native || !pluginId || !sourcePath || this.maintenanceUncertain)
+        throw new Error("Qualified initialization authority unavailable");
+      assertQualifiedPluginInitialization(initialization, owner, native, pluginId, sourcePath);
+      return;
+    }
     if (held) {
       assertPluginHeldOperation(held, held.claim.pluginId, held.claim.path);
       if (
@@ -562,8 +586,9 @@ export class PluginRuntime {
     canPublish: () => boolean = () => true,
     operation: ActivationOperation = "activate",
     held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
   ): Promise<void> {
-    this.requireLifecycleAdmission(held);
+    this.requireLifecycleAdmission(held, initialization, pluginId, configuredPath);
     if (held) assertPluginHeldOperation(held, pluginId, configuredPath);
     if (this.plugins.has(pluginId)) throw new Error(`Plugin is already running: ${pluginId}`);
     this.appendLog(pluginId, "stdout", "[paseo] Loading plugin");
@@ -573,6 +598,7 @@ export class PluginRuntime {
       canPublish,
       operation,
       held,
+      initialization,
     ).catch((error) => {
       this.appendLog(pluginId, "stderr", `[paseo] Plugin failed to load: ${describeError(error)}`);
       throw error;
@@ -590,25 +616,41 @@ export class PluginRuntime {
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
   }
 
-  async startBuiltinPlugin(input: { id: string; directory: string }): Promise<void> {
-    this.requireLifecycleAdmission();
+  async startBuiltinPlugin(
+    input: { id: string; directory: string },
+    initialization?: QualifiedPluginInitialization,
+  ): Promise<void> {
+    this.requireLifecycleAdmission(undefined, initialization, input.id, input.directory);
     if (this.plugins.has(input.id)) throw new Error(`Plugin is already running: ${input.id}`);
     this.appendLog(input.id, "stdout", "[paseo] Loading plugin");
     const directory = await realpath(path.resolve(input.directory));
     const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
-    if (ticket?.authorization.passiveProfile)
-      throw new Error("Qualified builtin startup requires native restricted initialization");
-    const bundles = await compileDirectoryPlugin(directory, this.daemonVersion, input.id);
+    const bundles = await this.compileActivation(
+      input.id,
+      directory,
+      ticket,
+      undefined,
+      initialization,
+      input.id,
+    );
     const { manifest } = bundles;
     if (!bundles.serverBundle) throw new Error(`Built-in plugin ${input.id} needs a server entry`);
     const loaded = ticket
       ? await this.launchPreparedPlugin({
+          initialization,
           pluginId: input.id,
           configuredPath: directory,
           directory,
           ticket,
           operation: "activate",
-          canPublish: () => this.maintenanceIdentity === null && !this.maintenanceUncertain,
+          canPublish: () => {
+            if (initialization)
+              this.requireLifecycleAdmission(undefined, initialization, input.id, directory);
+            return (
+              !this.maintenanceUncertain &&
+              (initialization !== undefined || this.maintenanceIdentity === null)
+            );
+          },
           requirements: manifest.requirements,
           serverBundle: bundles.serverBundle,
           clientBundle: bundles.clientBundle ?? "",
@@ -645,6 +687,42 @@ export class PluginRuntime {
       bundles.serverBundle ?? undefined,
       ticket,
     );
+  }
+
+  async tryValidateHeldActivation(
+    pluginId: string,
+    directory: string,
+    operation: ActivationOperation,
+    held: PluginHeldOperation,
+  ) {
+    this.requireLifecycleAdmission(held);
+    assertPluginHeldOperation(held, pluginId, directory);
+    const policy = this.dependencies.activationPolicy;
+    const owner = this.dependencies.qualifiedDaemonOwner;
+    const native = this.dependencies.nativeMaintenance;
+    if (!policy || !owner || !isQualifiedDaemonOwner(owner) || !native)
+      throw new Error("Held compiler authority unavailable");
+    const ticket = await policy.authorize(pluginId, directory, operation);
+    if (!ticket?.authorization.passiveProfile)
+      throw new Error("Held candidate lacks protected passive profile");
+    await owner.refresh();
+    const incarnation = owner.binding.expectedIncarnation;
+    if (typeof incarnation !== "string") throw new Error("Missing enclosing incarnation");
+    owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    const attempt = await tryCompileQualifiedDirectoryPlugin(directory, this.daemonVersion, {
+      owner,
+      native,
+      held,
+      snapshotRoot: ticket.authorization.snapshotRoot,
+    });
+    await policy.authorize(
+      pluginId,
+      directory,
+      operation,
+      attempt.outcome === "compiled" ? (attempt.bundles.serverBundle ?? undefined) : undefined,
+      ticket,
+    );
+    return { ticket, attempt };
   }
 
   async observeQualifiedExecutions(): Promise<Map<string, ManagedPluginCohortExecution>> {
@@ -710,24 +788,42 @@ export class PluginRuntime {
     directory: string,
     ticket: ActivationTicket | undefined,
     held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
+    builtinId?: string,
   ) {
     if (!ticket?.authorization.passiveProfile) {
-      if (held) throw new Error("Held plugin operations require protected passive qualification");
-      return compileDirectoryPlugin(directory, this.daemonVersion);
+      if (held || initialization)
+        throw new Error("Qualified plugin operations require protected passive qualification");
+      return compileDirectoryPlugin(directory, this.daemonVersion, builtinId);
     }
     const owner = this.dependencies.qualifiedDaemonOwner;
     const native = this.dependencies.nativeMaintenance;
-    if (!held || !owner || !isQualifiedDaemonOwner(owner) || !native)
-      throw new Error("Qualified activation requires an authenticated held operation");
-    assertPluginHeldOperation(held, pluginId, directory);
+    if (!owner || !isQualifiedDaemonOwner(owner) || !native || (!held && !initialization))
+      throw new Error("Qualified activation requires an authenticated native operation");
+    this.requireLifecycleAdmission(held, initialization, pluginId, directory);
     await owner.refresh();
     const incarnation = owner.binding.expectedIncarnation;
     if (typeof incarnation !== "string") throw new Error("Missing qualified daemon incarnation");
     owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    if (initialization)
+      return compileQualifiedInitialDirectoryPlugin(
+        directory,
+        this.daemonVersion,
+        {
+          owner,
+          native,
+          initialization,
+          pluginId,
+          sourcePath: directory,
+          snapshotRoot: ticket.authorization.snapshotRoot,
+        },
+        ticket.authorization,
+        builtinId,
+      );
     return compileQualifiedDirectoryPlugin(directory, this.daemonVersion, {
       owner,
       native,
-      held,
+      held: held!,
       snapshotRoot: ticket.authorization.snapshotRoot,
     });
   }
@@ -1195,11 +1291,12 @@ export class PluginRuntime {
     canPublish: () => boolean,
     operation: ActivationOperation,
     held?: PluginHeldOperation,
+    initialization?: QualifiedPluginInitialization,
   ): Promise<LoadedPlugin> {
     const directory = await realpath(path.resolve(configuredPath));
     const policy = this.dependencies.activationPolicy;
     const ticket = await policy?.authorize(pluginId, configuredPath, operation);
-    const bundles = await this.compileActivation(pluginId, directory, ticket, held);
+    const bundles = await this.compileActivation(pluginId, directory, ticket, held, initialization);
     const { manifest } = bundles;
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
     const serverBundle = bundles.serverBundle;
@@ -1207,6 +1304,7 @@ export class PluginRuntime {
     if (!serverBundle) return this.loadClientOnlyPlugin(compilation);
     return this.launchPreparedPlugin({
       held,
+      initialization,
       canPublish,
       pluginId,
       configuredPath,
@@ -1273,7 +1371,12 @@ export class PluginRuntime {
     let launched: LoadedPlugin | undefined;
     try {
       const owned = await this.prepareOwnedChild(input);
+      const inheritedHold = this.maintenanceIdentity;
+      const barrier =
+        inheritedHold ??
+        (input.initialization ? { generation: 0, transactionId: randomUUID() } : null);
       const loaded = await this.launchPlugin({
+        initializationBarrier: barrier ?? undefined,
         qualifiedChild: owned,
         activationTicket: ticket,
         pluginId,
@@ -1288,11 +1391,11 @@ export class PluginRuntime {
         beforeInitialize: async (dispatch) => {
           if (owned) {
             const owner = this.dependencies.qualifiedDaemonOwner;
-            if (!owner || !input.held) throw new Error("Qualified initialize authority missing");
+            if (!owner) throw new Error("Qualified initialize authority missing");
             await owner.refresh();
             owner.assertOwnedExecutionHandle(owned.child, "plugin-child", owned.incarnation);
             owned.assertFresh();
-            assertPluginHeldOperation(input.held, pluginId, directory);
+            this.requireLifecycleAdmission(input.held, input.initialization, pluginId, directory);
           }
           if (policy)
             await policy.dispatchAuthorized({
@@ -1308,15 +1411,7 @@ export class PluginRuntime {
         },
       });
       launched = loaded;
-      if (owned) {
-        const identity = this.maintenanceIdentity;
-        if (
-          !identity ||
-          (await this.childBarrier(loaded, identity, "maintenance.begin")) !== "held"
-        )
-          throw new Error("Qualified successor did not acknowledge its inherited barrier");
-        owned.assertFresh();
-      }
+      if (owned) await this.verifySuccessorBarrier(input, loaded, owned, barrier, inheritedHold);
       assertChildAlive(loaded);
       await this.assertPreparedAuthorization(input, "Managed enrollment changed during launch");
       assertChildAlive(loaded);
@@ -1334,15 +1429,42 @@ export class PluginRuntime {
     }
   }
 
+  private async verifySuccessorBarrier(
+    input: ServerPluginActivation,
+    loaded: LoadedPlugin,
+    owned: QualifiedOwnedChild,
+    barrier: PluginMaintenanceIdentity | null,
+    inheritedHold: PluginMaintenanceIdentity | null,
+  ): Promise<void> {
+    if (
+      !barrier ||
+      this.maintenanceIdentity !== inheritedHold ||
+      (await this.childBarrier(loaded, barrier, "maintenance.begin")) !== "held"
+    )
+      throw new Error("Qualified successor did not acknowledge its inherited barrier");
+    owned.assertFresh();
+    if (
+      input.initialization &&
+      !inheritedHold &&
+      (await this.childBarrier(loaded, barrier, "maintenance.end")) !== "ended"
+    )
+      throw new Error("Initialization barrier release uncertain");
+  }
+
   private async prepareOwnedChild(
     input: ServerPluginActivation,
   ): Promise<QualifiedOwnedChild | undefined> {
     const profile = input.ticket?.authorization.passiveProfile;
     if (!profile) return undefined;
     const owner = this.dependencies.qualifiedDaemonOwner;
-    if (!input.held || !owner || !isQualifiedDaemonOwner(owner))
+    if ((!input.held && !input.initialization) || !owner || !isQualifiedDaemonOwner(owner))
       throw new Error("Qualified child owner unavailable");
-    assertPluginHeldOperation(input.held, input.pluginId, input.directory);
+    this.requireLifecycleAdmission(
+      input.held,
+      input.initialization,
+      input.pluginId,
+      input.directory,
+    );
     await owner.refresh();
     const incarnation = owner.binding.expectedIncarnation;
     if (typeof incarnation !== "string") throw new Error("Missing qualified daemon incarnation");
@@ -1409,6 +1531,7 @@ export class PluginRuntime {
 
   private async launchPlugin(input: {
     qualifiedChild?: QualifiedOwnedChild;
+    initializationBarrier?: PluginMaintenanceIdentity;
     activationTicket?: ActivationTicket;
     pluginId: string;
     pluginDirectory: string;
@@ -1532,11 +1655,11 @@ export class PluginRuntime {
               pluginDirectory: input.pluginDirectory,
               managedSource: input.managedSource === true,
               hostInstanceId: instanceId,
-              ...(input.qualifiedChild && this.maintenanceIdentity
+              ...(input.qualifiedChild && input.initializationBarrier
                 ? {
                     passiveInitialization: {
                       contract: "native-passive-contract-1" as const,
-                      hold: { ...this.maintenanceIdentity, instanceId },
+                      hold: { ...input.initializationBarrier, instanceId },
                     },
                   }
                 : {}),

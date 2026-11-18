@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pino from "pino";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonConfigStore } from "../daemon-config-store.js";
 import { PluginService } from "./index.js";
 import { BuiltinPluginLoader } from "./builtin/index.js";
@@ -31,6 +31,15 @@ import {
   npmPluginPackages,
 } from "../../../../../scripts/test-support/npm-registry.mjs";
 import { runGitCommand } from "../../utils/run-git-command.js";
+
+async function readManagedSignal(file: string): Promise<string> {
+  try {
+    return await readFile(file, "utf8");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return "";
+    throw error;
+  }
+}
 
 const roots: string[] = [];
 type TestPluginRuntime = NonNullable<ConstructorParameters<typeof PluginService>[3]["runtime"]>;
@@ -53,6 +62,46 @@ async function createPlugin(id: string, source: string): Promise<string> {
   await writeFile(path.join(directory, "paseo-plugin.json"), JSON.stringify({ id }));
   await writeFile(path.join(directory, "index.server.ts"), source);
   return directory;
+}
+
+async function createQueueBlocker(begun: string, release: string): Promise<string> {
+  const directory = await createPlugin(
+    "blocker",
+    "export default function contribute() { return () => {}; }",
+  );
+  const script = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(begun)}, 'started'); const timer = setInterval(() => { if (fs.existsSync(${JSON.stringify(release)})) clearInterval(timer); }, 10);`;
+  await writeFile(
+    path.join(directory, "paseo-plugin.json"),
+    JSON.stringify({ id: "blocker", build: [[process.execPath, "-e", script]] }),
+  );
+  for (const args of [
+    ["init", "-b", "main"],
+    ["config", "user.name", "Paseo Tests"],
+    ["config", "user.email", "paseo@example.test"],
+    ["add", "-A"],
+    ["commit", "-m", "queue blocker"],
+  ])
+    await runGitCommand(args, { cwd: directory });
+  return directory;
+}
+
+async function waitForQueueBlocker(
+  operation: ReturnType<PluginService["installSource"]>,
+  begun: string,
+): Promise<void> {
+  let failure: unknown;
+  void operation.catch((error) => {
+    failure = error;
+  });
+  await expect
+    .poll(
+      async () => {
+        if (failure) throw failure;
+        return readManagedSignal(begun);
+      },
+      { timeout: 10_000 },
+    )
+    .toBe("started");
 }
 
 function createStore(
@@ -241,6 +290,59 @@ function nextNotification(service: PluginService, pluginId: string): Promise<voi
 }
 
 describe("PluginService", () => {
+  it("restores an unsupported maintenance hold before any plugin initialization and retains it", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-held-"));
+    roots.push(home);
+    const directory = await createPlugin(
+      "held",
+      `throw new Error("must never evaluate under unqualified hold"); export default function contribute() { return () => {}; }`,
+    );
+    const service = createService(home, { held: { source: "directory", path: directory } });
+    const identity = { generation: 7, transactionId: "restored" };
+    expect(service.maintenance.supportsV1()).toBe(false);
+    const holding = service.maintenance.begin(identity);
+    // begin installs the barrier before the caller awaits it.
+    await expect(service.enablePlugin("held")).rejects.toThrow("admission is closed");
+    expect(await holding).toBe("unknown");
+    await service.start();
+    expect(service.catalog()).toEqual([]);
+    expect(await service.maintenance.begin(identity)).toBe("unknown");
+    await expect(service.maintenance.end(identity)).rejects.toThrow("not qualified");
+    await expect(service.reloadPlugin("held")).rejects.toThrow("admission is closed");
+  });
+
+  it("unqualified child barrier closes actual RPC dispatch without altering registration or dropping loaded receipt", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-held-child-"));
+    roots.push(home);
+    const directory = await createPlugin(
+      "held",
+      `import { z } from "zod"; export default function contribute(context) { context.handle({ name: "probe", input: z.unknown(), output: z.string() }, () => "running"); return () => {}; }`,
+    );
+    const runtime = new PluginRuntime(pino({ level: "silent" }), "0.4.0");
+    const service = createService(
+      home,
+      { held: { source: "directory", path: directory } },
+      { runtime },
+    );
+    try {
+      await service.start();
+      expect(await service.invokePluginRpc("held", "probe", null)).toBe("running");
+      const before = (await service.listPlugins()).find((plugin) => plugin.id === "held");
+      const identity = { generation: 2, transactionId: "hold" };
+      expect(await service.maintenance.begin(identity)).toBe("unknown");
+      await expect(service.invokePluginRpc("held", "probe", null)).rejects.toThrow(
+        "admission is closed",
+      );
+      await expect(service.disablePlugin("held")).rejects.toThrow("admission is closed");
+      await expect(service.removePlugin("held")).rejects.toThrow("admission is closed");
+      const after = (await service.listPlugins()).find((plugin) => plugin.id === "held");
+      expect(after?.loaded).toEqual(before?.loaded);
+      expect(after?.enabled).toBe(before?.enabled);
+    } finally {
+      await runtime.stopAll();
+    }
+  });
+
   it.each([
     { shadow: false, runtime: "subprocess" },
     { shadow: true, runtime: "subprocess" },
@@ -1921,7 +2023,10 @@ describe("managed plugin promotion boundary", () => {
   }
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export default function register() {}");
+    const directory = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     for (const invalid of [undefined, "{}", "not-json"]) {
       if (invalid !== undefined) await writeFile(f.policyFile, invalid);
       const service = createService(
@@ -1937,7 +2042,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("captures actual loaded bytes and removes receipt on stop despite disk changes", async () => {
     const f = await fixture();
-    const directory = await createPlugin("managed", "export default function register() {}");
+    const directory = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     await allow(f.policyFile, [await authorization(directory, 0)]);
     const service = createService(
       f.home,
@@ -1966,10 +2074,13 @@ describe("managed plugin promotion boundary", () => {
   });
   it("replaces a stateless snapshot retaining identity, settings, logs and old source", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const candidate = await createPlugin(
       "managed",
-      "export default function register() { console.log('candidate'); }",
+      "export default function register() { console.log('candidate'); return () => {}; }",
     );
     await allow(f.policyFile, [await authorization(old, 0)]);
     const settingsDirectory = path.join(f.home, "settings");
@@ -2004,7 +2115,7 @@ describe("managed plugin promotion boundary", () => {
       expect(result.loaded?.activationGeneration).toBe(2);
       expect(await readFile(setting, "utf8")).toBe("preserve");
       expect(await readFile(path.join(old, "index.server.ts"), "utf8")).toBe(
-        "export default function register() {}",
+        "export default function register() { return () => {}; }",
       );
       expect(service.getLogs("managed").slice(0, logs.length)).toEqual(logs);
       expect(result.promotionState).toMatchObject({
@@ -2018,7 +2129,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds an interrupted replacement on next daemon startup", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     await allow(f.policyFile, [await authorization(old, 0)]);
     await f.policy.replacing("managed", old, "/retained-candidate");
     const policy = new ManagedPluginActivationPolicy(f.policyFile, path.join(f.home, "promotions"));
@@ -2034,7 +2148,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("recovers failed startup only with independent current authorization and a new generation", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const bad = await createPlugin(
       "managed",
       "export default function register() { throw new Error('startup failure'); }",
@@ -2070,7 +2187,10 @@ describe("managed plugin promotion boundary", () => {
   });
   it("holds failed replacement when recovery identity has been revoked", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const bad = await createPlugin(
       "managed",
       "export default function register() { throw new Error('startup failure'); }",
@@ -2098,32 +2218,35 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   });
-  it("rechecks replacement requests after a real child startup holds the operation queue", async () => {
+  it("rechecks replacement requests while an unmanaged native build holds the operation queue", async () => {
     const f = await fixture();
-    const old = await createPlugin("managed", "export default function register() {}");
-    const candidate = await createPlugin("managed", "export default function register() {}");
+    const old = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
+    const candidate = await createPlugin(
+      "managed",
+      "export default function register() { return () => {}; }",
+    );
     const begun = path.join(f.home, "begun");
     const release = path.join(f.home, "release");
-    const blocker = await createPlugin(
-      "blocker",
-      `import { writeFileSync, existsSync } from 'node:fs';
-      export default async function register() { writeFileSync(${JSON.stringify(begun)}, 'started');
-        while (!existsSync(${JSON.stringify(release)})) await new Promise(resolve => setTimeout(resolve, 10)); }`,
-    );
+    const blocker = await createQueueBlocker(begun, release);
     await allow(f.policyFile, [await authorization(old, 0)]);
     const service = createService(
       f.home,
       {
         managed: { source: "directory", path: old },
-        blocker: { source: "directory", path: blocker, enabled: false },
       },
-      { activationPolicy: f.policy },
+      { activationPolicy: f.policy, managedSources: new ManagedPluginSources(f.home) },
     );
     try {
       await service.start();
       await allow(f.policyFile, [await authorization(candidate, 1)]);
-      const blocking = service.enablePlugin("blocker");
-      await expect.poll(async () => readFile(begun, "utf8").catch(() => "")).toBe("started");
+      const blocking = service.installSource({
+        source: pathToFileURL(blocker).href,
+        id: "blocker",
+      });
+      await waitForQueueBlocker(blocking, begun);
       const before = (await service.listPlugins()).find((item) => item.id === "managed")?.loaded;
       const queued = Promise.allSettled([
         service.replaceDirectory({
@@ -2156,89 +2279,193 @@ describe("managed plugin promotion boundary", () => {
       await service.stopAllPlugins();
     }
   });
-  it("gates actual manual and queued Cafe-equivalent Git applyUpdates after prepared authorization is revoked", async () => {
+  it("refuses revoked managed Git manual/queued acquisition before prepare or build", async () => {
     const f = await fixture();
     const repository = await createPlugin("managed", "export default () => () => {};");
-    await runGitCommand(["init", "-b", "main"], { cwd: repository });
-    await runGitCommand(["config", "user.name", "Paseo Tests"], { cwd: repository });
-    await runGitCommand(["config", "user.email", "paseo@example.test"], { cwd: repository });
+    for (const args of [
+      ["init", "-b", "main"],
+      ["config", "user.name", "Paseo Tests"],
+      ["config", "user.email", "paseo@example.test"],
+    ])
+      await runGitCommand(args, { cwd: repository });
     async function commit(message: string) {
       await runGitCommand(["add", "-A"], { cwd: repository });
       await runGitCommand(["commit", "-m", message], { cwd: repository });
     }
-    await commit("initial");
+    await commit("baseline");
     await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
-    const prepared = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    let installing = true;
-    let paused = false;
-    const preparedCommits: string[] = [];
-    class ObservedSources extends ManagedPluginSources {
-      override async place(id: string, candidate: Parameters<ManagedPluginSources["place"]>[1]) {
-        const placed = await super.place(id, candidate);
-        if (installing) {
-          await allow(f.policyFile, [await authorization(placed.directory, 0)]);
-          installing = false;
-        } else if (!paused) {
-          if (placed.target?.kind !== "git") throw new Error("Expected reviewed Git target");
-          preparedCommits.push(
-            (await runGitCommand(["rev-parse", "HEAD"], { cwd: placed.directory })).stdout.trim(),
-          );
-          expect(preparedCommits[0]).toBe(placed.target.commit);
-          paused = true;
-          await allow(f.policyFile, [await authorization(placed.directory, 1)]);
-          prepared.resolve();
-          await release.promise;
-        }
-        return placed;
-      }
-    }
+    const sources = new ManagedPluginSources(f.home);
     const service = createService(
       f.home,
       {},
-      { managedSources: new ObservedSources(f.home), activationPolicy: f.policy },
+      { managedSources: sources, activationPolicy: f.policy },
     );
+    const begun = path.join(f.home, "begun");
+    const release = path.join(f.home, "release");
+    const sentinel = path.join(f.home, "must-not-build");
+    const blocker = await createQueueBlocker(begun, release);
     try {
       await service.start();
-      const installed = await service.installSource({ source: pathToFileURL(repository).href });
-      const loaded = installed.loaded;
-      await writeFile(path.join(repository, "revision.txt"), "reviewed");
-      await commit("reviewed");
+      const baseline = await service.installSource({
+        source: pathToFileURL(repository).href,
+        id: "managed",
+      });
+      await writeFile(
+        path.join(repository, "paseo-plugin.json"),
+        JSON.stringify({
+          id: "managed",
+          build: [
+            [
+              process.execPath,
+              "-e",
+              `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'executed')`,
+            ],
+          ],
+        }),
+      );
+      await commit("candidate build");
       const [preview] = await service.previewUpdates({
         pluginId: "managed",
         target: { kind: "git", ref: "main" },
       });
-      if (!preview.proposal) throw new Error("Expected native Git update proposal");
-      const proposal = preview.proposal;
-      // Move the branch after review; the reviewed immutable commit remains the only prepared target.
-      await writeFile(path.join(repository, "revision.txt"), "moving-ref");
-      await commit("moving ref");
-      const manual = service.applyUpdates([proposal]);
+      if (!preview.proposal) throw new Error("Expected Git proposal");
+      await writeFile(path.join(repository, "moving-ref"), "changed");
+      await commit("move branch after review");
+      const blocking = service.installSource({
+        source: pathToFileURL(blocker).href,
+        id: "blocker",
+      });
+      await waitForQueueBlocker(blocking, begun);
+      const preparing = vi.spyOn(sources, "prepareUpdate");
+      const installing = vi.spyOn(sources, "prepareInstall");
+      const manual = service.applyUpdates([preview.proposal]);
+      const automatic = service.applyUpdates([preview.proposal]);
+      await allow(f.policyFile, []);
+      await writeFile(release, "go");
+      await blocking;
+      for (const result of [await manual, await automatic])
+        expect(result).toMatchObject([
+          {
+            outcome: "error",
+            error: expect.stringContaining("Managed native acquisition is unsupported"),
+          },
+        ]);
+      await expect(
+        service.installSource({ source: pathToFileURL(repository).href, id: "managed" }),
+      ).rejects.toThrow("Managed native acquisition");
+      expect(preparing).not.toHaveBeenCalled();
+      expect(installing).not.toHaveBeenCalled();
+      await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await service.listPlugins()).find((item) => item.id === "managed")?.loaded).toEqual(
+        baseline.loaded,
+      );
+    } finally {
+      await writeFile(release, "go");
+      await service.stopAllPlugins();
+    }
+  }, 60_000);
+
+  it("refuses a newly enrolled native candidate after prepare and before build", async () => {
+    const f = await fixture();
+    const repository = await createPlugin("managed", "export default () => () => {};");
+    for (const args of [
+      ["init", "-b", "main"],
+      ["config", "user.name", "Paseo Tests"],
+      ["config", "user.email", "paseo@example.test"],
+    ])
+      await runGitCommand(args, { cwd: repository });
+    await runGitCommand(["add", "-A"], { cwd: repository });
+    await runGitCommand(["commit", "-m", "baseline"], { cwd: repository });
+    await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+    const sources = new ManagedPluginSources(f.home);
+    const service = createService(
+      f.home,
+      {},
+      { managedSources: sources, activationPolicy: f.policy },
+    );
+    const prepared = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const sentinel = path.join(f.home, "must-not-build");
+    try {
+      await service.start();
+      const baseline = await service.installSource({
+        source: pathToFileURL(repository).href,
+        id: "managed",
+      });
+      await writeFile(
+        path.join(repository, "paseo-plugin.json"),
+        JSON.stringify({
+          id: "managed",
+          build: [
+            [
+              process.execPath,
+              "-e",
+              `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'executed')`,
+            ],
+          ],
+        }),
+      );
+      await runGitCommand(["add", "-A"], { cwd: repository });
+      await runGitCommand(["commit", "-m", "build candidate"], { cwd: repository });
+      const [preview] = await service.previewUpdates({ pluginId: "managed" });
+      if (!preview.proposal) throw new Error("Expected proposal");
+      const realPrepare = sources.prepareUpdate.bind(sources);
+      vi.spyOn(sources, "prepareUpdate").mockImplementation(async (...args) => {
+        const candidate = await realPrepare(...args);
+        prepared.resolve();
+        await release.promise;
+        return candidate;
+      });
+      const operation = service.applyUpdates([preview.proposal]);
       await prepared.promise;
-      const automatic = service.applyUpdates([proposal]);
       await allow(f.policyFile, []);
       release.resolve();
-      expect(await manual).toMatchObject([
-        { id: "managed", outcome: "error", error: expect.stringContaining("authorization") },
+      expect(await operation).toMatchObject([
+        {
+          outcome: "error",
+          error: expect.stringContaining("Managed native acquisition is unsupported"),
+        },
       ]);
-      expect(await automatic).toMatchObject([
-        { id: "managed", outcome: "error", error: expect.stringContaining("authorization") },
-      ]);
-      const current = (await service.listPlugins())[0];
-      expect(current.loaded).toEqual(loaded);
-      expect(current.path).toBe(installed.path);
-      const stale = { ...proposal, expected: { ...proposal.expected, revision: "0".repeat(40) } };
-      expect(await service.applyUpdates([stale])).toMatchObject([
-        { outcome: "error", error: expect.stringContaining("changed since review") },
-      ]);
-      expect((await service.listPlugins())[0].loaded).toEqual(loaded);
+      await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await service.listPlugins())[0].loaded).toEqual(baseline.loaded);
     } finally {
       release.resolve();
       await service.stopAllPlugins();
     }
   }, 60_000);
 
-  it.each(["persist", "stop", "start", "config-commit"])(
+  it("holds first enrollment before disrupting an unmanaged baseline", async () => {
+    const f = await fixture();
+    const old = await createPlugin("managed", "export default () => () => {};");
+    const candidate = await createPlugin(
+      "managed",
+      "export default () => { throw new Error('bad'); };",
+    );
+    await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+    const service = createService(
+      f.home,
+      { managed: { source: "directory", path: old } },
+      { activationPolicy: f.policy },
+    );
+    try {
+      await service.start();
+      const receipt = (await service.listPlugins())[0].loaded;
+      await allow(f.policyFile, [await authorization(candidate, 0)]);
+      await expect(
+        service.replaceDirectory({
+          pluginId: "managed",
+          path: candidate,
+          expectedPath: old,
+          expectedGeneration: 0,
+        }),
+      ).rejects.toThrow("complete managed baseline evidence");
+      expect((await service.listPlugins())[0].loaded).toEqual(receipt);
+    } finally {
+      await service.stopAllPlugins();
+    }
+  });
+
+  it.each(["persist", "stop", "start", "pre-config-commit", "config-commit"])(
     "recovers after native replacement interruption at %s",
     async (phase) => {
       const f = await fixture();
@@ -2275,6 +2502,10 @@ describe("managed plugin promotion boundary", () => {
         override async patch(
           ...args: Parameters<DaemonConfigStore["patch"]>
         ): ReturnType<DaemonConfigStore["patch"]> {
+          if (phase === "pre-config-commit" && !interrupted) {
+            interrupted = true;
+            throw new Error("injected config persistence failure before commit");
+          }
           const result = await super.patch(...args);
           if (
             phase === "config-commit" &&
@@ -2314,6 +2545,19 @@ describe("managed plugin promotion boundary", () => {
           }),
         ).rejects.toThrow();
         expect(interrupted).toBe(true);
+        if (phase === "pre-config-commit") {
+          expect((await service.listPlugins())[0].loaded).toBeUndefined();
+          const state = await policy.status("managed");
+          await allow(f.policyFile, [await authorization(old, state.generation, "recover")]);
+          const recovered = await service.recoverPlugin({
+            pluginId: "managed",
+            expectedPath: old,
+            expectedGeneration: state.generation,
+          });
+          expect(recovered.loaded?.activationGeneration).toBe(state.generation + 1);
+          expect(recovered.path).toBe(old);
+          return;
+        }
         await service.stopAllPlugins();
         const restarted = new ManagedPluginActivationPolicy(
           f.policyFile,
@@ -2387,4 +2631,116 @@ describe("managed plugin promotion boundary", () => {
       }
     },
   );
+  it.each([true, false])(
+    "refuses unknown-ID acquisition from persisted enrollment after restart with configured policy=%s",
+    async (configured) => {
+      const f = await fixture();
+      const directory = await createPlugin("managed", "export default () => () => {};");
+      await allow(f.policyFile, [await authorization(directory, 0)]);
+      await f.policy.authorize("managed", directory);
+      expect((await f.policy.status("managed")).enrolled).toBe(true);
+      await writeFile(f.policyFile, JSON.stringify({ version: 1, plugins: {} }));
+      const policy = new ManagedPluginActivationPolicy(
+        configured ? f.policyFile : undefined,
+        path.join(f.home, "promotions"),
+      );
+      const sources = new ManagedPluginSources(f.home);
+      const preparing = vi.spyOn(sources, "prepareInstall");
+      const service = createService(
+        f.home,
+        {},
+        { managedSources: sources, activationPolicy: policy },
+      );
+      try {
+        await service.start();
+        await expect(
+          service.installSource({ source: pathToFileURL(directory).href }),
+        ).rejects.toThrow("explicit runtime ID");
+        expect(preparing).not.toHaveBeenCalled();
+      } finally {
+        await service.stopAllPlugins();
+      }
+    },
+  );
+
+  it("preserves unknown-ID native install compatibility without policy or enrollment history", async () => {
+    const f = await fixture();
+    const directory = await createPlugin("unmanaged", "export default () => () => {};");
+    for (const args of [
+      ["init", "-b", "main"],
+      ["config", "user.name", "Paseo Tests"],
+      ["config", "user.email", "paseo@example.test"],
+      ["add", "-A"],
+      ["commit", "-m", "baseline"],
+    ])
+      await runGitCommand(args, { cwd: directory });
+    const policy = new ManagedPluginActivationPolicy(undefined, path.join(f.home, "promotions"));
+    const service = createService(
+      f.home,
+      {},
+      { managedSources: new ManagedPluginSources(f.home), activationPolicy: policy },
+    );
+    try {
+      await service.start();
+      expect(await service.installSource({ source: pathToFileURL(directory).href })).toMatchObject({
+        id: "unmanaged",
+        status: "running",
+      });
+    } finally {
+      await service.stopAllPlugins();
+    }
+  }, 30_000);
+  it("binds readonly CJS candidate sourceDirectory to B while persisted registration still names A", async () => {
+    const f = await fixture();
+    const old = await createPlugin(
+      "managed",
+      "export default function contribute() { return () => {}; }",
+    );
+    const observed = path.join(f.home, "candidate-source.json");
+    const config = path.join(f.home, "config.json");
+    const cleanupMarker = path.join(f.home, "candidate-cleanup");
+    const candidate = await createPlugin(
+      "managed",
+      `import { readFileSync, writeFileSync } from 'node:fs';
+      import type { PluginServerContext } from '@getpaseo/plugin/server';
+      export default function contribute(context: PluginServerContext) {
+        const descriptor = Object.getOwnPropertyDescriptor(context, 'sourceDirectory');
+        const changed = Reflect.set(context, 'sourceDirectory', '/incorrect');
+        const redefined = Reflect.defineProperty(context, 'sourceDirectory', { value: '/incorrect' });
+        writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ sourceDirectory: context.sourceDirectory,
+          registeredPath: JSON.parse(readFileSync(${JSON.stringify(config)}, 'utf8')).plugins.managed.path,
+          writable: descriptor?.writable, configurable: descriptor?.configurable, enumerable: descriptor?.enumerable, changed, redefined }));
+        return () => writeFileSync(${JSON.stringify(cleanupMarker)}, 'cleaned');
+      }`,
+    );
+    await allow(f.policyFile, [await authorization(old, 0)]);
+    const service = createService(f.home, {}, { activationPolicy: f.policy });
+    try {
+      await service.start();
+      const baseline = await service.installDirectory({ path: old });
+      expect(baseline.loaded?.sourcePath).toBe(await realpath(old));
+      await allow(f.policyFile, [await authorization(candidate, 1)]);
+      const promoted = await service.replaceDirectory({
+        pluginId: "managed",
+        path: candidate,
+        expectedPath: old,
+        expectedGeneration: 1,
+      });
+      expect(JSON.parse(await readFile(observed, "utf8"))).toEqual({
+        sourceDirectory: await realpath(candidate),
+        registeredPath: old,
+        writable: false,
+        configurable: false,
+        enumerable: true,
+        changed: false,
+        redefined: false,
+      });
+      expect(promoted.path).toBe(candidate);
+      expect(promoted.loaded?.sourcePath).toBe(await realpath(candidate));
+      await service.disablePlugin("managed");
+      expect(await readFile(cleanupMarker, "utf8")).toBe("cleaned");
+    } finally {
+      await service.stopAllPlugins();
+    }
+  });
 });

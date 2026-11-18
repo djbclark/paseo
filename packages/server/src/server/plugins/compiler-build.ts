@@ -384,7 +384,8 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
   checkSharedDependencies(result.metafile.inputs, pluginDirectory);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
-  const eager = makeHermesInteropEager(output);
+  // Node must retain live export bindings: an arrow default is initialized after __toCommonJS.
+  const eager = target === "client" ? makeHermesInteropEager(output) : output;
   let prepared = eager;
   if (target === "client") prepared = await minifyClientBundle(eager);
   return wrapCommonJsBundle(prepared);

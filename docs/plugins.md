@@ -4,7 +4,45 @@ Local plugins contribute daemon RPCs, native app surfaces, workspace panels, Com
 client slash commands, timeline items, header buttons, composer pills, app themes, composer attachment sources, and settings screens.
 Paseo executes `index.server.ts` in a subprocess and `index.client.tsx` in every connected app.
 
+Server contributions receive `context.sourceDirectory`: the canonical absolute directory of the source
+being initialized. It comes directly from the daemon's initialize message and is read-only in both the
+SDK type and its runtime property descriptor. During replacement it names candidate B while the saved
+registration still names A. Use it during contribution setup to bind helpers; do not infer the loaded
+source from registration, environment, cwd, or a CommonJS `import.meta.url` fallback. Bundle module
+evaluation happens before contribution setup, so defer source-root resolution until you receive this
+context. The directory is identity, not authorization; managed policy, snapshot/bundle hash checks and
+external dependency qualification still apply. The worker rejects relative, noncanonical or nondirectory
+initialize paths before invoking the contribution. Contribution cleanup remains synchronous and required.
+
 > **Trust every plugin you add.** `paseo plugin add` and `paseo plugin install` mean “I trust this codebase.” Plugins are unsandboxed: server code and preparation commands run with the daemon user's access on the daemon host, and client contributions run inside Paseo. The repository's dependencies and future updates are part of that trust decision. With `--host`, preparation runs on that remote daemon host.
+
+## Passive maintenance prototype (fork)
+
+`PluginService.maintenance` exposes the native V1 port. This source slice always
+returns `supportsV1() === false`: the executing daemon and child closure producer
+has not been integrated. An administrator passive profile is an expectation;
+it cannot qualify a running host by itself. A restored `begin({ generation,
+transactionId })` closes normal and lifecycle admission synchronously and returns
+`unknown`. Repeating the same identity retains the hold. `end` refuses release
+without executing-closure qualification. Startup under this unsupported hold
+leaves plugin code uninitialized.
+
+Child accounting follows actual handler settlement and SDK helper `close`,
+independently of RPC replies, caller abort, timeout, or subscription acknowledgement.
+Helpers inherit the admitted root and keep it alive after its handler returns.
+Settings subscriptions and provider connections retain their execution owner until
+release and actual handler/close settlement. A wrong child incarnation, uncertain
+IPC, or child exit with unfinished work holds native admission. The host process
+itself is transport, not counted as plugin work.
+
+This is accounting infrastructure, not a general plugin suspension facility.
+An externally qualified passive closure must exclude autonomous/unowned work,
+raw helper launches, and detached descendants outside these owners. Source/dev
+launches, arbitrary plugins, Cafe, and retrospective disk hashes cannot grant
+maintenance. No production or coupled positive qualification is claimed by these
+unit tests. The genuine role producer and native bootstrap integration must verify
+actual executing bindings, immutable artifacts, incarnation, and fresh child ACK
+before enabling support or restricted initialization.
 
 ## Managed activation policy (fork)
 
@@ -67,6 +105,27 @@ receipt remains unchanged when disk changes and disappears on stop/failure. Veri
 independently compiled qualified bytes, snapshot digest and child identity. Unmanaged generations
 are daemon-local; managed generations persist across restarts.
 
+Managed native Git/npm install/update is explicitly unsupported for enrolled IDs. The manager checks
+before acquisition and again before/after preparation for an enrollment change. With configured policy,
+native source installation requires an explicit `--id`, even when the current `plugins` policy object
+is empty. Without a configured policy, unknown-ID acquisition is also refused if the promotion journal
+directory contains any history. A fresh policy instance recognizes persisted history after restart;
+removing a policy entry does not restore unknown-ID acquisition. With neither policy nor history,
+ordinary unmanaged installations can still infer the manifest ID.
+Use an externally prepared, immutable, qualified directory. A running unmanaged plugin cannot be
+silently adopted: replacement/reload holds before stopping it unless its loaded receipt already binds
+a complete managed snapshot. Initial qualification/adoption needs explicitly approved maintenance;
+there is no implied rollback to unqualified bytes.
+
+At initialization dispatch, after socket attachment, the daemon reads the policy again, compares its
+whole-file SHA256 to the activation ticket, checks cancellation, and sends initialization in the same
+continuation with no intervening await. That check is the dispatch serialization point. Atomic policy
+publication effective before that final read prevents dispatch; a policy change published afterward
+affects later dispatch checks and does not revoke already-dispatched execution or undo its effects.
+Snapshots and dependency closure still require administrator-enforced immutability. Journals use atomic
+rename but are not fsynced: process-interruption recovery is covered; power-loss durability and orphan
+child reconciliation are not established by these tests.
+
 ### Replace a managed directory
 
 ```bash
@@ -88,8 +147,9 @@ Recovery requires a separate current `recover` authorization for the retained id
 expected generation. Revoking a candidate does not revoke an independently authorized baseline.
 Missing recovery authorization leaves the plugin stopped and exposes held/recovery-required state.
 An interrupted `activating` or `replacing` journal prevents automatic startup replay. The journal
-retains the previous registration and its independently captured loaded receipt. Managed Git updates
-also retain their previous snapshot and use this recovery journal. Reconcile through the supported
+retains the previous registration and its independently captured loaded receipt. Managed Git/npm acquisition, preparation and build are refused before they start; qualify snapshots
+externally and use directory replacement. Native moving refs and arbitrary random installation paths
+are not a qualification handoff. Unmanaged native updates keep their existing behavior. Reconcile through the supported
 API; do not edit the journal or restore a session database:
 
 ```bash

@@ -1,3 +1,4 @@
+import { bindPluginActivity } from "@getpaseo/plugin/internal/activity";
 import { z } from "zod";
 import type {
   AgentToolDefinition,
@@ -52,7 +53,10 @@ export function serializeAgentTool(tool: AgentToolDefinition): AgentToolMetadata
 // This store lives only in the plugin process. Definitions and parsed values never cross IPC.
 export class PluginAgentTools {
   private readonly agents = new Map<string, AgentToolDefinition[]>();
-  private readonly calls = new Map<string, { agentId: string; controller: AbortController }>();
+  private readonly calls = new Map<
+    string,
+    { agentId: string; controller: AbortController; abort: () => void }
+  >();
 
   attach(agentId: string, tools: AgentToolDefinition[]): AgentToolMetadata[] {
     const names = new Set<string>();
@@ -69,16 +73,16 @@ export class PluginAgentTools {
   detach(agentId: string): void {
     this.agents.delete(agentId);
     for (const call of this.calls.values()) {
-      if (call.agentId === agentId) call.controller.abort();
+      if (call.agentId === agentId) call.abort();
     }
   }
 
   cancel(requestId: string): void {
-    this.calls.get(requestId)?.controller.abort();
+    this.calls.get(requestId)?.abort();
   }
 
   close(): void {
-    for (const call of this.calls.values()) call.controller.abort();
+    for (const call of this.calls.values()) call.abort();
     this.agents.clear();
   }
 
@@ -90,7 +94,11 @@ export class PluginAgentTools {
     paseo: PluginHookContext["paseo"],
   ): Promise<AgentToolResult> {
     const controller = new AbortController();
-    this.calls.set(requestId, { agentId: agent.id, controller });
+    this.calls.set(requestId, {
+      agentId: agent.id,
+      controller,
+      abort: bindPluginActivity(() => controller.abort()),
+    });
     try {
       const tool = this.agents.get(agent.id)?.find((definition) => definition.name === name);
       if (!tool) throw new Error(`Agent tool not attached: ${name}`);

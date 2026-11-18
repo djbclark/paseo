@@ -2922,7 +2922,35 @@ export class Session {
     });
   }
 
+  private dispatchManagedPluginMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type === "plugin.recovery.request") {
+      if (!this.pluginRuntime?.recoverPlugin)
+        throw new Error("Managed plugin recovery unavailable");
+      return this.pluginRuntime.recoverPlugin(msg).then((plugin) => {
+        this.emit({
+          type: "plugin.recovery.response",
+          payload: { requestId: msg.requestId, plugin },
+        });
+        return undefined;
+      });
+    }
+    if (msg.type === "plugin.directory.replace.request") {
+      if (!this.pluginRuntime?.replaceDirectory)
+        throw new Error("Managed plugin replacement unavailable");
+      return this.pluginRuntime.replaceDirectory(msg).then((plugin) => {
+        this.emit({
+          type: "plugin.directory.replace.response",
+          payload: { requestId: msg.requestId, plugin },
+        });
+        return undefined;
+      });
+    }
+    return undefined;
+  }
+
   private dispatchPluginDirectoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    const managed = this.dispatchManagedPluginMessage(msg);
+    if (managed) return managed;
     if (msg.type === "plugin.source.install.request") {
       if (!this.pluginRuntime) throw new Error("Plugin service is unavailable");
       return this.pluginRuntime
@@ -2978,28 +3006,6 @@ export class Session {
         this.emit({
           type: "plugin.source.update.response",
           payload: { requestId: msg.requestId, plugins },
-        });
-        return undefined;
-      });
-    }
-    if (msg.type === "plugin.recovery.request") {
-      if (!this.pluginRuntime?.recoverPlugin)
-        throw new Error("Managed plugin recovery unavailable");
-      return this.pluginRuntime.recoverPlugin(msg).then((plugin) => {
-        this.emit({
-          type: "plugin.recovery.response",
-          payload: { requestId: msg.requestId, plugin },
-        });
-        return undefined;
-      });
-    }
-    if (msg.type === "plugin.directory.replace.request") {
-      if (!this.pluginRuntime?.replaceDirectory)
-        throw new Error("Managed plugin replacement unavailable");
-      return this.pluginRuntime.replaceDirectory(msg).then((plugin) => {
-        this.emit({
-          type: "plugin.directory.replace.response",
-          payload: { requestId: msg.requestId, plugin },
         });
         return undefined;
       });

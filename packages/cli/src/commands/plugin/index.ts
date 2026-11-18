@@ -269,15 +269,8 @@ export async function runPluginRecoverCommand(
   return { type: "single", data, schema: pluginSchema };
 }
 
-export async function runManagedPluginStatusCommand(
-  pluginId: string,
-  options: PluginOptions,
-  _command: Command,
-): Promise<AnyCommandResult<ManagedPluginStatus>> {
-  const data = await withManagedPluginStatusClient(options.daemonTarget, (client) =>
-    client.getManagedPluginStatus(pluginId),
-  );
-  const schema: OutputSchema<ManagedPluginStatus> = {
+function managedStatusResult<T extends ManagedPluginStatus>(data: T): SingleResult<T> {
+  const schema: OutputSchema<T> = {
     idField: "pluginId",
     columns: [
       { header: "PLUGIN", field: "pluginId", width: 20 },
@@ -304,8 +297,19 @@ export async function runManagedPluginStatusCommand(
       },
     ],
   };
-  if (data.consistency === "coherent") return { type: "single", data, schema };
   return { type: "single", data, schema };
+}
+
+export async function runManagedPluginStatusCommand(
+  pluginId: string,
+  options: PluginOptions,
+  _command: Command,
+): Promise<AnyCommandResult<ManagedPluginStatus>> {
+  const data = await withManagedPluginStatusClient(options.daemonTarget, (client) =>
+    client.getManagedPluginStatus(pluginId),
+  );
+  if (data.consistency === "coherent") return managedStatusResult(data);
+  return managedStatusResult(data);
 }
 
 export function createPluginCommand(): Command {

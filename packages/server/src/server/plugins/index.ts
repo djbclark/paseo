@@ -242,6 +242,11 @@ export class PluginService {
     const owner = this.dependencies.qualifiedDaemonOwner;
     if (!owner || !isQualifiedDaemonOwner(owner) || this.maintenanceUncertain || this.starting)
       return false;
+    const loaded = new Set(this.runtime.catalog().map((plugin) => plugin.id));
+    for (const id of this.builtinPluginIds) if (!loaded.has(id)) return false;
+    if (this.configStore.get().pluginsEnabled === true)
+      for (const [id, source] of Object.entries(this.configStore.get().plugins ?? {}))
+        if (source.enabled !== false && !loaded.has(id)) return false;
     return this.runtime.maintenance?.supportsV1() === true;
   }
 

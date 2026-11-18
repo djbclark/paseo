@@ -72,7 +72,7 @@ export function createPluginWorker(
     | { contribute: PluginServerContribution }
     | { loadContribution: (source: string) => PluginServerContribution }
   ),
-): { shutdown(): Promise<void> } {
+): { shutdown(): Promise<void>; readonly activityOwner: PluginActivityOwner } {
   const { channel } = options;
   const activity = new PluginActivityOwner(() =>
     send({ type: "execution.unknown", instanceId: hostInstanceId }),
@@ -705,7 +705,7 @@ export function createPluginWorker(
   }
   channel.onMessage(handleMessage);
 
-  return { shutdown };
+  return Object.freeze({ shutdown, activityOwner: activity });
 }
 
 /** Producer entry supplies its fixed evaluator after private host validation and helper admission. */

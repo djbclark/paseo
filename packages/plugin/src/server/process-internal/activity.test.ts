@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { execQualifiedBuiltinFile } from "./builtin-helper.js";
 import { execFile as nativeExecFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
@@ -112,4 +114,99 @@ it("sealed startup helper restriction applies before ALS and cannot be replaced"
     },
   );
   expect(stdout).toBe("helper-guard-verified");
+});
+
+it("preserves builtin execFile callbacks, promisify output and the actual child handle", async () => {
+  const owner = new PluginActivityOwner();
+  owner.qualifyPassive();
+  const callbackRoot = owner.acquire();
+  let callbackChild: import("node:child_process").ChildProcess | undefined;
+  const callbackResult = new Promise<string>((resolve, reject) => {
+    callbackChild = callbackRoot.run(() =>
+      execQualifiedBuiltinFile(
+        process.execPath,
+        ["-e", "process.stdout.write('callback')"],
+        (error, stdout) => {
+          if (error) reject(error);
+          else resolve(String(stdout));
+        },
+      ),
+    );
+  });
+  const callbackClosed = new Promise<void>((resolve) =>
+    callbackChild!.once("close", () => resolve()),
+  );
+  callbackRoot.release();
+  expect(callbackChild?.pid).toBeGreaterThan(0);
+  expect(await callbackResult).toBe("callback");
+  await callbackClosed;
+  const promisedRoot = owner.acquire();
+  const operation = promisedRoot.run(() =>
+    promisify(execQualifiedBuiltinFile)(process.execPath, [
+      "-e",
+      "process.stdout.write('promise');process.stderr.write('diagnostic')",
+    ]),
+  );
+  const actualChild = Reflect.get(operation, "child") as import("node:child_process").ChildProcess;
+  const actualClosed = new Promise<void>((resolve) => actualChild.once("close", () => resolve()));
+  promisedRoot.release();
+  expect(actualChild.pid).toBeGreaterThan(0);
+  await expect(operation).resolves.toMatchObject({ stdout: "promise", stderr: "diagnostic" });
+  await actualClosed;
+  expect(owner.begin(identity)).toBe("held");
+  owner.end(identity);
+});
+
+it("keeps a real helper root busy after leader close until the producer settlement is proved", async () => {
+  const script = `
+    import assert from 'node:assert/strict';
+    import {once} from 'node:events';
+    import {PluginActivityOwner,installQualifiedHelperAdmission} from '@getpaseo/plugin/internal/activity';
+    import {spawnProcess} from '@getpaseo/plugin/server';
+    const owner = new PluginActivityOwner();
+    owner.qualifyPassive();
+    let bound;
+    let requestRoot;
+    installQualifiedHelperAdmission((request) => {
+      assert.equal(request.activityOwner,owner);
+      owner.assertLiveRoot(request.root);
+      requestRoot = request.root;
+      assert.equal(request.operation.kind,'spawn');
+      return {settled:new Promise(() => {}),bind(child) { assert.ok(child.pid > 0); bound=child; },failed(error) { throw error; }};
+    });
+    const root = owner.acquire();
+    const child = root.run(() => spawnProcess(process.execPath,['-e','process.stdout.write("done")'],{stdio:'pipe'}));
+    assert.equal(bound,child);
+    root.release();
+    await once(child,'close');
+    owner.assertLiveRoot(requestRoot);
+    assert.throws(() => owner.assertLiveRoot({}),/Unknown/);
+    assert.equal(owner.begin({generation:1,transactionId:'pending',instanceId:'actual'}),'known-busy');
+    process.stdout.write('actual-close-is-not-descendant-settlement');
+  `;
+  const { stdout } = await promisify(nativeExecFile)(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { cwd: new URL("../../../", import.meta.url), env: { PATH: process.env.PATH } },
+  );
+  expect(stdout).toBe("actual-close-is-not-descendant-settlement");
+});
+
+it("restores the original admitted context and permits its necessary late helper after begin", async () => {
+  const nativeContext = new AsyncLocalStorage<string>();
+  const owner = new PluginActivityOwner();
+  owner.qualifyPassive();
+  const root = nativeContext.run("original-live-root", () => owner.acquire());
+  expect(owner.begin(identity)).toBe("known-busy");
+  expect(() => owner.acquire()).toThrow("admission is closed");
+  const operation = nativeContext.run("different-caller", () =>
+    root.run(() => {
+      expect(nativeContext.getStore()).toBe("original-live-root");
+      return execCommand(process.execPath, ["-e", "process.stdout.write('late helper')"]);
+    }),
+  );
+  root.release();
+  await expect(operation).resolves.toEqual({ stdout: "late helper", stderr: "" });
+  await expect.poll(() => owner.state()).toBe("held");
+  owner.end(identity);
 });

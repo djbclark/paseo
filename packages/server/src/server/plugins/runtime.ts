@@ -346,12 +346,15 @@ function send(child: PluginChild, message: PluginProcessRequest): Promise<void> 
       return;
     }
     try {
-      child.send(message, (error) => {
-        if (error) {
-          if (root) owner?.markUnknown();
-          reject(error);
-        } else resolve();
-      });
+      const dispatch = () =>
+        child.send(message, (error) => {
+          if (error) {
+            if (root) owner?.markUnknown();
+            reject(error);
+          } else resolve();
+        });
+      if (root && owner) owner.runAdmitted(message, dispatch);
+      else dispatch();
     } catch (error) {
       if (root) owner?.markUnknown();
       reject(error);

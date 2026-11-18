@@ -99,6 +99,11 @@ int main(void) {
           await git.close();
           await gate.close();
         }
+        const streamErrors = [];
+        for (const channel of [0, 1, 2, 3, 4, 9])
+          child.stdio[channel].on("error", (error) => {
+            streamErrors.push({ channel, code: error.code });
+          });
         let output = "",
           error = "",
           wire = "",
@@ -123,7 +128,7 @@ int main(void) {
             observations.push(line);
             if (fields[0] === "leader" && fault) {
               assert.ok(!observations.some((row) => row.startsWith("complete ")));
-              child.stdio[9].end("drain");
+              child.stdio[9].end("x");
             }
             if (fields[0] === "ready") {
               // The constructor still parks this exact actual image while the read runs.
@@ -153,6 +158,14 @@ int main(void) {
           child.once("close", (...args) => resolve(args));
         });
         await Promise.all(checks);
+        if (behavior === "observer-loss") {
+          assert.ok(
+            streamErrors.every(
+              (error) =>
+                [3, 4].includes(error.channel) && ["ECONNRESET", "EPIPE"].includes(error.code),
+            ),
+          );
+        } else assert.deepEqual(streamErrors, []);
         assert.equal(signal, behavior === "observer-loss" ? "SIGKILL" : null);
         assert.equal(error, fault ? "descendant-complete\n" : "");
         assert.equal(observed, true);

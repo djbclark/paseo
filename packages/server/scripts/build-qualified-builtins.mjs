@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -98,26 +99,48 @@ export async function precompileBuiltinPlugins(
       const bytes = await readFile(path.join(repositoryRoot, name));
       additionalInputs.set(name, { path: name, bytes: bytes.length, sha256: digest(bytes) });
     }
-    const sourceRows = sourceInputs
-      .filter((row) => row.path.startsWith(`plugins/${id}/`))
-      .sort((a, b) => {
-        if (a.path < b.path) return -1;
-        if (a.path > b.path) return 1;
-        return 0;
-      });
+    const sourceRowsByPath = new Map(
+      sourceInputs
+        .filter((row) => row.path.startsWith(`plugins/${id}/`))
+        .map((row) => [row.path, row]),
+    );
+    for (const name of Object.keys(normalized.inputs))
+      sourceRowsByPath.set(name, additionalInputs.get(name));
+    for (const name of [
+      "plugins/package.json",
+      "plugins/tsconfig.json",
+      "tsconfig.base.json",
+      "package-lock.json",
+      "packages/server/src/server/plugins/compiler-build.ts",
+      "packages/server/scripts/build-qualified-builtins.mjs",
+    ]) {
+      const bytes = await readFile(path.join(repositoryRoot, name));
+      sourceRowsByPath.set(name, { path: name, bytes: bytes.length, sha256: digest(bytes) });
+    }
+    const sourceRows = [...sourceRowsByPath.values()].sort((a, b) =>
+      Buffer.compare(Buffer.from(a.path, "utf8"), Buffer.from(b.path, "utf8")),
+    );
+    const sourceIdentity = canonicalBuiltinJson({
+      schemaVersion: 1,
+      contract: "builtin-source-input-v1",
+      files: sourceRows,
+      resolution: normalized,
+    });
     const factory = `(function(require, globals) {\nconst process=globals.process; const fetch=globals.fetch; const setTimeout=globals.setTimeout; const setInterval=globals.setInterval; const clearTimeout=globals.clearTimeout; const clearInterval=globals.clearInterval; const __qualifiedBuiltinImport=globals.import;\nreturn (${finiteImports(actual.serverBundle)})(require);\n})`;
     const files = {
       "server-original.js": actual.serverBundle,
       "server.factory.js": factory,
       "manifest.json": JSON.stringify(actual.manifest),
       "metafile.json": JSON.stringify(normalized),
+      "source-identity.json": sourceIdentity,
     };
     await mkdir(path.join(outDir, prefix), { recursive: true });
     for (const [name, bytes] of Object.entries(files))
       await writeFile(path.join(outDir, prefix, name), bytes);
     artifacts.push({
       id,
-      sourceSha256: digest(JSON.stringify(sourceRows)),
+      sourceSha256: digest(sourceIdentity),
+      sourceIdentityPath: `${prefix}/source-identity.json`,
       serverBundleSha256: digest(factory),
       originalServerBundleSha256: digest(actual.serverBundle),
       factoryPath: `${prefix}/server.factory.js`,

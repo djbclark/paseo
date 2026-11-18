@@ -43,3 +43,42 @@ test("pre-send payload/count boundary refuses overflow and authority serializati
   assert.throws(() => cloneBoundedObservation(deep));
   assert.throws(() => cloneBoundedObservation({ value: "\0".repeat(3000000) }), /payload bound/);
 });
+
+// Canonical source/profile data is build/controller evidence, never a capability.
+test("builtin canonical identity orders UTF-8 keys and rejects non-data or invalid Unicode", async () => {
+  const { canonicalBuiltinJson } =
+    await import("../dist/server/server/execution/builtin-format.js");
+  assert.equal(
+    canonicalBuiltinJson({ "😀": 2, "\ue000": 1, é: "雪" }),
+    '{"é":"雪","\ue000":1,"😀":2}',
+  );
+  assert.equal(
+    canonicalBuiltinJson({ b: [3, 2, 1], a: { z: false, n: null } }),
+    '{"a":{"n":null,"z":false},"b":[3,2,1]}',
+  );
+  for (const value of [undefined, NaN, Infinity, () => {}, new Date(), "\ud800", { "\ud800": 1 }])
+    assert.throws(() => canonicalBuiltinJson(value));
+});
+test("builtin profile rows require exact finite artifact identity without granting a brand", async () => {
+  const { readBuiltinProfiles } =
+    await import("../dist/server/server/execution/builtin-profile.js");
+  const row = {
+    id: "worktree-include",
+    sourceSha256: "a".repeat(64),
+    serverBundleSha256: "b".repeat(64),
+    moduleTableSha256: "c".repeat(64),
+    profileSha256: "d".repeat(64),
+    activityContract: "builtin-in-process-v1",
+  };
+  assert.deepEqual(readBuiltinProfiles([row]), [row]);
+  for (const value of [
+    undefined,
+    {},
+    [row, row],
+    [{ ...row, id: "candidate" }],
+    [{ ...row, profileSha256: "D".repeat(64) }],
+    [{ ...row, permission: true }],
+    [{ ...row, activityContract: "plugin-child" }],
+  ])
+    assert.equal(readBuiltinProfiles(value), null);
+});

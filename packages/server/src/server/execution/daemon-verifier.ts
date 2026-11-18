@@ -1,3 +1,6 @@
+import { readBuiltinProfiles } from "./builtin-profile.js";
+import { canonicalBuiltinJson } from "./builtin-format.js";
+import builtinBindingsRecipe from "./builtin-bindings-recipe.json" with { type: "json" };
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import { readFixedManagedPluginPolicy } from "./managed-policy-environment.js";
 import { createHash } from "node:crypto";
@@ -93,6 +96,7 @@ async function enrollment(root: string): Promise<{
   distributionBuildId: string;
   qualificationSha256: string;
   authorityIdentity: string;
+  builtinProfiles?: unknown;
 }> {
   const account = userInfo();
   const home = await realpath(account.homedir);
@@ -172,7 +176,22 @@ function assertManifestIdentity(
   if (JSON.stringify([...manifest.bindingKeys].sort()) !== JSON.stringify(QUALIFIED_BINDING_KEYS))
     return unsupported();
 }
+function assertBuiltinModuleTable(manifest: DaemonManifest): void {
+  const expectedTable = {
+    schemaVersion: 1,
+    recipe: builtinBindingsRecipe,
+    runtimeSha256: manifest.runtime.sha256,
+    daemonSha256: manifest.files.find((file) => file.path === "daemon.mjs")?.sha256,
+    externalLibraries: manifest.externalLibraries,
+  };
+  if (
+    JSON.stringify(manifest.builtinModuleTable) !== JSON.stringify(expectedTable) ||
+    manifest.moduleTableSha256 !== digest(canonicalBuiltinJson(expectedTable))
+  )
+    return unsupported();
+}
 function assertBuiltinArtifacts(manifest: DaemonManifest): void {
+  assertBuiltinModuleTable(manifest);
   if (
     !Array.isArray(manifest.builtinArtifacts) ||
     JSON.stringify(manifest.builtinArtifacts.map((row) => row.id)) !==
@@ -185,6 +204,8 @@ function assertBuiltinArtifacts(manifest: DaemonManifest): void {
       row.factoryPath !== `${prefix}/server.factory.js` ||
       row.manifestPath !== `${prefix}/manifest.json` ||
       row.metafilePath !== `${prefix}/metafile.json` ||
+      row.sourceIdentityPath !== `${prefix}/source-identity.json` ||
+      row.moduleTableSha256 !== manifest.moduleTableSha256 ||
       !/^[a-f0-9]{64}$/.test(row.sourceSha256) ||
       !Array.isArray(row.moduleImports)
     )
@@ -197,7 +218,10 @@ function assertBuiltinArtifacts(manifest: DaemonManifest): void {
       !original ||
       original.sha256 !== row.originalServerBundleSha256 ||
       !manifest.files.some((file) => file.path === row.manifestPath) ||
-      !manifest.files.some((file) => file.path === row.metafilePath)
+      !manifest.files.some((file) => file.path === row.metafilePath) ||
+      !manifest.files.some(
+        (file) => file.path === row.sourceIdentityPath && file.sha256 === row.sourceSha256,
+      )
     )
       return unsupported();
   }
@@ -287,6 +311,7 @@ export async function verifyEnclosingDistribution(root: string) {
     manifest,
     manifestSha256,
     authorityIdentity: expected.authorityIdentity,
+    builtinProfiles: readBuiltinProfiles(expected.builtinProfiles),
     closure: Object.freeze({
       runtimeClosureSha256: manifestSha256,
       helperClosureSha256,

@@ -12,6 +12,14 @@ export interface DaemonManifest {
   profile: "enclosing-daemon-v2";
   builtinPlugins: string[];
   builtinArtifacts: QualifiedBuiltinArtifact[];
+  builtinModuleTable: {
+    schemaVersion: 1;
+    recipe: unknown;
+    runtimeSha256: string;
+    daemonSha256: string;
+    externalLibraries: FileIdentity[];
+  };
+  moduleTableSha256: string;
   distributionBuildId: string;
   files: FileIdentity[];
   runtime: FileIdentity;
@@ -108,6 +116,8 @@ export interface QualifiedDaemonObservation {
 }
 
 export interface QualifiedBuiltinArtifact {
+  moduleTableSha256: string;
+  sourceIdentityPath: string;
   id: string;
   sourceSha256: string;
   serverBundleSha256: string;

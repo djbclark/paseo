@@ -42,7 +42,7 @@ function inputMetafile(meta, output) {
   return { inputs, outputs };
 }
 const require = createRequire(import.meta.url);
-const externals = ["node-pty", "sherpa-onnx-node", "onnxruntime-node", "esbuild", "typescript"];
+const externals = ["node-pty", "sherpa-onnx-node", "esbuild", "typescript"];
 const banner =
   'import {createRequire as __qualifiedRequire} from "node:module"; import {fileURLToPath as __qualifiedFile} from "node:url"; import {dirname as __qualifiedDirname} from "node:path"; const require=__qualifiedRequire(import.meta.url); const __filename=__qualifiedFile(import.meta.url); const __dirname=__qualifiedDirname(__filename);';
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {

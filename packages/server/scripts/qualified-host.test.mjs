@@ -182,6 +182,7 @@ test(
       const a = await observe(childA, challengeA);
       assert.equal(a.bindingProbe, true);
       assert.equal(a.rejectedPrivateImports, true);
+      assert.equal(a.rejectedSdkHelperOutsideOwner, true);
       assert.equal(a.rejectedRelabel, true);
       assert.equal(a.rejectedJsonCapability, true);
       assert.equal(a.evidence.distributionBuildId, "distribution-A");

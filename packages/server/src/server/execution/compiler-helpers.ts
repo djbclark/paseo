@@ -13,7 +13,9 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   const originalSpawn = childProcess.spawn;
   const children = new Map<ChildProcess, Promise<void>>();
   const observations = new Set<Promise<void>>();
+  const identities = new Map<ChildProcess, Awaited<ReturnType<typeof observeLinuxProcess>>>();
   let failed = false;
+  let stopping = false;
   function hold(): void {
     failed = true;
     unknown();
@@ -21,6 +23,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   function spawn(command: string, args: readonly string[], options?: SpawnOptions): ChildProcess {
     if (
       failed ||
+      stopping ||
       command !== executable ||
       !Array.isArray(args) ||
       args[0] !== `--service=${metadata.version}` ||
@@ -44,6 +47,8 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
     const observed = observeLinuxProcess(child.pid!)
       .then((actual) => {
         if (actual.executable !== executable) return unsupported();
+        identities.set(child, actual);
+        return undefined;
       })
       .catch(hold)
       .finally(() => {
@@ -59,9 +64,22 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   return Object.freeze({
     async settled(): Promise<void> {
       await Promise.all(observations);
+      for (const [child, expected] of identities) {
+        if (child.exitCode !== null || child.signalCode !== null) continue;
+        const actual = await observeLinuxProcess(child.pid!);
+        if (
+          actual.birth !== expected.birth ||
+          actual.image !== expected.image ||
+          actual.executable !== executable
+        ) {
+          hold();
+          return unsupported();
+        }
+      }
       if (failed) return unsupported();
     },
     async stop(): Promise<void> {
+      stopping = true;
       const require = createRequire(path.join(root, "compiler-code.mjs"));
       const esbuild = require("esbuild") as { stop(): void };
       esbuild.stop();

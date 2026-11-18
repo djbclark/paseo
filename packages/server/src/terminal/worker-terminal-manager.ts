@@ -1,4 +1,7 @@
-import { isQualifiedDaemonOwner } from "../server/execution/daemon-owner.js";
+import {
+  isQualifiedDaemonOwner,
+  type QualifiedDaemonOwner,
+} from "../server/execution/daemon-owner.js";
 import type { TerminalReplaySink, TerminalReplayMetadata } from "./terminal-replay.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
@@ -1026,19 +1029,15 @@ interface LiveWorkerRecord {
 export async function startWorkerTerminalManager(
   options: StartWorkerTerminalManagerOptions,
 ): Promise<DaemonTerminalManager> {
-  const qualifiedOwner = options.qualifiedDaemonOwner;
-  if (qualifiedOwner !== undefined && !isQualifiedDaemonOwner(qualifiedOwner))
-    throw new Error("Qualified terminal owner unavailable");
+  const qualifiedOwner = resolveQualifiedTerminalOwner(options.qualifiedDaemonOwner);
   const logger = options.logger.child({ module: "terminal-worker" });
   const inspector = createTerminalWorkerProcessInspector();
   const log = (message: string, fields?: Record<string, unknown>) => logger.info(fields, message);
   const live: LiveWorkerRecord[] = [];
   const toReap: string[] = [];
-  for (const file of await listTerminalWorkerRecords(options.paseoHome)) {
-    if (qualifiedOwner !== undefined) {
-      if ("error" in file) throw new Error("Unqualified terminal record");
-      qualifiedOwner.assertOwnedTerminalWorker(file.record);
-    }
+  const existingRecords = await listTerminalWorkerRecords(options.paseoHome);
+  assertQualifiedExistingRecords(qualifiedOwner, existingRecords);
+  for (const file of existingRecords) {
     if ("error" in file) {
       logger.warn({ recordPath: file.path, err: file.error }, "Unreadable terminal worker record");
       continue;
@@ -1310,18 +1309,7 @@ export async function startWorkerTerminalManager(
       void pruneAfterExit(member.workerPid);
     },
   });
-  if (qualifiedOwner !== undefined) {
-    if (!current || draining.length) throw new Error("Qualified terminal worker unavailable");
-    const record = (await listTerminalWorkerRecords(options.paseoHome)).find(
-      (entry) => !("error" in entry) && entry.record.pid === current!.workerPid,
-    );
-    if (!record || "error" in record) throw new Error("Qualified terminal record unavailable");
-    // The private producer requires its original record object, not parsed JSON.
-    const original = qualifiedTerminalRecords.get(current.workerPid);
-    if (!original) throw new Error("Qualified terminal launch proof unavailable");
-    qualifiedOwner.assertOwnedTerminalWorker(original);
-    qualifiedManagers.set(pool, { owner: qualifiedOwner, record: original });
-  }
+  await bindQualifiedTerminalPool(pool, qualifiedOwner, current, draining, options.paseoHome);
   return pool;
 }
 
@@ -1361,6 +1349,41 @@ async function waitForWorkerRecordRemoval(paseoHome: string, workerPid: number):
     await delay(100);
   }
   return true;
+}
+
+function resolveQualifiedTerminalOwner(value: unknown): QualifiedDaemonOwner | undefined {
+  if (value === undefined) return undefined;
+  if (!isQualifiedDaemonOwner(value)) throw new Error("Qualified terminal owner unavailable");
+  return value;
+}
+function assertQualifiedExistingRecords(
+  owner: QualifiedDaemonOwner | undefined,
+  files: Awaited<ReturnType<typeof listTerminalWorkerRecords>>,
+): void {
+  if (owner === undefined) return;
+  for (const file of files) {
+    if ("error" in file) throw new Error("Unqualified terminal record");
+    owner.assertOwnedTerminalWorker(file.record);
+  }
+}
+async function bindQualifiedTerminalPool(
+  pool: DaemonTerminalManager,
+  qualifiedOwner: QualifiedDaemonOwner | undefined,
+  current: TerminalWorkerPoolMember | null,
+  draining: readonly TerminalWorkerPoolMember[],
+  paseoHome: string,
+): Promise<void> {
+  if (qualifiedOwner === undefined) return;
+  if (!current || draining.length) throw new Error("Qualified terminal worker unavailable");
+  const record = (await listTerminalWorkerRecords(paseoHome)).find(
+    (entry) => !("error" in entry) && entry.record.pid === current!.workerPid,
+  );
+  if (!record || "error" in record) throw new Error("Qualified terminal record unavailable");
+  // The private producer requires its original record object, not parsed JSON.
+  const original = qualifiedTerminalRecords.get(current.workerPid);
+  if (!original) throw new Error("Qualified terminal launch proof unavailable");
+  qualifiedOwner.assertOwnedTerminalWorker(original);
+  qualifiedManagers.set(pool, { owner: qualifiedOwner, record: original });
 }
 
 const qualifiedTerminalRecords = new Map<number, object>();

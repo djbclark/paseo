@@ -1,3 +1,4 @@
+import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
 import {
   readTerminalWorkerRecord,
@@ -30,7 +31,11 @@ interface ObservationPort {
   off(event: "message", listener: (value: unknown) => void): void;
   postMessage(message: { type: string; challenge: string }): void;
 }
-function exchange(port: ObservationPort, challenge: string): Promise<OwnedObservation> {
+function exchange(
+  port: ObservationPort,
+  challenge: string,
+  acceptReply?: (reply: OwnedObservation) => void,
+): Promise<OwnedObservation> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
@@ -39,7 +44,12 @@ function exchange(port: ObservationPort, challenge: string): Promise<OwnedObserv
     const receive = (raw: unknown) => {
       if (!raw || typeof raw !== "object" || Reflect.get(raw, "challenge") !== challenge) return;
       cleanup();
-      resolve(raw as OwnedObservation);
+      try {
+        acceptReply?.(raw as OwnedObservation);
+        resolve(raw as OwnedObservation);
+      } catch (error) {
+        reject(error);
+      }
     };
     function cleanup() {
       clearTimeout(timer);
@@ -52,7 +62,7 @@ function exchange(port: ObservationPort, challenge: string): Promise<OwnedObserv
 function childPort(child: ChildProcess): ObservationPort {
   return {
     on: (event, listener) => {
-      child.on(event, listener);
+      child.prependListener(event, listener);
     },
     off: (event, listener) => {
       child.off(event, listener);
@@ -196,7 +206,11 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         [path.join(root, "plugin-child-entry.mjs")],
         { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe", "ipc"] },
       );
+      child.once("error", () => {
+        failed = true;
+      });
       const port = childPort(child);
+      const consumedReplies = new WeakSet<object>();
       const challenge = randomUUID();
       try {
         const observed = await exchange(port, challenge);
@@ -213,9 +227,13 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         if (child.exitCode !== null || child.signalCode !== null || !child.connected)
           return unsupported();
         handles.set(child, record);
+        const verifyReply = (reply: OwnedObservation): void => {
+          accept(reply, reply.challenge, "plugin-child", actual, record.incarnation);
+          consumedReplies.add(reply);
+        };
         observers.set(child, async () => {
           const nonce = randomUUID();
-          const result = await exchange(port, nonce);
+          const result = await exchange(port, nonce, verifyReply);
           const now = await observeLinuxProcess(child.pid!);
           if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
           accept(result, nonce, "plugin-child", now, record.incarnation);
@@ -226,13 +244,18 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         });
         return Object.freeze({
           child,
+          consumeObservation(raw: unknown): boolean {
+            if (!raw || typeof raw !== "object" || !consumedReplies.has(raw)) return false;
+            consumedReplies.delete(raw);
+            return true;
+          },
           closure: initial.closure,
           incarnation: record.incarnation,
           assertFresh: () => assertOwnedExecutionHandle(child, "plugin-child", record.incarnation),
           async challenge() {
             assertOwnedExecutionHandle(child, "plugin-child", record.incarnation);
             const nonce = randomUUID();
-            const result = await exchange(port, nonce);
+            const result = await exchange(port, nonce, verifyReply);
             const now = await observeLinuxProcess(child.pid!);
             if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
             accept(result, nonce, "plugin-child", now, record.incarnation);
@@ -355,19 +378,63 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         workerData: { qualificationPort: port2 },
         transferList: [port2],
       });
-      port1.on("message", (raw: unknown) => {
-        if (
-          raw &&
-          typeof raw === "object" &&
-          Reflect.get(raw, "type") === "qualified.execution.unknown"
-        )
-          failed = true;
+      const stopNonce = randomUUID();
+      let stopRequested = false;
+      let helperAck = false;
+      let workerExited = false;
+      let settlementUnknown = false;
+      let expectedIncarnation: string | undefined;
+      let closeControl: Promise<void> | null = null;
+      let resolveSettled!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        resolveSettled = resolve;
       });
+      function maybeSettle(): void {
+        if (helperAck && workerExited && !settlementUnknown) {
+          resolveSettled();
+          port1.close();
+        }
+      }
+      function markUnknown(): void {
+        failed = true;
+        settlementUnknown = true;
+      }
+      worker.once("error", markUnknown);
+      port1.on("messageerror", markUnknown);
+      worker.once("exit", (code) => {
+        workerExited = true;
+        if (code !== 0 || !stopRequested) markUnknown();
+        maybeSettle();
+      });
+      port1.once("close", () => {
+        if (!helperAck) markUnknown();
+      });
+      port1.on("message", (raw: unknown) => {
+        if (!raw || typeof raw !== "object") return;
+        const type = Reflect.get(raw, "type");
+        if (type === "qualified.execution.unknown") {
+          markUnknown();
+          return;
+        }
+        if (type !== "qualified.execution.stopped") return;
+        try {
+          if (!stopRequested || !expectedIncarnation) return unsupported();
+          const reply = raw as unknown as OwnedObservation;
+          accept(reply, stopNonce, "compiler", { pid: process.pid }, expectedIncarnation);
+          if (reply.threadId !== observedThreadId) return unsupported();
+          helperAck = true;
+          maybeSettle();
+        } catch {
+          markUnknown();
+        }
+      });
+      const observedThreadId = worker.threadId;
       const nonce = randomUUID();
       try {
         const observed = await exchange(port1, nonce);
         accept(observed, nonce, "compiler", { pid: process.pid });
         if (observed.threadId !== worker.threadId) return unsupported();
+        expectedIncarnation = observed.incarnation;
         const record: HandleRecord = {
           kind: "compiler",
           incarnation: observed.incarnation,
@@ -385,27 +452,36 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         });
         worker.once("exit", () => {
           record.alive = false;
-          port1.close();
           observers.delete(worker);
         });
         return Object.freeze({
           worker,
+          settled,
           closure: initial.closure,
           incarnation: record.incarnation,
           assertFresh: () => assertOwnedExecutionHandle(worker, "compiler", record.incarnation),
           close(): Promise<void> {
-            return new Promise((resolve, reject) => {
+            if (closeControl) return closeControl;
+            stopRequested = true;
+            closeControl = new Promise<void>((resolve, reject) => {
               const timer = setTimeout(() => {
                 failed = true;
                 reject(new Error("Compiler helper settlement unknown"));
               }, 10000);
-              worker.once("exit", () => {
+              void settled.then(() => {
                 clearTimeout(timer);
-                if (failed) reject(new Error("Compiler retirement uncertain"));
-                else resolve();
+                resolve();
+                return undefined;
               });
-              port1.postMessage({ type: "qualified.execution.stop" });
+              try {
+                port1.postMessage({ type: "qualified.execution.stop", challenge: stopNonce });
+              } catch (error) {
+                clearTimeout(timer);
+                markUnknown();
+                reject(error);
+              }
             });
+            return closeControl;
           },
         });
       } catch (error) {
@@ -416,6 +492,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       }
     },
   });
+  installQualifiedPluginHelperGuard();
   owners.add(owner);
   bindings.add(binding);
   executingOwner = owner;

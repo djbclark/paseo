@@ -10,7 +10,7 @@ import * as timersPromises from "node:timers/promises";
 import { createRequire } from "node:module";
 import { qualifiedBindings } from "./qualified-bindings.js";
 import recipe from "./builtin-bindings-recipe.json" with { type: "json" };
-const nodeRequire = createRequire(import.meta.url);
+const nodeRequire = createRequire(typeof __filename === "string" ? __filename : import.meta.url);
 const captured = {
   fetch: globalThis.fetch,
   setTimeout: globalThis.setTimeout,

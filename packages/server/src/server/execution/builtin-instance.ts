@@ -8,7 +8,12 @@ import type {
   PluginHelperAdmissionPermit,
 } from "@getpaseo/plugin/internal/activity";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { InternalPluginChild, readInternalPluginExecution } from "../plugins/internal-child.js";
+import type { InternalPluginChild } from "../plugins/internal-child.js";
+type InternalRuntime = typeof import("../plugins/internal-child.js");
+let internalRuntime: InternalRuntime | null = null;
+function readInternalPluginExecution(instance: unknown) {
+  return internalRuntime?.readInternalPluginExecution(instance);
+}
 import {
   isQualifiedDaemonOwner,
   readQualifiedBuiltinContext,
@@ -132,18 +137,23 @@ export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner
     authorityIdentity: context.authorityIdentity,
   });
   owner.assertFresh();
+  // Fixed literal import is sealed by the daemon build; v1/source roles never initialize it.
+  internalRuntime ??= await import("../plugins/internal-child.js");
+  owner.assertFresh();
   let record: InstanceRecord | undefined;
-  const child = new InternalPluginChild((source: string): PluginServerContribution => {
-    if (!record || source !== serverBundle) throw new Error("Builtin evaluation bytes mismatch");
-    actualRecord(child, owner, id);
-    const factory: unknown = (0, eval)(serverBundle);
-    if (typeof factory !== "function") throw new Error("Builtin factory unavailable");
-    const exports: unknown = factory(builtinRuntimeRequire, builtinGlobals);
-    const contribute =
-      exports && typeof exports === "object" ? Reflect.get(exports, "default") : undefined;
-    if (typeof contribute !== "function") throw new Error("Builtin contribution unavailable");
-    return contribute as PluginServerContribution;
-  });
+  const child = new internalRuntime.InternalPluginChild(
+    (source: string): PluginServerContribution => {
+      if (!record || source !== serverBundle) throw new Error("Builtin evaluation bytes mismatch");
+      actualRecord(child, owner, id);
+      const factory: unknown = (0, eval)(serverBundle);
+      if (typeof factory !== "function") throw new Error("Builtin factory unavailable");
+      const exports: unknown = factory(builtinRuntimeRequire, builtinGlobals);
+      const contribute =
+        exports && typeof exports === "object" ? Reflect.get(exports, "default") : undefined;
+      if (typeof contribute !== "function") throw new Error("Builtin contribution unavailable");
+      return contribute as PluginServerContribution;
+    },
+  );
   const execution = readInternalPluginExecution(child);
   if (!execution) throw new Error("Original builtin worker mapping unavailable");
   record = {

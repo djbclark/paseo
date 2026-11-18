@@ -1332,9 +1332,12 @@ print("lease-released", flush=True)
       }),
     );
     // Use the actual CI-built worker, not tsx (whose loader can prewarm esbuild).
-    const entry = new URL("../../../dist/server/plugins/compiler-worker.js", import.meta.url).href;
-    const driver = new URL("../../../dist/server/plugins/compiler-esbuild.js", import.meta.url)
+    const entry = new URL("../../../dist/server/server/plugins/compiler-worker.js", import.meta.url)
       .href;
+    const driver = new URL(
+      "../../../dist/server/server/plugins/compiler-esbuild.js",
+      import.meta.url,
+    ).href;
     let worker: Worker | undefined;
     try {
       await inbox.until(() => leaseOutput.includes("lease-ready"));

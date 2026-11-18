@@ -261,6 +261,7 @@ export function admitBuiltinHelper(request: BuiltinHelperRequest): PluginHelperA
       helper.observed = observeLinuxProcess(child.pid)
         .then((observation) => {
           helper.observation = observation;
+          return undefined;
         })
         .catch(() => {
           record.unprovenHelper = true;

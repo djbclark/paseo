@@ -175,7 +175,10 @@ export class ManagedPluginActivationPolicy {
     bundle?: string,
     ticket?: ActivationTicket,
   ): Promise<ActivationTicket | undefined> {
-    if (this.policyFile === undefined) return undefined;
+    if (this.policyFile === undefined) {
+      await this.assertUnconfiguredActivationAllowed(id);
+      return undefined;
+    }
     // Configured-but-unreadable/malformed policy holds EVERY activation, including unknown IDs.
     const rawPolicy = await readFile(this.policyFile, "utf8");
     const policyRevision = createHash("sha256").update(rawPolicy).digest("hex");
@@ -231,6 +234,17 @@ export class ManagedPluginActivationPolicy {
       throw new Error(
         "Managed native acquisition is unsupported; use qualified directory replacement",
       );
+  }
+
+  // Removing daemon policy cannot erase protected enrollment history.
+  private async assertUnconfiguredActivationAllowed(id: string): Promise<void> {
+    const existing = await lstat(this.stateFile(id)).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+      throw error;
+    });
+    const history = existing ? (await this.observeStatus(id)).state : undefined;
+    if (this.enrolled.has(id) || history?.enrolled || (history?.generation ?? 0) > 0)
+      throw new Error(`Managed plugin policy is not configured: ${id}`);
   }
 
   private async assertUnconfiguredNativeAcquisition(id: string | undefined): Promise<void> {

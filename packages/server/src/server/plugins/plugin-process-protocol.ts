@@ -62,6 +62,7 @@ export type PluginProcessRequest =
       bundle: string;
       appVersion: string;
       pluginDirectory: string;
+      managedSource?: boolean;
       hostInstanceId?: string;
       passiveInitialization?: {
         contract: "native-passive-contract-1";
@@ -229,6 +230,7 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
         bundle: z.string(),
         appVersion: z.string(),
         pluginDirectory: z.string(),
+        managedSource: z.boolean().optional(),
         hostInstanceId: z.string().min(1).optional(),
         passiveInitialization: z
           .object({

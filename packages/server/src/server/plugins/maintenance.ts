@@ -1,3 +1,7 @@
+import type {
+  HeldPluginOperationClaim,
+  HeldPluginOperationScope,
+} from "../maintenance-operation.js";
 export interface PluginMaintenanceIdentity {
   generation: number;
   transactionId: string;
@@ -12,6 +16,11 @@ export interface NativePluginAdmission {
   enterWork(): () => void;
   holdForUnknownWork(): void;
   runQualifiedInitialization<T>(operation: () => Promise<T>): Promise<T>;
+  runHeldOperation?<T>(
+    scope: HeldPluginOperationScope,
+    claim: HeldPluginOperationClaim,
+    operation: () => Promise<T>,
+  ): Promise<T>;
 }
 export function samePluginMaintenanceIdentity(
   left: PluginMaintenanceIdentity,

@@ -265,26 +265,41 @@ Use the beta path when you need to:
 ## Qualified execution hosts
 
 Qualified execution hosts are separate from update permission. The Linux plugin-host
-producer builds a sealed SDK/client/protocol/zod bundle and a builtin-only role wrapper.
-`packages/server/scripts/build-qualified-host.mjs` takes explicit CI build IDs;
-`finalize-qualified-host.mjs` inventories the copied Node runtime and mapped native
-libraries and writes the manifest beside the distribution, outside its hashed files.
-The controller must qualify that final artifact before adding its canonical retained
-root and manifest digest to the real account home's protected
-`.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` qualifications array.
-The finalizer does not write authority. The first hermetic Linux retained-root adapter requires runtime and manifest paths to have root-owned,
-non-group/world-writable ancestry; the running account must be unprivileged. This narrow
-Linux profile supports no external helpers and rejects unexpected dependencies.
+v1 fixture uses `packages/server/scripts/build-qualified-host.mjs` and
+`finalize-qualified-host.mjs`; its A/B proof covers its sealed SDK namespace and Node
+process only. It cannot qualify an enclosing daemon.
 
-Only the qualified role wrapper can produce the loaded namespace binding and private
-in-process capability. JSON observations, build IDs, an installed version or a new disk
-hash cannot create that capability. Preserve immutable retained roots for running
-processes; changing the visible install pointer cannot relabel a loaded host. Qualification
-revocation holds support without changing its original observed identity. Source/dev,
-macOS/Electron, supervisor/daemon/compiler roles and activity SDK revisions not present
-in the sealed bundle remain unsupported. A plugin-host receipt alone cannot authorize
-native maintenance or desktop activation. Root integrates the reviewed activity singleton,
-parent chain and private child IPC before lifting any existing hold.
+The finite enclosing-daemon v2 producer uses `build-qualified-daemon.mjs` and
+`finalize-qualified-daemon.mjs`. Its fixed builtin-only entries verify retained bytes
+before importing the actual daemon/bootstrap, plugin initializer, compiler Worker or
+terminal worker. The compiler's esbuild process and terminal native addons belong in
+the explicit closure. The resident terminal worker must be launched from the same
+retained tree; a copied or adopted worker cannot supply this proof. Existing worker
+records hold qualified startup before any adoption or reaping.
+
+Finalizers write a manifest beside the distribution, outside its hashed files. They
+do not write authority. The controller must qualify the final artifact before adding
+its canonical retained root, manifest/build identity and separate qualification recipe
+digest to the real account home's protected
+`.local/state/djbclark-ade/forks/paseo-qualified-host-policy.json` qualifications array.
+The first Linux adapter requires root-owned, non-group/world-writable ancestry and an
+unprivileged running account. This is a hermetic CI adapter, not a general installation
+permission. Source/dev and macOS/Electron launches remain unsupported.
+
+The v2 private owner binds actual namespace objects, process birth, owned handles and
+fresh challenges. `refresh()` performs asynchronous observations; synchronous assertions
+only consult that private state after the refresh. The stable runtime/helper/qualification
+closure triple is separate from the per-process evidence digest. JSON, markers, versions,
+independent role receipts and disk hashes cannot create the in-process capability.
+Preserve immutable retained roots for running processes; changing the visible install
+pointer cannot relabel a loaded host. Revocation holds support without relabeling it.
+
+A successful distribution build does not establish native maintenance support. The
+reviewed native and plugin consumers must share the producer's exact module instance,
+actual daemon owner, retained terminal manager and owned compiler/child handles. The
+controller's full-cohort A/B/A and authenticated evaluator proof remain required.
+Daemon restart/adoption, desktop activation and an external supervisor are separate
+unproven boundaries.
 
 ## Staged rollout (stable channel)
 

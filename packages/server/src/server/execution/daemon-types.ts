@@ -10,6 +10,7 @@ export interface QualifiedClosure {
 export interface DaemonManifest {
   schemaVersion: 2;
   profile: "enclosing-daemon-v2";
+  builtinPlugins: string[];
   distributionBuildId: string;
   files: FileIdentity[];
   runtime: FileIdentity;

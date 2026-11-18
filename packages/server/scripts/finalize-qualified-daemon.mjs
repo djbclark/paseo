@@ -13,6 +13,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
+import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 async function identity(file, name = file) {
   const stat = await lstat(file);
@@ -33,6 +34,8 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     throw new Error("Linux qualification recipe digest required");
   root = await realpath(root);
   const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));
+  if (JSON.stringify(inputs.builtinPlugins) !== JSON.stringify(builtinPlugins))
+    throw new Error("Finite builtin inventory mismatch");
   await mkdir(path.join(root, "runtime"), { recursive: true });
   const esbuild = path.join(root, "node_modules", `@esbuild/linux-${process.arch}/bin/esbuild`);
   for (const [source, target] of [
@@ -114,6 +117,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
   const manifest = {
     schemaVersion: 2,
     profile: "enclosing-daemon-v2",
+    builtinPlugins,
     distributionBuildId: inputs.distributionBuildId,
     files,
     runtime: files.find((file) => file.path === "runtime/node"),

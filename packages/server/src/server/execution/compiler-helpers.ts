@@ -13,6 +13,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   const originalSpawn = childProcess.spawn;
   const children = new Map<ChildProcess, Promise<void>>();
   const observations = new Set<Promise<void>>();
+  const identities = new Map<ChildProcess, Awaited<ReturnType<typeof observeLinuxProcess>>>();
   let failed = false;
   function hold(): void {
     failed = true;
@@ -44,6 +45,7 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
     const observed = observeLinuxProcess(child.pid!)
       .then((actual) => {
         if (actual.executable !== executable) return unsupported();
+        identities.set(child, actual);
       })
       .catch(hold)
       .finally(() => {
@@ -59,6 +61,18 @@ export async function installCompilerHelperOwner(root: string, unknown: () => vo
   return Object.freeze({
     async settled(): Promise<void> {
       await Promise.all(observations);
+      for (const [child, expected] of identities) {
+        if (child.exitCode !== null || child.signalCode !== null) continue;
+        const actual = await observeLinuxProcess(child.pid!);
+        if (
+          actual.birth !== expected.birth ||
+          actual.image !== expected.image ||
+          actual.executable !== executable
+        ) {
+          hold();
+          return unsupported();
+        }
+      }
       if (failed) return unsupported();
     },
     async stop(): Promise<void> {

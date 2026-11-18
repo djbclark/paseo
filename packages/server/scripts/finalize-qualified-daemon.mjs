@@ -25,7 +25,11 @@ async function identity(file, name = file) {
   };
 }
 export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256) {
-  if (process.platform !== "linux" || !/^[a-f0-9]{64}$/.test(qualificationSha256))
+  if (
+    process.platform !== "linux" ||
+    !["x64", "arm64"].includes(process.arch) ||
+    !/^[a-f0-9]{64}$/.test(qualificationSha256)
+  )
     throw new Error("Linux qualification recipe digest required");
   root = await realpath(root);
   const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));

@@ -1,4 +1,4 @@
-import { parseRecoveryOnly, type RecoveryOnlyRestriction } from "./maintenance-operation.js";
+import { parseRecoveryOnly, type RecoveryOnlyRestriction } from "./maintenance-recovery.js";
 import { constants, type Stats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { userInfo } from "node:os";
@@ -134,12 +134,15 @@ export function parseMaintenanceRecord(value: unknown): MaintenanceRecord {
         record.transactionId.length > 256)
   )
     throw new Error("Invalid maintenance record");
+  parseRecordRestriction(record);
+  return record as unknown as MaintenanceRecord;
+}
+function parseRecordRestriction(record: Record<string, unknown>): void {
   if (record.recoveryOnly !== undefined) {
     if (!record.tokenDigest || record.generation === 0)
       throw new Error("Recovery restriction requires held authority");
     record.recoveryOnly = parseRecoveryOnly(record.recoveryOnly);
   }
-  return record as unknown as MaintenanceRecord;
 }
 export function validateMaintenanceEnrollment(value: unknown): void {
   if (

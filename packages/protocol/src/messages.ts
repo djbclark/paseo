@@ -1540,6 +1540,7 @@ export const MaintenanceTransportAuthoritySchema = z.object({
   daemonIncarnation: z.string().nullable(),
   qualified: z.boolean(),
   features: z.object({
+    managedPluginCohortV2: z.boolean().optional(),
     maintenanceReservationV1: z.boolean(),
     maintenancePluginOperationV1: z.boolean(),
     maintenanceKnownFailedHeldV1: z.boolean().optional(),

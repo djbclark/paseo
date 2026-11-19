@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import { getSystemErrorName } from "node:util";
 import type { PluginBuiltinExecFileLaunch, PluginHelperOperation } from "./activity.js";
 
 type ExecOutput = string | Buffer;
@@ -38,6 +39,7 @@ export function collectBuiltinExecFile(
     if (complete) return;
     complete = true;
     if (timer) clearTimeout(timer);
+    if (!failure) failure = readInnerExecFailure(launch, operation);
     if (!failure && (code !== 0 || signal))
       failure = Object.assign(new Error(`Command failed: ${cmd}\n${output(stderr).toString()}`), {
         code,
@@ -83,4 +85,33 @@ export function builtinExecCallback(args: readonly unknown[]): ExecCallback | un
         Reflect.apply(last, undefined, [error, stdout, stderr]);
       }
     : undefined;
+}
+
+/** Read only after the real carrier closes; a numeric Git exit is otherwise untouched. */
+function readInnerExecFailure(
+  launch: PluginBuiltinExecFileLaunch,
+  operation: PluginHelperOperation,
+): Error | null {
+  try {
+    const failure = launch.readExecFailure?.();
+    if (!failure) return null;
+    if (
+      !Number.isSafeInteger(failure.errno) ||
+      failure.errno <= 0 ||
+      (failure.syscall !== "execveat" && failure.syscall !== "execvp")
+    )
+      throw new Error("Invalid private builtin exec failure");
+    const errno = -failure.errno;
+    const code = getSystemErrorName(errno);
+    const syscall = `spawn ${operation.command}`;
+    return Object.assign(new Error(`${syscall} ${code}`), {
+      errno,
+      code,
+      syscall,
+      path: operation.command,
+      spawnargs: [...operation.args],
+    });
+  } catch (error) {
+    return error instanceof Error ? error : new Error("Private builtin exec failure unavailable");
+  }
 }

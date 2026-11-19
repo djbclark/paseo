@@ -226,7 +226,7 @@ describe("plugin management commands", () => {
     features.pluginManagement = true;
     const command = createPluginCommand();
 
-    await command.parseAsync(["status"], { from: "user" });
+    await command.parseAsync(["status", "--host", daemonTarget.host], { from: "user" });
 
     expect(listPlugins).toHaveBeenCalledTimes(1);
     expect(connectToDaemon).toHaveBeenCalledExactlyOnceWith({

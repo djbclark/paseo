@@ -304,10 +304,14 @@ async function sourcePackages(names) {
     });
 }
 function actualExtensionBinding(value) {
-  const extension=value.modules.find((row)=>row.name==="_ctypes");
-  require(extension && path.dirname(extension.origin)===value.extensionDirectory && path.basename(extension.origin)==="_ctypes"+value.build.EXT_SUFFIX,"actual extension module binding");
-  require(value.nativeMapFiles.includes(extension.origin),"actual extension current maps binding");
-  require(value.build.DESTSHARED==="/usr/lib/python3.12/lib-dynload","original compiled DESTSHARED");
+  const extension = value.modules.find((row) => row.name === "_ctypes");
+  require(extension &&
+    path.dirname(extension.origin) === value.extensionDirectory &&
+    path.basename(extension.origin) ===
+      "_ctypes" + value.build.EXT_SUFFIX, "actual extension module binding");
+  require(value.nativeMapFiles.includes(extension.origin), "actual extension current maps binding");
+  require(value.build.DESTSHARED ===
+    "/usr/lib/python3.12/lib-dynload", "original compiled DESTSHARED");
 }
 function observation(value, retained) {
   exact(value, [
@@ -388,7 +392,14 @@ function observationLists(value, retained, text) {
     text(p);
     require(path.isAbsolute(p) || (retained && p.startsWith("python/")), "native map path");
   }
-  exact(value.build, ["SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY", "DESTSHARED"]);
+  exact(value.build, [
+    "SOABI",
+    "EXT_SUFFIX",
+    "CONFIG_ARGS",
+    "MULTIARCH",
+    "LDLIBRARY",
+    "DESTSHARED",
+  ]);
   for (const v of Object.values(value.build)) text(v);
   actualExtensionBinding(value);
 }
@@ -611,7 +622,8 @@ function recordObservations(record, files) {
   if (record.observed.relocated !== null) {
     observation(record.observed.relocated, true);
     const value = record.observed.relocated;
-    require(JSON.stringify(value.build)===JSON.stringify(record.observed.source.build),"source/retained compiled build equality");
+    require(JSON.stringify(value.build) ===
+      JSON.stringify(record.observed.source.build), "source/retained compiled build equality");
     require(JSON.stringify(value.version) === JSON.stringify(record.source.version) &&
       [value.prefix, value.execPrefix, value.basePrefix, value.baseExecPrefix].every(
         (p) => p === "python",

@@ -127,14 +127,37 @@ const materializationMutations = {
   },
 };
 const probeMutations = {
-  "old-record-version":(record)=>{record.schemaVersion=1;record.kind="retained-cpython-layout-v1";},
-  "old-observation-version":(record)=>{record.observed.relocated.schemaVersion=1;},
-  "compiled-destshared":(record)=>{record.observed.relocated.build.DESTSHARED="python/lib/python3.12/lib-dynload";},
-  "compiled-build-drift":(record)=>{record.observed.relocated.build.CONFIG_ARGS+=" changed";},
-  "missing-ctypes":(record)=>{record.observed.relocated.modules=record.observed.relocated.modules.filter((row)=>row.name!=="_ctypes");},
-  "outside-ctypes":(record)=>{record.observed.relocated.modules.find((row)=>row.name==="_ctypes").origin="/usr/lib/python3.12/lib-dynload/_ctypes.so";},
-  "missing-extension-map":(record)=>{const origin=record.observed.relocated.modules.find((row)=>row.name==="_ctypes").origin;record.observed.relocated.nativeMapFiles=record.observed.relocated.nativeMapFiles.filter((name)=>name!==origin);},
-  "extension-directory":(record)=>{record.observed.relocated.extensionDirectory=record.layout.stdlib;},
+  "old-record-version": (record) => {
+    record.schemaVersion = 1;
+    record.kind = "retained-cpython-layout-v1";
+  },
+  "old-observation-version": (record) => {
+    record.observed.relocated.schemaVersion = 1;
+  },
+  "compiled-destshared": (record) => {
+    record.observed.relocated.build.DESTSHARED = "python/lib/python3.12/lib-dynload";
+  },
+  "compiled-build-drift": (record) => {
+    record.observed.relocated.build.CONFIG_ARGS += " changed";
+  },
+  "missing-ctypes": (record) => {
+    record.observed.relocated.modules = record.observed.relocated.modules.filter(
+      (row) => row.name !== "_ctypes",
+    );
+  },
+  "outside-ctypes": (record) => {
+    record.observed.relocated.modules.find((row) => row.name === "_ctypes").origin =
+      "/usr/lib/python3.12/lib-dynload/_ctypes.so";
+  },
+  "missing-extension-map": (record) => {
+    const origin = record.observed.relocated.modules.find((row) => row.name === "_ctypes").origin;
+    record.observed.relocated.nativeMapFiles = record.observed.relocated.nativeMapFiles.filter(
+      (name) => name !== origin,
+    );
+  },
+  "extension-directory": (record) => {
+    record.observed.relocated.extensionDirectory = record.layout.stdlib;
+  },
 };
 test(
   "fixed source retention, relocation and strict preexec DATA refusals",
@@ -150,14 +173,14 @@ test(
     const recordFile = path.join(root, retained.record.path);
     const recordRaw = await readFile(recordFile);
     assert.equal(record.qualification, false);
-    assert.equal(record.schemaVersion,2);
-    assert.equal(record.kind,"retained-cpython-layout-v2");
-    assert.equal(record.observed.source.schemaVersion,2);
-    assert.equal(record.observed.relocated.schemaVersion,2);
-    assert.equal(record.observed.source.build.DESTSHARED,"/usr/lib/python3.12/lib-dynload");
-    assert.deepEqual(record.observed.source.build,record.observed.relocated.build);
-    const actualExtension=record.observed.relocated.modules.find((row)=>row.name==="_ctypes");
-    assert.equal(path.dirname(actualExtension.origin),record.layout.extensionDirectory);
+    assert.equal(record.schemaVersion, 2);
+    assert.equal(record.kind, "retained-cpython-layout-v2");
+    assert.equal(record.observed.source.schemaVersion, 2);
+    assert.equal(record.observed.relocated.schemaVersion, 2);
+    assert.equal(record.observed.source.build.DESTSHARED, "/usr/lib/python3.12/lib-dynload");
+    assert.deepEqual(record.observed.source.build, record.observed.relocated.build);
+    const actualExtension = record.observed.relocated.modules.find((row) => row.name === "_ctypes");
+    assert.equal(path.dirname(actualExtension.origin), record.layout.extensionDirectory);
     assert.ok(record.observed.relocated.nativeMapFiles.includes(actualExtension.origin));
     const materialized = record.sourceFiles.filter((row) => row.sourceMaterialization);
     assert.equal(materialized.length, 2);
@@ -347,27 +370,36 @@ test(
         if (kind === "budgets") mutated.budgets.tarLimit++;
         if (kind === "bytecode") mutated.files[0].path += ".pyc";
         const raw = Buffer.from(JSON.stringify(mutated) + "\n");
+        if (kind === "raw-hash") raw[raw.length - 1] = 0x20;
         try {
           await overwrite(recordFile, raw);
           const expectation =
             kind === "raw-hash"
               ? retained.record
               : { path: retained.record.path, mode: 0o444, size: raw.length, sha256: sha(raw) };
-          await assert.rejects(assertRetainedQualifiedPython(root, expectation));
+          await assert.rejects(assertRetainedQualifiedPython(root, expectation), kind === "raw-hash" ? /raw record identity/ : undefined);
         } finally {
           await overwrite(recordFile, recordRaw);
         }
       });
     }
-    for(const [kind,mutate] of Object.entries(probeMutations)) {
-      await t.test("v2 observation refuses "+kind,async()=>{
-        const changed=structuredClone(record);
+    for (const [kind, mutate] of Object.entries(probeMutations)) {
+      await t.test("v2 observation refuses " + kind, async () => {
+        const changed = structuredClone(record);
         mutate(changed);
-        const raw=Buffer.from(JSON.stringify(changed)+"\n");
+        const raw = Buffer.from(JSON.stringify(changed) + "\n");
         try {
-          await overwrite(recordFile,raw);
-          await assert.rejects(assertRetainedQualifiedPython(root,{...retained.record,size:raw.length,sha256:sha(raw)}));
-        } finally {await overwrite(recordFile,recordRaw);}
+          await overwrite(recordFile, raw);
+          await assert.rejects(
+            assertRetainedQualifiedPython(root, {
+              ...retained.record,
+              size: raw.length,
+              sha256: sha(raw),
+            }),
+          );
+        } finally {
+          await overwrite(recordFile, recordRaw);
+        }
       });
     }
     for (const [kind, mutate] of Object.entries(materializationMutations)) {

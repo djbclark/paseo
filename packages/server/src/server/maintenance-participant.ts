@@ -140,6 +140,7 @@ export function qualifiedMaintenanceParticipant(
           async beginHeldRecoveryV1(identity: HeldRecoveryIdentity) {
             await authority.refresh();
             const result = await participant.beginHeldRecoveryV1!(identity);
+            await authority.refresh();
             authority.assertQualified();
             if (result !== "held") return result;
             return participant.supportsHeldRecoveryV1?.(identity) === true
@@ -159,6 +160,7 @@ export function qualifiedMaintenanceParticipant(
     async begin(identity) {
       await authority.refresh();
       const result = await participant.begin(identity);
+      await authority.refresh();
       authority.assertQualified();
       return result;
     },
@@ -175,6 +177,7 @@ export function qualifiedMaintenanceParticipant(
       await authority.refresh();
       authority.assertQualified();
       await participant.end(identity);
+      await authority.refresh();
       authority.assertQualified();
     },
   };

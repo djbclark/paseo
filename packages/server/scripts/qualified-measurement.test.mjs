@@ -1,6 +1,98 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("directory compiler recipe data binds the full canonical body without granting admission", async () => {
+  const { parseDirectoryHelperRecipe } =
+    await import("../dist/server/server/execution/directory-recipe.js");
+  const { canonicalBuiltinJson } =
+    await import("../dist/server/server/execution/builtin-format.js");
+  const { createHash } = await import("node:crypto");
+  const body = {
+    version: 1,
+    contract: "ade-directory-helpers-v1",
+    initialization: "registration-only",
+    qualificationSha256: "1".repeat(64),
+    runtimeClosureSha256: "2".repeat(64),
+    helperClosureSha256: "3".repeat(64),
+    moduleTableSha256: "4".repeat(64),
+    compiler: {
+      version: 1,
+      contract: "ade-directory-entry-v1",
+      role: "claim",
+      entry: "index.directory.server.ts",
+      target: "server",
+      client: "none",
+    },
+  };
+  const profileFor = (recipe) => {
+    const { compiler, ...profile } = recipe;
+    assert.ok(compiler);
+    return {
+      ...profile,
+      recipeSha256: createHash("sha256").update(canonicalBuiltinJson(recipe)).digest("hex"),
+    };
+  };
+  const profile = profileFor(body);
+  const original = structuredClone(body);
+  const accepted = parseDirectoryHelperRecipe(body, profile, "ade-claim");
+  assert.deepEqual(accepted, body);
+  assert.notEqual(accepted, body);
+  assert.ok(Object.isFrozen(accepted));
+  assert.ok(Object.isFrozen(accepted.compiler));
+  body.compiler.entry = "index.server.ts";
+  assert.equal(accepted.compiler.entry, "index.directory.server.ts");
+  const positive = () =>
+    assert.deepEqual(parseDirectoryHelperRecipe(original, profile, "ade-claim"), original);
+  positive();
+  for (const compiler of [
+    { ...original.compiler, entry: "index.server.ts" },
+    { ...original.compiler, entry: "../index.directory.server.ts" },
+    { ...original.compiler, client: "default" },
+    { ...original.compiler, target: "client" },
+    { ...original.compiler, role: "other" },
+    { ...original.compiler, commands: [] },
+  ]) {
+    positive();
+    const changed = { ...original, compiler };
+    assert.equal(parseDirectoryHelperRecipe(changed, profileFor(changed), "ade-claim"), null);
+  }
+  for (const key of [
+    "qualificationSha256",
+    "runtimeClosureSha256",
+    "helperClosureSha256",
+    "moduleTableSha256",
+  ]) {
+    positive();
+    const changed = { ...original, [key]: "a".repeat(64) };
+    assert.equal(parseDirectoryHelperRecipe(changed, profile, "ade-claim"), null);
+    assert.equal(
+      parseDirectoryHelperRecipe(original, { ...profile, [key]: "a".repeat(64) }, "ade-claim"),
+      null,
+    );
+  }
+  positive();
+  for (const value of [
+    null,
+    {},
+    { ...original, helperPermission: true },
+    { ...original, recipeSha256: profile.recipeSha256 },
+    { ...original, compiler: undefined },
+  ])
+    assert.equal(parseDirectoryHelperRecipe(value, profile, "ade-claim"), null);
+  assert.equal(
+    parseDirectoryHelperRecipe(original, { ...profile, recipeSha256: "f".repeat(64) }, "ade-claim"),
+    null,
+  );
+  assert.equal(parseDirectoryHelperRecipe(original, profile, "ade-window-name"), null);
+  const window = { ...original, compiler: { ...original.compiler, role: "window" } };
+  assert.deepEqual(
+    parseDirectoryHelperRecipe(window, profileFor(window), "ade-window-name"),
+    window,
+  );
+  assert.equal(parseDirectoryHelperRecipe(window, profileFor(window), "ade-claim"), null);
+  positive();
+});
+
 test(
   "fresh verifier bounds actual reads and drains every admitted descriptor before failure",
   {

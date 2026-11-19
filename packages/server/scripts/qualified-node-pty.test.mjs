@@ -117,10 +117,7 @@ test("colon-containing selected root refuses before any tool or configure spawn"
   const before = await readdir(prepared.options.stagingRoot);
   await assert.rejects(buildQualifiedNodePtyCopy(colon, options(colon)), /PATH delimiter/);
   assert.deepEqual(await readdir(prepared.options.stagingRoot), before);
-  assert.equal(
-    hash(await readFile(path.join(colon, result.addon.path))),
-    NODE_PTY_INPUTS.original,
-  );
+  assert.equal(hash(await readFile(path.join(colon, result.addon.path))), NODE_PTY_INPUTS.original);
 });
 
 test("strict nested receipt rejects invented authority, inputs, and unknown coverage", () => {

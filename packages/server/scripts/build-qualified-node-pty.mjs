@@ -538,10 +538,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     commands,
     "node-binding",
     "/bin/sh",
-    [
-      "-c",
-      "exec node -p 'JSON.stringify({executable:process.execPath,version:process.version})'",
-    ],
+    ["-c", "exec node -p 'JSON.stringify({executable:process.execPath,version:process.version})'"],
     work,
     env,
   );

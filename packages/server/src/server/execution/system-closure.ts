@@ -393,6 +393,40 @@ async function lookupInputs(root: string, manifest: ClosureManifest): Promise<vo
   );
   if (!same(actual, layout.aliases)) return fail();
 }
+/** Byte/identity validation only; never an execution or namespace capability.
+ * The caller has already verified the declared retained search directory and
+ * its protected route. A generic files row cannot authorize a loader choice. */
+export async function assertRetainedSearchElf(
+  root: string,
+  manifest: ClosureManifest,
+  target: string,
+): Promise<void> {
+  const member = path.relative(root, target);
+  safePath(member, false);
+  const measured = manifest.systemClosure.loaderResolution.elf.find((row) => row.member === member);
+  const file = manifest.files.find((row) => row.path === member);
+  if (!measured || !file || path.join(root, member) !== target) return fail();
+  const actual = await sourceBytes(target, file);
+  const machine = process.arch === "x64" ? 62 : 183;
+  if (
+    !isTargetElf(actual.bytes, machine) ||
+    !same(measured, { member, ...describeElf(actual.bytes) })
+  )
+    return fail();
+  const current = await lstat(target, { bigint: true });
+  for (const key of [
+    "dev",
+    "ino",
+    "mode",
+    "uid",
+    "gid",
+    "nlink",
+    "size",
+    "mtimeNs",
+    "ctimeNs",
+  ] as const)
+    if (actual.stat[key] !== current[key]) return fail();
+}
 async function verifySearchDirectories(root: string, manifest: ClosureManifest): Promise<void> {
   const layout = manifest.systemClosure.loaderResolution;
   const needed = new Set(layout.elf.flatMap((row) => row.needed));
@@ -414,11 +448,10 @@ async function verifySearchDirectories(root: string, manifest: ClosureManifest):
     for (const name of needed) {
       try {
         const target = await realpath(path.join(directory, name));
-        if (
-          !manifest.externalLibraries.some((item) => item.path === target) &&
-          !manifest.files.some((item) => path.join(root, item.path) === target)
-        )
-          return fail();
+        if (!manifest.externalLibraries.some((item) => item.path === target)) {
+          if (row.kind !== "retained") return fail();
+          await assertRetainedSearchElf(root, manifest, target);
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }

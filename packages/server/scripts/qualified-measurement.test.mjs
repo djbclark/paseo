@@ -344,3 +344,90 @@ test("counterfeit continuation data and SDK roots never mint an owner continuati
   );
   assert.equal(isQualifiedDaemonOwner(token), false);
 });
+
+test(
+  "retained search selection requires measured ELF and stable actual bytes",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async () => {
+    const { assertRetainedSearchElf } =
+      await import("../dist/server/server/execution/system-closure.js");
+    const { describeElf } = await import("../dist/server/server/execution/elf-format.js");
+    const { spawnSync } = await import("node:child_process");
+    const { mkdtemp, readFile, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { createHash, randomUUID } = await import("node:crypto");
+    function admin(args) {
+      const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const temporary = await mkdtemp(path.join(tmpdir(), "retained-elf-input-"));
+    const root = `/paseo-retained-elf-source-${randomUUID()}`;
+    const member = "libfixture.so",
+      target = path.join(root, member);
+    const original = await readFile("/usr/bin/true");
+    const measured = { member, ...describeElf(original) };
+    const identity = (bytes) => ({
+      path: member,
+      mode: 292,
+      size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const manifest = (bytes, elf = [measured]) => ({
+      files: [identity(bytes)],
+      externalLibraries: [],
+      systemClosure: { loaderResolution: { elf } },
+    });
+    async function install(bytes) {
+      const source = path.join(temporary, "member");
+      await writeFile(source, bytes);
+      admin(["install", "-o", "root", "-g", "root", "-m", "0444", source, target]);
+    }
+    async function baseline() {
+      await install(original);
+      await assertRetainedSearchElf(root, manifest(original), target);
+    }
+    try {
+      admin(["install", "-d", "-o", "root", "-g", "root", "-m", "0555", root]);
+      await baseline();
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original, []), target),
+        "files membership alone must refuse",
+      );
+      await baseline();
+      const nonElf = Buffer.alloc(original.length, 0x61);
+      await install(nonElf);
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(nonElf), target),
+        "matching file hash with false ELF metadata must refuse",
+      );
+      await baseline();
+      const changed = Buffer.from(original);
+      changed[changed.length - 1] ^= 1;
+      await install(changed);
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original), target),
+        "changed actual ELF bytes must refuse",
+      );
+      await baseline();
+      const changedMetadata = {
+        ...measured,
+        needed: [...measured.needed, "undeclared-library.so"],
+      };
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original, [changedMetadata]), target),
+        "actual ELF metadata must equal its measured row",
+      );
+      await baseline();
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original), "/usr/bin/true"),
+        "outside-root measured names cannot authorize host files",
+      );
+    } finally {
+      admin(["rm", "-rf", root]);
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);

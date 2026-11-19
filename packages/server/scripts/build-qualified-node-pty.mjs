@@ -253,13 +253,17 @@ async function identity(file, label = file) {
   } catch (error) {
     primary = error;
   }
+  let closeFailure;
   try {
     await handle.close();
   } catch (error) {
-    if (primary)
-      throw new AggregateError([primary, error], "Input read and close failed", { cause: error });
-    throw error;
+    closeFailure = error;
   }
+  if (primary && closeFailure)
+    throw new AggregateError([primary, closeFailure], "Input read and close failed", {
+      cause: closeFailure,
+    });
+  if (closeFailure) throw closeFailure;
   if (primary) throw primary;
   return value;
 }

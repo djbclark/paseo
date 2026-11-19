@@ -14,6 +14,7 @@ import type {
 } from "./maintenance-operation.js";
 import {
   emptyMaintenanceParticipant,
+  isParticipantQualificationFailure,
   type PluginMaintenancePort,
   type MaintenanceIdentity,
   type QualifiedDaemonAccess,
@@ -707,6 +708,13 @@ export class MaintenanceReservation {
     }
   }
 
+  private recordEndFailure(error: unknown): void {
+    if (isParticipantQualificationFailure(error) && !this.record?.uncertain)
+      this.holdForUnknownWork();
+    this.failed = true;
+    this.recovery = true;
+  }
+
   async end(generation: number, ownerToken: string): Promise<MaintenanceStatus> {
     const record = this.record;
     const expected = record?.tokenDigest;
@@ -750,13 +758,10 @@ export class MaintenanceReservation {
       validate(true);
       this.recovery = false;
     } catch (error) {
-      if (!knownBusy) {
-        this.failed = true;
-        this.recovery = true;
-      }
+      if (!knownBusy) this.recordEndFailure(error);
       await this.storageTail;
-      // The stable idle rename remains authorized release on restart. No automatic
-      // rollback, bearer replay, participant END retry or second journal is introduced.
+      // Ordinary raw END failure retains the authorized idle-rename rule. Proof loss
+      // persists separate uncertainty; neither path rolls back or retries raw END.
       throw error;
     } finally {
       this.pending = false;

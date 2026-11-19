@@ -530,3 +530,100 @@ test(
     }
   },
 );
+
+test("selected directory import audit refuses native/lazy escapes before code evaluation", async () => {
+  const { auditSelectedDirectoryImports } =
+    await import("../dist/server/server/execution/directory-import-audit.js");
+  const wrap = (body) => `(function(require) { ${body} })`;
+  const baseline = wrap('require("node:fs"); require("@getpaseo/plugin/server/ade-helpers");');
+  const positive = () =>
+    assert.deepEqual(auditSelectedDirectoryImports(baseline, "window"), [
+      "@getpaseo/plugin/server/ade-helpers",
+      "node:fs",
+    ]);
+  positive();
+  for (const body of [
+    'if (false) import("node:fs");',
+    'if (!context.managedSource) import("@getpaseo/plugin/server/ade-helpers");',
+    'Promise.resolve().then(() => import("node:child_process"));',
+    'require("node:url");',
+    'require("fs");',
+    'require("node:fs/promises");',
+    'require("@getpaseo/plugin/internal/ade-directory");',
+    'require("node:child_process");',
+    'require("node:module");',
+    "require(name);",
+    "require(`node:fs`);",
+    'const loader = require; loader("node:fs");',
+    'require.resolve("node:fs");',
+    "typeof require;",
+    "const meta = import.meta;",
+  ]) {
+    positive();
+    assert.throws(() => auditSelectedDirectoryImports(wrap(body), "window"));
+  }
+  for (const source of [
+    'import fs from "node:fs";',
+    "const notFactory = 1;",
+    "(async function(require) {})",
+    "(function* (require) {})",
+    "(function(require, extra) {})",
+    wrap("const broken = ;"),
+    `${baseline}; process.exit(0);`,
+  ]) {
+    positive();
+    assert.throws(() => auditSelectedDirectoryImports(source, "window"));
+  }
+  assert.deepEqual(
+    auditSelectedDirectoryImports(wrap('require("node:crypto"); require("node:os");'), "claim"),
+    ["node:crypto", "node:os"],
+  );
+  assert.throws(() => auditSelectedDirectoryImports(wrap('require("node:crypto");'), "window"));
+  assert.throws(() => auditSelectedDirectoryImports(baseline, "candidate"));
+  // Audit is DATA-only: a throwing body is parsed, never evaluated or converted.
+  assert.deepEqual(
+    auditSelectedDirectoryImports(wrap('throw new Error("must not execute");'), "window"),
+    [],
+  );
+});
+
+test("actual server compiler emits closed literal requires and exposes residual native imports", async () => {
+  const { auditSelectedDirectoryImports } =
+    await import("../dist/server/server/execution/directory-import-audit.js");
+  const { compilePlugin } = await import("../dist/server/server/plugins/compiler-build.js");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const temporary = await mkdtemp(join(tmpdir(), "directory-import-audit-"));
+  const server = join(temporary, "server.ts");
+  try {
+    await writeFile(
+      server,
+      [
+        'export * as fs from "node:fs";',
+        'export {runAdeDirectoryOperation} from "@getpaseo/plugin/server/ade-helpers";',
+        "export default () => () => {};",
+      ].join("\n"),
+    );
+    const baseline = await compilePlugin({ client: null, server });
+    assert.equal(typeof baseline.serverBundle, "string");
+    assert.deepEqual(auditSelectedDirectoryImports(baseline.serverBundle, "window"), [
+      "@getpaseo/plugin/server/ade-helpers",
+      "node:fs",
+    ]);
+    await writeFile(
+      server,
+      [
+        "export default (context) => {",
+        'context.before("agent.open", async () => {',
+        'if (!context.managedSource) await import("node:fs");',
+        "}); return () => {}; };",
+      ].join("\n"),
+    );
+    const residual = await compilePlugin({ client: null, server });
+    assert.equal(typeof residual.serverBundle, "string");
+    assert.throws(() => auditSelectedDirectoryImports(residual.serverBundle, "window"), /Native/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

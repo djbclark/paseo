@@ -27,6 +27,37 @@ class Hold(Exception):
     """Bounded, non-secret refusal; underlying exceptions never reach stderr."""
 
 
+_ADMINISTRATIVE_SITES = (
+    ("namespace-unshare", "unshare"), ("namespace-private", "mount"),
+    ("bind-source", "mount"), ("bind-readonly", "mount"),
+    ("drop-ambient", "prctl"), ("drop-keepcaps", "prctl"),
+    ("drop-bounding", "prctl"), ("drop-no-new-privileges", "prctl"),
+    ("drop-capset", "capset"),
+)
+
+
+class _AdministrativeSyscallFailure(Hold):
+    def __init__(self, phase, error_number):
+        syscall = dict(_ADMINISTRATIVE_SITES).get(phase)
+        require(syscall is not None and integer(error_number, 0, 4095),
+                "administrative-syscall-failed")
+        super().__init__("administrative-syscall-failed")
+        self.phase, self.syscall, self.error_number = phase, syscall, error_number
+
+
+def _administrative_diagnostic(error):
+    # Exact private type and a closed pair: no exception text, call arguments,
+    # paths, capability indices or caller-controlled metadata become output.
+    if type(error) is not _AdministrativeSyscallFailure:
+        return None
+    phase = getattr(error, "phase", None)
+    syscall = getattr(error, "syscall", None)
+    number = getattr(error, "error_number", None)
+    if (phase, syscall) not in _ADMINISTRATIVE_SITES or not integer(number, 0, 4095):
+        return None
+    return {"phase": phase, "syscall": syscall, "errno": number}
+
+
 def require(condition, reason):
     if not condition:
         raise Hold(reason)
@@ -346,18 +377,20 @@ class Admin:
         require(0 <= self.cap_last <= 63, "unsupported-capability-layout")
         hashlib.sha256(b"preload").digest()
 
-    def call(self, function, *arguments):
+    def call(self, phase, function, *arguments):
+        require(phase in dict(_ADMINISTRATIVE_SITES), "administrative-syscall-failed")
         if function(*arguments) == -1:
-            raise Hold("administrative-syscall-failed")
+            error_number = ctypes.get_errno()  # Capture immediately, before any other administrative call.
+            raise _AdministrativeSyscallFailure(phase, error_number)
 
     def private_namespace(self):
         require(not self.private and not self.sealed, "namespace-order")
         before = namespace_identity()
-        self.call(self.libc.unshare, self.CLONE_NEWNS)
+        self.call("namespace-unshare", self.libc.unshare, self.CLONE_NEWNS)
         after = namespace_identity()
         require(before != after, "namespace-not-created")
         self.namespace = after
-        self.call(self.libc.mount, None, b"/", None, self.MS_REC | self.MS_PRIVATE, None)
+        self.call("namespace-private", self.libc.mount, None, b"/", None, self.MS_REC | self.MS_PRIVATE, None)
         verify_private_mounts()
         self.private = True
 
@@ -373,9 +406,9 @@ class Admin:
                           target.startswith(row["path"].rstrip("/") + "/")),
                          key=lambda row: len(row["path"]))
         require("noexec" not in containing["options"], "existing-noexec-target")
-        self.call(self.libc.mount, f"/proc/self/fd/{source.fd}".encode(), target.encode(),
+        self.call("bind-source", self.libc.mount, f"/proc/self/fd/{source.fd}".encode(), target.encode(),
                   None, self.MS_BIND, None)
-        self.call(self.libc.mount, None, target.encode(), None,
+        self.call("bind-readonly", self.libc.mount, None, target.encode(), None,
                   self.MS_BIND | self.MS_REMOUNT | self.MS_RDONLY | self.MS_NOSUID | self.MS_NODEV,
                   None)
         mounted = [row for row in verify_private_mounts() if row["path"] == target]
@@ -396,17 +429,17 @@ class Admin:
         require(self.sealed and namespace_identity() == self.namespace and
                 mount_rows() == self.mount_snapshot, "unsealed-or-changed-mounts")
         caller.check_alive()
-        self.call(self.libc.prctl, 47, 4, 0, 0, 0)  # PR_CAP_AMBIENT_CLEAR_ALL
-        self.call(self.libc.prctl, 8, 0, 0, 0, 0)   # PR_SET_KEEPCAPS=0
+        self.call("drop-ambient", self.libc.prctl, 47, 4, 0, 0, 0)  # PR_CAP_AMBIENT_CLEAR_ALL
+        self.call("drop-keepcaps", self.libc.prctl, 8, 0, 0, 0, 0)   # PR_SET_KEEPCAPS=0
         for capability in range(self.cap_last + 1):
-            self.call(self.libc.prctl, 24, capability, 0, 0, 0)  # PR_CAPBSET_DROP
-        self.call(self.libc.prctl, 38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
+            self.call("drop-bounding", self.libc.prctl, 24, capability, 0, 0, 0)  # PR_CAPBSET_DROP
+        self.call("drop-no-new-privileges", self.libc.prctl, 38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
         os.setgroups(list(caller.groups))
         os.setresgid(caller.gid, caller.gid, caller.gid)
         os.setresuid(caller.uid, caller.uid, caller.uid)
         header = (ctypes.c_uint32 * 2)(0x20080522, 0)
         empty_sets = (ctypes.c_uint32 * 6)()
-        self.call(self.libc.capset, ctypes.byref(header), ctypes.byref(empty_sets))
+        self.call("drop-capset", self.libc.capset, ctypes.byref(header), ctypes.byref(empty_sets))
         require(os.getresuid() == (caller.uid,) * 3 and os.getresgid() == (caller.gid,) * 3 and
                 tuple(sorted(os.getgroups())) == caller.groups, "privilege-drop-failed")
         values = dict(line.split(":", 1) for line in bounded_proc("/proc/self/status", 262144).splitlines()
@@ -1081,8 +1114,12 @@ def main(arguments=None):
         reason = str(error) if isinstance(error, Hold) else "administrative-failure"
         if not re.fullmatch(r"[a-z0-9-]{1,80}", reason):
             reason = "administrative-failure"
-        sys.stderr.write(json.dumps({"error": {"code": "QUALIFIED_NAMESPACE_HOLD",
-                         "message": "Namespace bootstrap refused", "reason": reason}}) + "\n")
+        refusal = {"code": "QUALIFIED_NAMESPACE_HOLD",
+                   "message": "Namespace bootstrap refused", "reason": reason}
+        diagnostic = _administrative_diagnostic(error)
+        if diagnostic is not None:
+            refusal["diagnostic"] = diagnostic
+        sys.stderr.write(json.dumps({"error": refusal}) + "\n")
         return 1
     finally:
         if distribution is not None:

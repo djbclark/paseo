@@ -431,3 +431,102 @@ test(
     }
   },
 );
+
+// Artifact metadata is build acceptance DATA, never an execution capability.
+test("build TAR and actual uploaded ZIP budgets preserve exact identity and limits", async () => {
+  const { assertQualifiedTarBudget, assertQualifiedBuildArtifact, BUILD_ARCHIVE_LIMITS } =
+    await import("./qualified-build-budget.mjs");
+  assert.deepEqual(assertQualifiedTarBudget(BUILD_ARCHIVE_LIMITS.tarBytes, "root/\n"), {
+    bytes: BUILD_ARCHIVE_LIMITS.tarBytes,
+    members: 1,
+  });
+  assert.equal(
+    assertQualifiedTarBudget(1024, "member\n".repeat(BUILD_ARCHIVE_LIMITS.members)).members,
+    BUILD_ARCHIVE_LIMITS.members,
+  );
+  for (const bytes of [0, -1, NaN, Infinity, 1.5, BUILD_ARCHIVE_LIMITS.tarBytes + 1])
+    assert.throws(() => assertQualifiedTarBudget(bytes, "root/\n"));
+  for (const listing of ["", "missing-newline", "\n", "root/\n\n", "m\n".repeat(10001)])
+    assert.throws(() => assertQualifiedTarBudget(1024, listing));
+  const expected = { artifactId: "10", runId: "20", attempt: "1", head: "a".repeat(40) };
+  const baseline = {
+    id: 10,
+    name: `qualified-daemon-build-${expected.head}-20-1`,
+    expired: false,
+    size_in_bytes: BUILD_ARCHIVE_LIMITS.zipBytes,
+    workflow_run: {
+      id: 20,
+      head_sha: expected.head,
+      repository_id: 1432178170,
+      head_repository_id: 1432178170,
+    },
+  };
+  const positive = () =>
+    assert.deepEqual(assertQualifiedBuildArtifact(baseline, expected), {
+      artifactId: "10",
+      zipBytes: BUILD_ARCHIVE_LIMITS.zipBytes,
+      qualification: false,
+    });
+  positive();
+  for (const mutation of [
+    { id: 11 },
+    { name: baseline.name.replace("-20-1", "-20-2") },
+    { expired: true },
+    { size_in_bytes: BUILD_ARCHIVE_LIMITS.zipBytes + 1 },
+    { size_in_bytes: 0 },
+    { size_in_bytes: "100" },
+    { size_in_bytes: 1.5 },
+    { workflow_run: { ...baseline.workflow_run, id: 21 } },
+    { workflow_run: { ...baseline.workflow_run, head_sha: "b".repeat(40) } },
+    { workflow_run: { ...baseline.workflow_run, repository_id: 1 } },
+    { workflow_run: { ...baseline.workflow_run, head_repository_id: 1 } },
+    { workflow_run: null },
+  ]) {
+    positive();
+    assert.throws(() => assertQualifiedBuildArtifact({ ...baseline, ...mutation }, expected));
+  }
+  for (const mutation of [
+    { artifactId: "../10" },
+    { runId: "0" },
+    { attempt: "2" },
+    { head: "short" },
+  ]) {
+    positive();
+    assert.throws(() => assertQualifiedBuildArtifact(baseline, { ...expected, ...mutation }));
+  }
+});
+
+test(
+  "actual GNU TAR listing counts directories and escapes member newlines",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async () => {
+    const { mkdtemp, mkdir, writeFile, stat, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { assertQualifiedTarBudget } = await import("./qualified-build-budget.mjs");
+    const execute = promisify(execFile);
+    const temporary = await mkdtemp(join(tmpdir(), "qualified-build-budget-"));
+    try {
+      const input = join(temporary, "input");
+      await mkdir(input);
+      await writeFile(join(input, "line\nname.txt"), "real-member");
+      const archive = join(temporary, "build.tar");
+      await execute("/usr/bin/tar", ["--format=posix", "-cf", archive, "-C", temporary, "input"], {
+        timeout: 10000,
+      });
+      const listed = await execute(
+        "/usr/bin/tar",
+        ["--list", "--quoting-style=escape", "--file", archive],
+        { timeout: 10000, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } },
+      );
+      assert.equal(assertQualifiedTarBudget((await stat(archive)).size, listed.stdout).members, 2);
+      assert.match(listed.stdout, /line\\nname/);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);

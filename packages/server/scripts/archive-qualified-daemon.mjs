@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { assertQualifiedTarBudget, BUILD_ARCHIVE_LIMITS } from "./qualified-build-budget.mjs";
 const execute = promisify(execFile);
 const repository = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const digest = (raw) => createHash("sha256").update(raw).digest("hex");
@@ -99,6 +100,7 @@ async function main() {
     "qualified-system-namespace.py",
     "finalize-qualified-daemon.mjs",
     "archive-qualified-daemon.mjs",
+    "qualified-build-budget.mjs",
   ])
     scripts[`packages/server/scripts/${name}`] = await identity(
       path.join(repository, "packages/server/scripts", name),
@@ -155,7 +157,17 @@ async function main() {
     ],
     { env: environment, timeout: 600000 },
   );
-  const archiveDigest = (await identity(archive, 4294967296n)).sha256;
+  const archived = await identity(archive, BigInt(BUILD_ARCHIVE_LIMITS.tarBytes));
+  const listing = await execute(
+    "/usr/bin/tar",
+    ["--list", "--quoting-style=escape", "--file", archive],
+    { env: { ...environment, LC_ALL: "C" }, timeout: 60000, maxBuffer: 16777216 },
+  );
+  assertQualifiedTarBudget(archived.bytes, listing.stdout);
+  const stable = await identity(archive, BigInt(BUILD_ARCHIVE_LIMITS.tarBytes));
+  if (stable.bytes !== archived.bytes || stable.sha256 !== archived.sha256)
+    throw new Error("Build TAR changed during member inspection");
+  const archiveDigest = stable.sha256;
   await writeFile(
     path.join(output, "SHA256SUMS"),
     `${archiveDigest}  qualified-daemon-build.tar\n`,

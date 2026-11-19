@@ -38,8 +38,8 @@ const result = await build({
   plugins: [qualifiedOptionalNativePlugin],
   logLevel: "warning",
 });
-for (const output of Object.values(result.metafile.outputs))
-  for (const imported of output.imports) {
+for (const emitted of Object.values(result.metafile.outputs))
+  for (const imported of emitted.imports) {
     if (
       imported.external &&
       !isBuiltin(imported.path) &&
@@ -62,8 +62,8 @@ for (const name of Object.keys(inputs.metafiles["daemon.mjs"].inputs)) {
 inputs.builtinDependencies = [
   ...new Set(
     Object.values(inputs.metafiles).flatMap((meta) =>
-      Object.values(meta.outputs).flatMap((output) =>
-        output.imports.filter((row) => isBuiltin(row.path)).map((row) => row.path),
+      Object.values(meta.outputs).flatMap((emitted) =>
+        emitted.imports.filter((row) => isBuiltin(row.path)).map((row) => row.path),
       ),
     ),
   ),

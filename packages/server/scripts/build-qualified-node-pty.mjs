@@ -439,7 +439,14 @@ async function makeReceipts(stage, commands) {
 }
 async function compilerWrapper(stage, runtime) {
   const wrapper = path.join(stage, "cxx.mjs");
-  const script = `#!${runtime}\nimport {spawnSync} from 'node:child_process';\nimport {writeFileSync} from 'node:fs';\nconst stage=${JSON.stringify(stage)};\nconst incoming=process.argv.slice(2);\nconst role=incoming.includes('-c')?'compile':'link';\nconst extra=role==='compile'?['-save-temps=obj','-dD','-MD','-MF',stage+'/pty.d','-v']:['-Wl,-Map,'+stage+'/pty.map','-Wl,--trace','-v'];\nconst argv=[...incoming,...extra];\nconst r=spawnSync('/usr/bin/g++',argv,{stdio:['ignore','pipe','pipe'],maxBuffer:8*1024*1024});\nwriteFileSync(stage+'/'+role+'.command.json',JSON.stringify({role,argv:['/usr/bin/g++',...argv],cwd:process.cwd(),exitCode:r.status,signal:r.signal}));\nif(r.stdout)process.stdout.write(r.stdout);\nif(r.stderr)process.stderr.write(r.stderr);\nif(r.error||r.signal||r.status!==0)process.exitCode=1;\n`;
+  const script = `#!${runtime}\nimport {spawnSync} from 'node:child_process';\nimport {writeFileSync} from 'node:fs';\nconst stage=${JSON.stringify(stage)};\nconst incoming=process.argv.slice(2);\nconst role=incoming.includes('-c')?'compile':'link';\nconst extra=role==='compile'?['-save-temps=obj','-dD','-MD','-MF',stage+'/pty.d','-v']:['-Wl,-Map,'+stage+'/pty.map','-Wl,--trace','-v'];\nconst base=[];
+for(let index=0;index<incoming.length;index++){
+  const flag=incoming[index];
+  if(role==='compile'&&(flag==='-MD'||flag==='-MMD'))continue;
+  if(role==='compile'&&flag==='-MF'){if(!incoming[index+1])throw new Error('Missing dependency output');index++;continue;}
+  base.push(flag);
+}
+const argv=[...base,...extra];\nconst r=spawnSync('/usr/bin/g++',argv,{stdio:['ignore','pipe','pipe'],maxBuffer:8*1024*1024});\nwriteFileSync(stage+'/'+role+'.command.json',JSON.stringify({role,argv:['/usr/bin/g++',...argv],cwd:process.cwd(),exitCode:r.status,signal:r.signal}));\nif(r.stdout)process.stdout.write(r.stdout);\nif(r.stderr)process.stderr.write(r.stderr);\nif(r.error||r.signal||r.status!==0)process.exitCode=1;\n`;
   await writeFile(wrapper, script, { mode: 0o755, flag: "wx" });
   return wrapper;
 }
@@ -572,12 +579,14 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     env,
   );
   const makefiles = await makeReceipts(stage, commands);
+  const compile = commands.find((command) => command.role === "compile");
+  if (compile.cwd !== path.join(work, "build")) refuse("unexpected compiler working directory");
   const depfile = (await readFile(path.join(stage, "pty.d"), "utf8")).replace(/\\\r?\n/g, " ");
   const headerNames = depfile
     .slice(depfile.indexOf(":") + 1)
     .trim()
     .split(/\s+/)
-    .map((name) => path.resolve(work, name));
+    .map((name) => path.resolve(compile.cwd, name));
   if (!headerNames.length || headerNames.some((name) => name.includes("\\")))
     refuse("dependency format");
   const headers = await dependencies(headerNames);

@@ -53,8 +53,11 @@ The strict version-one record includes selected source/header/GYP identities,
 measured tool identities and versions, actual wrapper/compiler argv, generated
 Make/configuration files, compiler `-MD` dependencies including system headers,
 linker map inputs, raw ELF reports, and actual output hashes. GCC save-temps
-output is retained when emitted by the actual compilation. The original
-prebuild is preserved as compressed data, never used as a success fallback.
+output is retained when emitted by the actual compilation. The wrapper replaces
+GYP's system-excluding `-MMD`/`-MF` dependency options with one `-MD` output;
+source and ABI flags stay intact. Relative depfile names resolve from the
+recorded compiler working directory, not the configure caller's directory.
+The original prebuild is preserved as compressed data, never used as a success fallback.
 
 Coverage is declared: measured tools and dependency/map inputs on the existing
 CI baseline. There is no generic syscall/file-open tracer, hermetic toolchain,

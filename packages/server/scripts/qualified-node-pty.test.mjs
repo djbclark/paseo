@@ -63,6 +63,13 @@ test("builds the selected source offline and reports the actual new artifact", a
   assert.equal(record.commands.filter((row) => row.role === "link").length, 1);
   const compile = record.commands.find((row) => row.role === "compile");
   assert.ok(compile.argv.includes("-MD"));
+  assert.equal(compile.argv.filter((flag) => flag === "-MD").length, 1);
+  assert.equal(compile.argv.includes("-MMD"), false);
+  const apiHeader = record.dependencies.headers.find((row) =>
+    row.path.endsWith("/node_modules/node-addon-api/napi-inl.h"),
+  );
+  assert.ok(apiHeader);
+  assert.ok(compile.cwd.endsWith("/node_modules/node-pty/build"));
   assert.ok(compile.argv.includes("-save-temps=obj"));
   assert.ok(compile.argv.includes("-DNAPI_CPP_EXCEPTIONS"));
   assert.ok(record.dependencies.headers.some((row) => row.path.endsWith("/napi.h")));

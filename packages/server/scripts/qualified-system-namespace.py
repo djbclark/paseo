@@ -398,25 +398,43 @@ class Admin:
         require(self.private and not self.sealed, "bind-before-private-or-after-seal")
         require(namespace_identity() == self.namespace, "mount-namespace-changed")
         source.check()
-        old = os.stat(target)
-        require(stat.S_ISREG(old.st_mode) and old.st_uid == 0 and
-                not old.st_mode & 0o022, "unsafe-existing-target")
-        rows = verify_private_mounts()
-        containing = max((row for row in rows if target == row["path"] or
-                          target.startswith(row["path"].rstrip("/") + "/")),
-                         key=lambda row: len(row["path"]))
-        require("noexec" not in containing["options"], "existing-noexec-target")
-        self.call("bind-source", self.libc.mount, f"/proc/self/fd/{source.fd}".encode(), target.encode(),
-                  None, self.MS_BIND, None)
-        self.call("bind-readonly", self.libc.mount, None, target.encode(), None,
-                  self.MS_BIND | self.MS_REMOUNT | self.MS_RDONLY | self.MS_NOSUID | self.MS_NODEV,
-                  None)
-        mounted = [row for row in verify_private_mounts() if row["path"] == target]
-        require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"], "readonly-bind-unproved")
-        actual = os.stat(target)
-        require((actual.st_dev, actual.st_ino) == source.before[:2] and
-                stat.S_IMODE(actual.st_mode) == stat.S_IMODE(source.before[2]), "bind-inode-mismatch")
-        source.check()
+        expected = {"mode": stat.S_IMODE(source.before[2]), "size": source.before[5],
+                    "sha256": hashlib.sha256(source.data).hexdigest()}
+        # Original FDs retain pre-unshare f_path mount objects, which Linux
+        # rejects as ordinary bind sources in the new namespace. Reopen ONLY
+        # the same retained object through its protected current-namespace path.
+        view = checked_file(source.path, len(source.data), expected)
+        try:
+            require(view.fd != source.fd and view.path == source.path and
+                    view.before == source.before and view.data == source.data and
+                    view.ancestors == source.ancestors, "bind-view-identity-mismatch")
+            source.check()
+            view.check()
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            old = os.stat(target)
+            require(stat.S_ISREG(old.st_mode) and old.st_uid == 0 and
+                    not old.st_mode & 0o022, "unsafe-existing-target")
+            rows = verify_private_mounts()
+            containing = max((row for row in rows if target == row["path"] or
+                              target.startswith(row["path"].rstrip("/") + "/")),
+                             key=lambda row: len(row["path"]))
+            require("noexec" not in containing["options"], "existing-noexec-target")
+            self.call("bind-source", self.libc.mount, f"/proc/self/fd/{view.fd}".encode(), target.encode(),
+                      None, self.MS_BIND, None)
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            self.call("bind-readonly", self.libc.mount, None, target.encode(), None,
+                      self.MS_BIND | self.MS_REMOUNT | self.MS_RDONLY | self.MS_NOSUID | self.MS_NODEV,
+                      None)
+            mounted = [row for row in verify_private_mounts() if row["path"] == target]
+            require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"], "readonly-bind-unproved")
+            actual = os.stat(target)
+            require((actual.st_dev, actual.st_ino) == source.before[:2] and
+                    stat.S_IMODE(actual.st_mode) == stat.S_IMODE(source.before[2]), "bind-inode-mismatch")
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            source.check()
+            view.check()
+        finally:
+            view.close()
 
     def seal(self):
         require(self.private and not self.sealed, "seal-order")

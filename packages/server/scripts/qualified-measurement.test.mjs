@@ -285,3 +285,58 @@ test("exact copied Sherpa recipe preserves code/relocation/init semantics and re
   assert.throws(() => assertSherpaAdaptationSemantics(before, auditSherpaElf(corruptReloc)));
   assert.throws(() => assertSherpaAdaptationSemantics(after, before));
 });
+
+test("finite Git startup projects only the declared original closed environment", async () => {
+  const { declaredFiniteGitEnvironment } =
+    await import("../dist/server/server/execution/finite-git-environment.js");
+  const { userInfo } = await import("node:os");
+  const base = {
+    PATH: "/usr/bin:/bin",
+    HOME: userInfo().homedir,
+    PASEO_MANAGED_PLUGIN_POLICY: "/protected/native-policy.json",
+  };
+  const home = "/protected/paseo-home";
+  const declared = {
+    ...base,
+    PASEO_HOME: home,
+    GIT_CONFIG_SYSTEM: "/protected/system",
+    GIT_CONFIG_GLOBAL: "/protected/global",
+    LC_ALL: "C",
+  };
+  const profile = {
+    recipe: {
+      environment: declared,
+      configRoots: { system: declared.GIT_CONFIG_SYSTEM, global: declared.GIT_CONFIG_GLOBAL },
+    },
+  };
+  assert.deepEqual(declaredFiniteGitEnvironment(profile, base, home), declared);
+  for (const changed of [
+    { ...declared, EXTRA: "ambient" },
+    { ...declared, GIT_CONFIG_SYSTEM: "/ambient/system" },
+    { ...declared, HOME: "/ambient/home" },
+    { ...declared, PASEO_HOME: "/other" },
+    { ...declared, LC_ALL: "unreviewed" },
+  ])
+    assert.throws(() =>
+      declaredFiniteGitEnvironment(
+        { recipe: { ...profile.recipe, environment: changed } },
+        base,
+        home,
+      ),
+    );
+});
+test("counterfeit continuation data and SDK roots never mint an owner continuation", async () => {
+  const {
+    captureQualifiedBuiltinContinuation,
+    readQualifiedBuiltinContinuation,
+    finishQualifiedBuiltinContinuation,
+    isQualifiedDaemonOwner,
+  } = await import("../dist/server/server/execution/daemon-owner.js");
+  const token = { settled: Promise.resolve() };
+  assert.throws(() => readQualifiedBuiltinContinuation(token));
+  await assert.rejects(() => finishQualifiedBuiltinContinuation(token));
+  assert.throws(() =>
+    captureQualifiedBuiltinContinuation({}, {}, { root: {}, activityOwner: {}, operation: {} }),
+  );
+  assert.equal(isQualifiedDaemonOwner(token), false);
+});

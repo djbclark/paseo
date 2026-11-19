@@ -1,4 +1,5 @@
-import { refreshBuiltinInstances } from "./builtin-instance.js";
+import { assertQualifiedDaemonStartupEnvironment } from "./finite-git-environment.js";
+import { refreshBuiltinInstances, captureBuiltinContinuationWitness } from "./builtin-instance.js";
 import { qualifiedManagedEnvironment } from "./managed-policy-environment.js";
 import { installQualifiedPluginHelperGuard } from "./plugin-helper-admission.js";
 import { mkdir, realpath } from "node:fs/promises";
@@ -27,6 +28,7 @@ import type {
   QualifiedDaemonObservation,
   DaemonManifest,
 } from "./daemon-types.js";
+import type { PluginHelperAdmissionRequest } from "@getpaseo/plugin/internal/activity";
 import type { QualifiedBuiltinProfile } from "./builtin-profile.js";
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
@@ -41,6 +43,50 @@ const builtinContexts = new WeakMap<
   }
 >();
 const observations = new WeakMap<object, () => QualifiedDaemonObservation>();
+export interface QualifiedBuiltinContinuation {
+  readonly settled: Promise<void>;
+}
+type ContinuationContext = {
+  manifest: DaemonManifest;
+  profiles: QualifiedBuiltinProfile[] | null;
+  authorityIdentity: string;
+  systemObservation: Awaited<ReturnType<typeof verifyEnclosingProcess>>["systemObservation"];
+};
+const continuationFactories = new WeakMap<
+  object,
+  (instance: object, request: PluginHelperAdmissionRequest) => QualifiedBuiltinContinuation
+>();
+const continuations = new WeakMap<
+  object,
+  { read(): ContinuationContext; invalidate(): void; finish(): Promise<void> }
+>();
+/** Producer-internal; neither this token nor its context is an owner/capability. */
+export function captureQualifiedBuiltinContinuation(
+  owner: QualifiedDaemonOwner,
+  instance: object,
+  request: PluginHelperAdmissionRequest,
+): QualifiedBuiltinContinuation {
+  const capture = continuationFactories.get(owner);
+  if (!capture) return unsupported();
+  return capture(instance, request);
+}
+export function readQualifiedBuiltinContinuation(
+  token: QualifiedBuiltinContinuation,
+): ContinuationContext {
+  const entry = continuations.get(token);
+  if (!entry) return unsupported();
+  return entry.read();
+}
+export function invalidateQualifiedBuiltinContinuation(token: QualifiedBuiltinContinuation): void {
+  continuations.get(token)?.invalidate();
+}
+export async function finishQualifiedBuiltinContinuation(
+  token: QualifiedBuiltinContinuation,
+): Promise<void> {
+  const entry = continuations.get(token);
+  if (!entry) return unsupported();
+  await entry.finish();
+}
 let instance: Promise<QualifiedDaemonOwner> | null = null;
 let executingOwner: QualifiedDaemonOwner | null = null;
 interface HandleRecord {
@@ -100,6 +146,8 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   const file = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
   const root = path.dirname(file);
   const initial = await verifyEnclosingProcess(root);
+  await assertQualifiedDaemonStartupEnvironment(root, initial);
+  await assertEnclosingAuthorityUnchanged(initial);
   let builtinProfiles = initial.builtinProfiles;
   let builtinAuthorityIdentity = initial.authorityIdentity;
   if (
@@ -116,6 +164,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   let fresh = true;
   let failed = false;
   let pending: Promise<void> | null = null;
+  let proofEpoch = 0;
   const evidence = {
     schemaVersion: 1,
     role: "daemon",
@@ -166,9 +215,11 @@ async function produce(): Promise<QualifiedDaemonOwner> {
     if (failed) return unsupported();
     if (pending) return pending;
     fresh = false;
+    proofEpoch += 1;
     pending = (async () => {
       try {
         const current = await verifyEnclosingProcess(root);
+        await assertQualifiedDaemonStartupEnvironment(root, current);
         if (
           JSON.stringify(current.systemObservation) !== JSON.stringify(initial.systemObservation) ||
           current.manifestSha256 !== initial.manifestSha256 ||
@@ -650,6 +701,59 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       profiles: builtinProfiles,
       authorityIdentity: builtinAuthorityIdentity,
     });
+  });
+  continuationFactories.set(owner, (originalInstance, request) => {
+    assertFresh();
+    if (!request.root) return unsupported();
+    const witness = captureBuiltinContinuationWitness(
+      originalInstance,
+      owner,
+      request.activityOwner,
+      request.root,
+    );
+    const context: ContinuationContext = structuredClone({
+      manifest: initial.manifest,
+      profiles: builtinProfiles,
+      authorityIdentity: builtinAuthorityIdentity,
+      systemObservation: initial.systemObservation,
+    });
+    let invalid = false;
+    let resolve!: () => void;
+    const settled = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const token = Object.freeze({ settled });
+    function assertAdmitted(): void {
+      if (invalid || failed) return unsupported();
+      for (const [key, namespace] of namespaces)
+        if (qualifiedBindings[key] !== namespace) return unsupported();
+      witness.assertOriginal();
+    }
+    continuations.set(token, {
+      read() {
+        assertAdmitted();
+        return structuredClone(context);
+      },
+      invalidate() {
+        invalid = true;
+      },
+      async finish() {
+        // The helper's observed promise is already published before this phase.
+        // Refresh never awaits settled, so this cannot await its own completion.
+        for (;;) {
+          assertAdmitted();
+          await refresh();
+          const epoch = proofEpoch;
+          await witness.refreshCurrent();
+          if (pending || proofEpoch !== epoch) continue;
+          assertFresh();
+          assertAdmitted();
+          resolve();
+          return;
+        }
+      },
+    });
+    return token;
   });
   owners.add(owner);
   bindings.add(binding);

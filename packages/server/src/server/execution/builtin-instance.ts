@@ -142,6 +142,40 @@ export function readQualifiedBuiltinHelperContext(instance: unknown, owner: unkn
     profile: enrolledProfile(record),
   };
 }
+/** Captured only at fresh admission; never a general pending-owner reader. */
+export function captureBuiltinContinuationWitness(
+  instance: object,
+  owner: QualifiedDaemonOwner,
+  activityOwner: PluginHelperAdmissionRequest["activityOwner"],
+  root: object,
+) {
+  const record = actualRecord(instance, owner);
+  if (!activityOwner || record.execution.activityOwner !== activityOwner)
+    throw new Error("Builtin continuation activity substitution");
+  activityOwner.assertLiveRoot(root);
+  const assertOriginal = () => {
+    if (instances.get(instance) !== record || record.closed || record.owner !== owner)
+      throw new Error("Builtin continuation instance unavailable");
+    const actual = readInternalPluginExecution(instance);
+    if (
+      !actual ||
+      actual.workerIdentity !== record.execution.workerIdentity ||
+      actual.activityOwner !== activityOwner
+    )
+      throw new Error("Builtin continuation worker substitution");
+    assertBuiltinBindings();
+    activityOwner.assertLiveRoot(root);
+    if (activityOwner.state() === "unknown") throw new Error("Builtin continuation uncertain");
+  };
+  return {
+    assertOriginal,
+    async refreshCurrent() {
+      assertOriginal();
+      await refreshPreparedQualifiedBuiltinGit(record.child, record.owner);
+      assertOriginal();
+    },
+  };
+}
 /** Only this fixed factory constructs and records the ORIGINAL internal worker. */
 export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner, id: string) {
   if (!isQualifiedDaemonOwner(owner) || !builtinPlugins.includes(id))
@@ -347,9 +381,12 @@ export async function refreshBuiltinInstances(owner: object): Promise<void> {
       if (helper.leaderClosed || !child.pid || !helper.observation) continue;
       const actual = await observeLinuxProcess(child.pid).catch(() => null);
       if (
-        !actual ||
-        actual.birth !== helper.observation.birth ||
-        actual.image !== helper.observation.image
+        !helper.leaderClosed &&
+        child.exitCode === null &&
+        child.signalCode === null &&
+        (!actual ||
+          actual.birth !== helper.observation.birth ||
+          actual.image !== helper.observation.image)
       )
         record.unprovenHelper = true;
     }

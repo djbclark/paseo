@@ -455,3 +455,21 @@ test(
     }
   },
 );
+
+test("original protected PATH Git is byte-equivalent and its private descriptor proof cannot be forged", async () => {
+  const { observeOriginalGitSelection, assertOriginalGitSelection, closeOriginalGitSelection } =
+    await import("../dist/server/server/execution/finite-git-selection.js");
+  const image = await readFile("/usr/bin/git");
+  const expected = {
+    path: "runtime/git",
+    mode: 0o555,
+    size: image.length,
+    sha256: createHash("sha256").update(image).digest("hex"),
+  };
+  const proof = await observeOriginalGitSelection(expected);
+  await assertOriginalGitSelection(proof);
+  await assert.rejects(() => assertOriginalGitSelection({ path: "/usr/bin/git" }));
+  await closeOriginalGitSelection(proof);
+  await assert.rejects(() => assertOriginalGitSelection(proof));
+  await assert.rejects(() => observeOriginalGitSelection({ ...expected, sha256: "0".repeat(64) }));
+});

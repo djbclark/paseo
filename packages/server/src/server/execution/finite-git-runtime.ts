@@ -1,3 +1,9 @@
+import {
+  observeOriginalGitSelection,
+  assertOriginalGitSelection,
+  closeOriginalGitSelection,
+  type OriginalGitSelection,
+} from "./finite-git-selection.js";
 import { Writable } from "node:stream";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
@@ -8,6 +14,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type {
   PluginHelperAdmissionRequest,
   PluginHelperAdmissionPermit,
+  PluginActivityOwner,
 } from "@getpaseo/plugin/internal/activity";
 import type { QualifiedDaemonOwner } from "./daemon-types.js";
 import type { FiniteGitProfile } from "./finite-git-profile.js";
@@ -17,7 +24,14 @@ import {
   assertFiniteGitConfigUnchanged,
   type FiniteGitConfigProof,
 } from "./finite-git-config.js";
-import { readQualifiedBuiltinContext, getQualifiedDaemonObservation } from "./daemon-owner.js";
+import {
+  readQualifiedBuiltinContext,
+  getQualifiedDaemonObservation,
+  captureQualifiedBuiltinContinuation,
+  readQualifiedBuiltinContinuation,
+  invalidateQualifiedBuiltinContinuation,
+  finishQualifiedBuiltinContinuation,
+} from "./daemon-owner.js";
 import { readQualifiedBuiltinHelperContext } from "./builtin-instance.js";
 import { assertEnclosingAuthorityUnchanged, observeLinuxProcess } from "./daemon-verifier.js";
 import { verifySystemMappings } from "./system-closure.js";
@@ -33,6 +47,8 @@ interface Prepared {
   git: FileHandle;
   gate: FileHandle;
   valid: boolean;
+  activityOwner: PluginActivityOwner;
+  originalGit: OriginalGitSelection;
 }
 const preparations = new WeakMap<object, Prepared>();
 const preparationAttempts = new WeakSet<object>();
@@ -116,8 +132,14 @@ export async function prepareQualifiedBuiltinGit(
   )
     return;
   let git: FileHandle | undefined, gate: FileHandle | undefined;
+  let originalGit: OriginalGitSelection | undefined;
   try {
     const config = await observeFiniteGitConfig(profile.recipe);
+    const expectedGit = readQualifiedBuiltinContext(owner).manifest.files.find(
+      (file) => file.path === profile.recipe.tools.git,
+    );
+    if (!expectedGit) return fail();
+    originalGit = await observeOriginalGitSelection(expectedGit);
     git = await tool(owner, profile.recipe.tools.git);
     gate = await tool(owner, profile.recipe.tools.gate);
     const observer = await tool(owner, profile.recipe.tools.observer);
@@ -138,8 +160,11 @@ export async function prepareQualifiedBuiltinGit(
       git,
       gate,
       valid: true,
+      activityOwner: context.activityOwner,
+      originalGit,
     });
   } catch {
+    if (originalGit) await closeOriginalGitSelection(originalGit);
     await git?.close();
     await gate?.close();
     // This is a configuration/eligibility failure, never permission to disable normal work.
@@ -163,6 +188,7 @@ export async function refreshPreparedQualifiedBuiltinGit(
   if (prepared.owner !== owner || !prepared.valid) return fail();
   try {
     await assertFiniteGitConfigUnchanged(prepared.config);
+    await assertOriginalGitSelection(prepared.originalGit);
     await assertEnclosingAuthorityUnchanged({
       root: owner.root,
       authorityIdentity: prepared.authorityIdentity,
@@ -171,7 +197,7 @@ export async function refreshPreparedQualifiedBuiltinGit(
   } catch (error) {
     prepared.valid = false;
     try {
-      readQualifiedBuiltinHelperContext(instance, owner).activityOwner.markUnknown();
+      prepared.activityOwner.markUnknown();
     } catch {
       /* Keep admitted work alive. */
     }
@@ -318,6 +344,12 @@ export function qualifiedBuiltinGitPermit(
     }
     return null;
   }
+  const continuation = captureQualifiedBuiltinContinuation(owner, instance, request);
+  function assertAdmittedCurrent(): void {
+    if (!prepared!.valid) return fail();
+    const context = readQualifiedBuiltinContinuation(continuation);
+    if (context.authorityIdentity !== prepared!.authorityIdentity) return fail();
+  }
   const nonce = randomBytes(32).toString("hex");
   let started = false,
     child: ChildProcess | undefined,
@@ -344,10 +376,8 @@ export function qualifiedBuiltinGitPermit(
       endControl();
     }, milliseconds);
   }
-  let resolveSettled!: () => void, resolveObserved!: (value: LinuxObservation | null) => void;
-  const settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
+  let resolveObserved!: (value: LinuxObservation | null) => void;
+  const settled = continuation.settled;
   const observed = new Promise<LinuxObservation | null>((resolve) => {
     resolveObserved = resolve;
   });
@@ -360,6 +390,7 @@ export function qualifiedBuiltinGitPermit(
   const unknown = () => {
     clearDeadline();
     prepared.valid = false;
+    invalidateQualifiedBuiltinContinuation(continuation);
     try {
       original.activityOwner.markUnknown();
     } catch {
@@ -424,16 +455,16 @@ export function qualifiedBuiltinGitPermit(
         ])
     )
       return fail();
-    const context = readQualifiedBuiltinContext(owner);
+    const context = readQualifiedBuiltinContinuation(continuation);
     const mapped = await verifySystemMappings(owner.root, context.manifest, pid);
-    const system = getQualifiedDaemonObservation(owner).systemObservation;
+    const system = context.systemObservation;
     if (
       mapped.namespaceIdentity !== system.namespaceIdentity ||
       mapped.mountinfoSha256 !== system.mountinfoSha256
     )
       return fail();
     await refreshPreparedQualifiedBuiltinGit(instance, owner);
-    assertCurrent(prepared!, request);
+    assertAdmittedCurrent();
     if (exited || !bound) return fail();
     observerIdentity = observation;
     launchControl();
@@ -458,10 +489,10 @@ export function qualifiedBuiltinGitPermit(
       exited
     )
       return fail();
-    const context = readQualifiedBuiltinContext(owner);
+    const context = readQualifiedBuiltinContinuation(continuation);
     const mapped = await verifySystemMappings(owner.root, context.manifest, pid);
     await verifySystemMappings(owner.root, context.manifest, child.pid);
-    const system = getQualifiedDaemonObservation(owner).systemObservation;
+    const system = context.systemObservation;
     if (
       mapped.namespaceIdentity !== system.namespaceIdentity ||
       mapped.mountinfoSha256 !== system.mountinfoSha256 ||
@@ -469,7 +500,7 @@ export function qualifiedBuiltinGitPermit(
     )
       return fail();
     await refreshPreparedQualifiedBuiltinGit(instance, owner);
-    assertCurrent(prepared!, request);
+    assertAdmittedCurrent();
     if (!bound || exited) return fail();
     observerIdentity = observer;
     gitIdentity = actual;
@@ -603,8 +634,8 @@ export function qualifiedBuiltinGitPermit(
       return;
     }
     await refreshPreparedQualifiedBuiltinGit(instance, owner);
-    assertCurrent(prepared!, request);
-    resolveSettled();
+    assertAdmittedCurrent();
+    await finishQualifiedBuiltinContinuation(continuation);
   }
   return {
     settled,
@@ -650,7 +681,7 @@ export function qualifiedBuiltinGitPermit(
           )
             return fail();
           if (requestFits(prepared!, snapshot) !== operation) return fail();
-          assertCurrent(prepared!, snapshot);
+          assertAdmittedCurrent();
         } catch {
           unknown();
           child = spawn(request.operation.command, args, {

@@ -290,6 +290,10 @@ export class ScheduleService {
   private readonly maintenance?: MaintenanceReservation;
   private readonly runningScheduleIds = new Set<string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
+  private lifecycleRevision = 0;
+  private stopPromise: Promise<void> | null = null;
+  private readonly pendingActivity = new Set<Promise<unknown>>();
 
   constructor(options: ScheduleServiceOptions) {
     this.logger = options.logger.child({ module: "schedule-service" });
@@ -306,25 +310,62 @@ export class ScheduleService {
   }
 
   async start(): Promise<void> {
-    await this.recoverInterruptedRuns();
-    await this.sweepOrphanedSchedules();
-    if (this.tickTimer) {
-      return;
-    }
-    const timer = setInterval(() => {
-      void this.tick().catch((error) => {
-        this.logger.error({ err: error }, "Failed to process schedule tick");
-      });
-    }, SCHEDULE_TICK_INTERVAL_MS);
-    (timer as unknown as { unref?: () => void }).unref?.();
-    this.tickTimer = timer;
+    const revision = ++this.lifecycleRevision;
+    if (this.stopPromise) await this.stopPromise;
+    if (revision !== this.lifecycleRevision) return;
+    this.stopPromise = null;
+    this.stopped = false;
+    await this.trackActivity(async () => {
+      await this.recoverInterruptedRuns();
+      await this.sweepOrphanedSchedules();
+      if (this.stopped || revision !== this.lifecycleRevision || this.tickTimer) return;
+      const timer = setInterval(() => {
+        void this.tick().catch((error) => {
+          this.logger.error({ err: error }, "Failed to process schedule tick");
+        });
+      }, SCHEDULE_TICK_INTERVAL_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+      this.tickTimer = timer;
+    });
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    this.stopped = true;
+    this.lifecycleRevision++;
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    this.stopPromise ??= this.drainActivity();
+    return this.stopPromise;
+  }
+
+  private trackActivity<T>(operation: () => Promise<T>): Promise<T> {
+    // Register before operation executes or reaches its first await.
+    const pending = Promise.resolve().then(operation);
+    this.pendingActivity.add(pending);
+    void pending.then(
+      () => this.pendingActivity.delete(pending),
+      () => this.pendingActivity.delete(pending),
+    );
+    return pending;
+  }
+
+  private async drainActivity(): Promise<void> {
+    const failures: unknown[] = [];
+    while (this.pendingActivity.size > 0) {
+      const results = await Promise.allSettled([...this.pendingActivity]);
+      for (const result of results) if (result.status === "rejected") failures.push(result.reason);
+    }
+    if (failures.length > 0) throw new AggregateError(failures, "Schedule activity did not drain cleanly");
+  }
+
+  private admitExecution<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.stopped) return Promise.reject(new Error("Schedule service is stopped"));
+    const admitted = () => this.trackActivity(operation);
+    // The original root includes pre-run store awaits. A stop cannot cancel its
+    // continuation or reopen admission for a different tick/manual request.
+    return this.maintenance ? this.maintenance.run(admitted) : admitted();
   }
 
   async create(input: CreateScheduleInput): Promise<StoredSchedule> {
@@ -560,7 +601,11 @@ export class ScheduleService {
     return completed;
   }
 
-  async runOnce(id: string): Promise<StoredSchedule> {
+  runOnce(id: string): Promise<StoredSchedule> {
+    return this.admitExecution(() => this.runOnceAdmitted(id));
+  }
+
+  private async runOnceAdmitted(id: string): Promise<StoredSchedule> {
     const schedule = await this.inspect(id);
     if (schedule.status === "completed") {
       throw new ScheduleStateConflictError(`Schedule ${id} is already completed`);
@@ -572,7 +617,12 @@ export class ScheduleService {
     return this.inspect(id);
   }
 
-  async tick(): Promise<void> {
+  tick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    return this.admitExecution(() => this.tickAdmitted());
+  }
+
+  private async tickAdmitted(): Promise<void> {
     const now = this.now();
     const schedules = await this.store.list();
     for (const schedule of schedules) {

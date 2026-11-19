@@ -319,6 +319,37 @@ function buildAgentRecord(params: {
   };
 }
 
+function scheduleDrainGate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
+async function createDrainSchedule(
+  home: string,
+  agentStorage: AgentStorage,
+  now: () => Date,
+  runner: NonNullable<ScheduleServiceOptions["runner"]>,
+) {
+  const service = createScheduleService({
+    paseoHome: home,
+    logger: createTestLogger(),
+    agentManager: new AgentManager({ logger: createTestLogger() }),
+    agentStorage,
+    providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+    now,
+    runner,
+  });
+  const schedule = await service.create({
+    prompt: "drain original scheduling activity",
+    cadence: { type: "every", everyMs: 60_000 },
+    target: { type: "new-agent", config: { provider: "claude", cwd: home } },
+  });
+  return { service, schedule };
+}
+
 describe("ScheduleService", () => {
   let tempDir: string;
   let agentStorage: AgentStorage;
@@ -337,6 +368,114 @@ describe("ScheduleService", () => {
     // ENOTEMPTY races when AgentManager flushes a snapshot mid-cleanup.
     await agentStorage.flush();
     await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test("stop drains an admitted manual request across store awaits and permits a later restart", async () => {
+    const inspected = scheduleDrainGate();
+    const allowInspect = scheduleDrainGate();
+    const running = scheduleDrainGate();
+    const allowRun = scheduleDrainGate();
+    const runner = vi.fn(async () => {
+      running.resolve();
+      await allowRun.promise;
+      return { agentId: null, output: "naturally finished" };
+    });
+    const { service, schedule } = await createDrainSchedule(tempDir, agentStorage, () => now, runner);
+    const originalInspect = service.inspect.bind(service);
+    const inspect = vi.spyOn(service, "inspect").mockImplementationOnce(async (id) => {
+      inspected.resolve();
+      await allowInspect.promise;
+      return originalInspect(id);
+    });
+    let drained = false;
+    const original = service.runOnce(schedule.id);
+    try {
+      await inspected.promise;
+      const stopping = service.stop().then(() => { drained = true; });
+      await expect(service.runOnce(schedule.id)).rejects.toThrow("stopped");
+      await service.tick();
+      expect(runner).not.toHaveBeenCalled();
+      expect(drained).toBe(false);
+      allowInspect.resolve();
+      await running.promise;
+      expect(drained).toBe(false);
+      allowRun.resolve();
+      await original;
+      await stopping;
+      expect(runner).toHaveBeenCalledTimes(1);
+      inspect.mockRestore();
+      await service.start();
+      await service.runOnce(schedule.id);
+      expect(runner).toHaveBeenCalledTimes(2);
+    } finally {
+      allowInspect.resolve();
+      allowRun.resolve();
+      inspect.mockRestore();
+      await original;
+      await service.stop();
+    }
+  });
+
+  test("stop owns a tick before its first store await and blocks a queued restart until it drains", async () => {
+    const listed = scheduleDrainGate();
+    const allowList = scheduleDrainGate();
+    const runner = vi.fn(async () => ({ agentId: null, output: "done" }));
+    const { service } = await createDrainSchedule(tempDir, agentStorage, () => now, runner);
+    now = new Date("2026-01-01T00:01:00.000Z");
+    const originalList = ScheduleStore.prototype.list;
+    const list = vi.spyOn(ScheduleStore.prototype, "list").mockImplementationOnce(async function (this: ScheduleStore) {
+      listed.resolve();
+      await allowList.promise;
+      return originalList.call(this);
+    });
+    let restarted = false;
+    const original = service.tick();
+    try {
+      await listed.promise;
+      const stopping = service.stop();
+      const restarting = service.start().then(() => { restarted = true; });
+      await service.tick();
+      expect(restarted).toBe(false);
+      expect(runner).not.toHaveBeenCalled();
+      allowList.resolve();
+      await original;
+      await stopping;
+      await restarting;
+      expect(restarted).toBe(true);
+      expect(runner).toHaveBeenCalledTimes(1);
+    } finally {
+      allowList.resolve();
+      list.mockRestore();
+      await original;
+      await service.stop();
+    }
+  });
+
+  test("stop reports an original store failure and cannot reopen failed drainage", async () => {
+    const listed = scheduleDrainGate();
+    const allowList = scheduleDrainGate();
+    const failure = new Error("original schedule store failed");
+    const { service } = await createDrainSchedule(tempDir, agentStorage, () => now,
+      async () => ({ agentId: null, output: "unused" }));
+    const list = vi.spyOn(ScheduleStore.prototype, "list").mockImplementationOnce(async () => {
+      listed.resolve();
+      await allowList.promise;
+      throw failure;
+    });
+    const original = service.tick();
+    const originalFailure = expect(original).rejects.toBe(failure);
+    try {
+      await listed.promise;
+      const stoppedFailure = expect(service.stop()).rejects.toThrow("did not drain cleanly");
+      allowList.resolve();
+      await originalFailure;
+      await stoppedFailure;
+      await expect(service.start()).rejects.toThrow("did not drain cleanly");
+    } finally {
+      allowList.resolve();
+      list.mockRestore();
+      await originalFailure;
+    }
   });
 
   test("manual and timed schedule execution share admission across runner and persistence", async () => {

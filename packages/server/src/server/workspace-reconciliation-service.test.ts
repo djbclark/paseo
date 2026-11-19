@@ -12,13 +12,15 @@ import {
 } from "./test-fixtures/reconciliation-registries.js";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
-import { afterAll, beforeAll, afterEach, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, afterEach, describe, expect, test, vi } from "vitest";
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
 } from "./workspace-registry.js";
 import {
   type ReconciliationChange,
+  type WorkspaceReconciliationServiceOptions,
+  type ReconciliationClock,
   WorkspaceReconciliationService,
 } from "./workspace-reconciliation-service.js";
 import { deriveProjectKey } from "./project-key.js";
@@ -165,6 +167,35 @@ function createTempGitRepo(prefix: string): string {
 
 const timestamp = "2025-01-01T00:00:00.000Z";
 
+function reconciliationDrainFixture(overrides: Partial<WorkspaceReconciliationServiceOptions> = {}) {
+  const registries = createTestRegistries();
+  const rootPath = "/source-reconciliation-drain";
+  registries.projects.set("p1", createPersistedProjectRecord({
+    projectId: "p1", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
+    kind: "non_git", displayName: "drain", createdAt: timestamp, updatedAt: timestamp,
+  }));
+  const service = new WorkspaceReconciliationService({
+    projectRegistry: registries.projectRegistry,
+    workspaceRegistry: registries.workspaceRegistry,
+    logger: createTestLogger(),
+    inspectDirectory: async () => "directory",
+    watchProjectRoot: () => ({ close: () => undefined }),
+    ...overrides,
+  });
+  return { ...registries, service, rootPath };
+}
+
+function reconciliationDrainClock() {
+  const intervals: Array<() => void | Promise<void>> = [];
+  const clock: ReconciliationClock = {
+    setInterval: (callback) => { intervals.push(callback); return {}; },
+    clearInterval: () => undefined,
+    setTimeout: () => ({}),
+    clearTimeout: () => undefined,
+  };
+  return { clock, fire: () => Promise.resolve(intervals[0]?.()) };
+}
+
 describe("WorkspaceReconciliationService", () => {
   const tempDirs: string[] = [];
 
@@ -173,6 +204,180 @@ describe("WorkspaceReconciliationService", () => {
       rmSync(dir, { recursive: true, force: true });
     }
     tempDirs.length = 0;
+  });
+
+  test("close waits for the actual timed-out inspection rather than its deadline result", async () => {
+    const inspected = deferred();
+    const release = deferred();
+    const fixture = reconciliationDrainFixture({
+      inspectionTimeoutMs: 1,
+      inspectDirectory: async () => {
+        inspected.resolve();
+        await release.promise;
+        return "directory";
+      },
+    });
+    let closed = false;
+    try {
+      await fixture.service.runOnce();
+      await inspected.promise;
+      const closing = fixture.service.close().then(() => { closed = true; });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      release.resolve();
+      await closing;
+      expect(closed).toBe(true);
+      await expect(fixture.service.runOnce()).rejects.toThrow("disposed");
+    } finally {
+      release.resolve();
+      await fixture.service.close();
+    }
+  });
+
+  test("close during watch setup drains the original registry await without installing a late watch", async () => {
+    const listed = deferred();
+    const release = deferred();
+    const watch = vi.fn(() => ({ close: () => undefined }));
+    const fixture = reconciliationDrainFixture({ watchProjectRoot: watch });
+    const originalList = fixture.projectRegistry.list.bind(fixture.projectRegistry);
+    const list = vi.spyOn(fixture.projectRegistry, "list").mockImplementationOnce(async () => {
+      listed.resolve();
+      await release.promise;
+      return originalList();
+    });
+    const starting = fixture.service.start();
+    try {
+      await listed.promise;
+      let closed = false;
+      const closing = fixture.service.close().then(() => { closed = true; });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      release.resolve();
+      await starting;
+      await closing;
+      expect(watch).not.toHaveBeenCalled();
+      await expect(fixture.service.start()).rejects.toThrow("disposed");
+    } finally {
+      release.resolve();
+      list.mockRestore();
+      await starting;
+      await fixture.service.close();
+    }
+  });
+
+  test("legacy dispose closes admission immediately while close awaits watcher completion", async () => {
+    const release = deferred();
+    const closeWatch = vi.fn(() => release.promise);
+    const fixture = reconciliationDrainFixture({ watchProjectRoot: () => ({ close: closeWatch }) });
+    try {
+      await fixture.service.start();
+      fixture.service.dispose();
+      expect(closeWatch).toHaveBeenCalledTimes(1);
+      let closed = false;
+      const closing = fixture.service.close().then(() => { closed = true; });
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      await expect(fixture.service.reconcileGitMetadata()).rejects.toThrow("disposed");
+      fixture.service.dispose();
+      release.resolve();
+      await closing;
+      expect(closeWatch).toHaveBeenCalledTimes(1);
+    } finally {
+      release.resolve();
+      await fixture.service.close();
+    }
+  });
+
+  test("async watcher close failure is observable and does not prevent other watchers closing", async () => {
+    const failure = new Error("actual watcher close failed");
+    const first = vi.fn(async () => { throw failure; });
+    const second = vi.fn(async () => undefined);
+    const watch = vi.fn().mockReturnValueOnce({ close: first }).mockReturnValueOnce({ close: second });
+    const fixture = reconciliationDrainFixture({ watchProjectRoot: watch });
+    const rootPath = fixture.rootPath + "-other";
+    fixture.projects.set("p2", createPersistedProjectRecord({
+      projectId: "p2", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
+      kind: "non_git", displayName: "other", createdAt: timestamp, updatedAt: timestamp,
+    }));
+    await fixture.service.start();
+    const closing = fixture.service.close();
+    await expect(closing).rejects.toMatchObject({ errors: expect.arrayContaining([failure]) });
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(fixture.service.close()).toBe(closing);
+  });
+
+  test("close drains an observed metadata read and a queued later rescan cannot reopen it", async () => {
+    const clock = reconciliationDrainClock();
+    const reading = deferred();
+    const release = deferred();
+    const getCheckout = vi.fn(async (cwd: string) => {
+      reading.resolve();
+      await release.promise;
+      return createCheckout(cwd);
+    });
+    const fixture = reconciliationDrainFixture({ clock: clock.clock, workspaceGitService: { getCheckout } });
+    await fixture.service.start();
+    const observing = clock.fire();
+    try {
+      await reading.promise;
+      let closed = false;
+      const closing = fixture.service.close().then(() => { closed = true; });
+      await clock.fire();
+      expect(closed).toBe(false);
+      expect(getCheckout).toHaveBeenCalledTimes(1);
+      release.resolve();
+      await observing;
+      await closing;
+      await clock.fire();
+      expect(getCheckout).toHaveBeenCalledTimes(1);
+    } finally {
+      release.resolve();
+      await observing;
+      await fixture.service.close();
+    }
+  });
+
+  test("a failed parallel read cannot release close while its original sibling still runs", async () => {
+    const otherReading = deferred();
+    const allowFailure = deferred();
+    const allowOther = deferred();
+    const failure = new Error("original metadata read failed");
+    const fixture = reconciliationDrainFixture({ workspaceGitService: {
+      getCheckout: async (cwd) => {
+        if (cwd.endsWith("-other")) {
+          otherReading.resolve();
+          await allowOther.promise;
+          return createCheckout(cwd);
+        }
+        await allowFailure.promise;
+        throw failure;
+      },
+    } });
+    const rootPath = fixture.rootPath + "-other";
+    fixture.projects.set("p2", createPersistedProjectRecord({
+      projectId: "p2", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
+      kind: "non_git", displayName: "other", createdAt: timestamp, updatedAt: timestamp,
+    }));
+    const running = fixture.service.runOnce();
+    const originalFailure = expect(running).rejects.toBe(failure);
+    try {
+      await otherReading.promise;
+      let closed = false;
+      const closing = fixture.service.close().finally(() => { closed = true; });
+      const closeFailure = expect(closing).rejects.toMatchObject({ errors: expect.arrayContaining([failure]) });
+      allowFailure.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      allowOther.resolve();
+      await originalFailure;
+      await closeFailure;
+    } finally {
+      allowFailure.resolve();
+      allowOther.resolve();
+      await originalFailure;
+    }
   });
 
   test("does not emit a duplicate archive when user archival commits before reconciliation's archive", async () => {

@@ -33,7 +33,7 @@ export type ProjectUpdate =
   | { kind: "remove"; projectId: string };
 
 interface ProjectRootWatcher {
-  close(): void;
+  close(): void | Promise<void>;
 }
 
 export interface ProjectRootWatch {
@@ -65,8 +65,27 @@ const systemClock: ReconciliationClock = {
 
 const watchProjectRoot: ProjectRootWatch = (rootPath, options, onChange, onError) => {
   const watcher = watchPath(rootPath, options, onChange);
-  watcher.on("error", onError);
-  return watcher;
+  let failure: unknown;
+  const closed = new Promise<void>((resolve) => {
+    watcher.once("close", resolve);
+  });
+  watcher.on("error", (error) => {
+    failure ??= error;
+    onError(error);
+  });
+  return {
+    close: async () => {
+      try {
+        watcher.close();
+      } catch (error) {
+        failure ??= error;
+      }
+      // An error is not a close event. Retain the resource until the actual
+      // watcher closes; callers may classify a deadline as UNKNOWN, never quiet.
+      await closed;
+      if (failure !== undefined) throw failure;
+    },
+  };
 };
 
 export type ReconciliationChange =
@@ -152,6 +171,10 @@ export class WorkspaceReconciliationService {
   private started = false;
   private reconciling = false;
   private reconcileQueuedMode: "metadata" | "full" | null = null;
+  private readonly pendingActivity = new Set<Promise<unknown>>();
+  private readonly watcherClosures = new Set<Promise<void>>();
+  private readonly closeFailures: unknown[] = [];
+  private closePromise: Promise<void> | null = null;
 
   constructor(options: WorkspaceReconciliationServiceOptions) {
     this.directoryInspection =
@@ -173,12 +196,17 @@ export class WorkspaceReconciliationService {
     this.debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   }
 
-  async start(): Promise<void> {
-    if (this.started) return;
+  start(): Promise<void> {
+    return this.trackActivity(() => this.startAdmitted());
+  }
+
+  private async startAdmitted(): Promise<void> {
+    if (this.disposed || this.started) return;
     this.started = true;
     this.unsubscribeRegistry =
-      this.projectRegistry.subscribeToMutations?.(async (mutation) => {
-        try {
+      this.projectRegistry.subscribeToMutations?.((mutation) => {
+        if (this.disposed) return Promise.resolve();
+        return this.trackActivity(async () => {
           // Project creation does not resolve until its root watch is installed,
           // closing the git-init race for newly added empty projects.
           await this.syncProjectRootWatches();
@@ -188,11 +216,12 @@ export class WorkspaceReconciliationService {
           } else {
             this.onProjectUpdate?.({ kind: "remove", projectId: mutation.projectId });
           }
-        } catch (error) {
+        }).catch((error) => {
           this.logger.warn({ err: error }, "Project reconciliation mutation handling failed");
-        }
+        });
       }) ?? null;
     await this.syncProjectRootWatches();
+    if (this.disposed) return;
     this.rescanTimer = this.clock.setInterval(
       () => this.reconcileObservedGitMetadata("full"),
       this.rescanIntervalMs,
@@ -201,21 +230,89 @@ export class WorkspaceReconciliationService {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.reconcileQueuedMode = null;
     this.wakeInspectionWaiters();
-    this.unsubscribeRegistry?.();
+    try {
+      this.unsubscribeRegistry?.();
+    } catch (error) {
+      this.closeFailures.push(error);
+    }
     this.unsubscribeRegistry = null;
-    if (this.rescanTimer) this.clock.clearInterval(this.rescanTimer);
-    if (this.debounceTimer) this.clock.clearTimeout(this.debounceTimer);
-    for (const { watcher } of this.watchers) watcher.close();
+    try {
+      if (this.rescanTimer) this.clock.clearInterval(this.rescanTimer);
+      if (this.debounceTimer) this.clock.clearTimeout(this.debounceTimer);
+    } catch (error) {
+      this.closeFailures.push(error);
+    }
+    this.rescanTimer = null;
+    this.debounceTimer = null;
+    for (const { watcher } of this.watchers) this.closeWatcher(watcher);
     this.watchers.length = 0;
   }
 
+  /** Unlike dispose(), waits for actual work and watcher closure, without a timeout shortcut. */
+  close(): Promise<void> {
+    this.dispose();
+    this.closePromise ??= this.drainDisposedActivity();
+    return this.closePromise;
+  }
+
+  private trackActivity<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error("Workspace reconciliation is disposed"));
+    const pending = Promise.resolve().then(operation);
+    this.pendingActivity.add(pending);
+    void pending.then(
+      () => this.pendingActivity.delete(pending),
+      () => this.pendingActivity.delete(pending),
+    );
+    return pending;
+  }
+
+  private closeWatcher(watcher: ProjectRootWatcher): void {
+    let complete!: () => void;
+    let failed!: (error: unknown) => void;
+    const closing = new Promise<void>((resolve, reject) => {
+      complete = resolve;
+      failed = reject;
+    });
+    this.watcherClosures.add(closing);
+    void closing.then(
+      () => this.watcherClosures.delete(closing),
+      (error) => {
+        this.watcherClosures.delete(closing);
+        this.closeFailures.push(error);
+        return undefined;
+      },
+    );
+    try {
+      void Promise.resolve(watcher.close()).then(complete, failed);
+    } catch (error) {
+      failed(error);
+    }
+  }
+
+  private async drainDisposedActivity(): Promise<void> {
+    const failures = new Set<unknown>();
+    while (this.pendingActivity.size || this.pendingInspections.size || this.watcherClosures.size) {
+      const pending = new Set([...this.pendingActivity, ...this.pendingInspections.values(), ...this.watcherClosures]);
+      const results = await Promise.allSettled([...pending]);
+      for (const result of results) if (result.status === "rejected") failures.add(result.reason);
+    }
+    for (const failure of this.closeFailures) failures.add(failure);
+    if (failures.size) throw new AggregateError([...failures], "Workspace reconciliation did not close cleanly");
+  }
+
   /** Reconciles mutable Git facts only; never archives missing records. */
-  async reconcileGitMetadata(): Promise<ReconciliationResult> {
+  reconcileGitMetadata(): Promise<ReconciliationResult> {
+    return this.trackActivity(() => this.reconcileGitMetadataAdmitted());
+  }
+
+  private async reconcileGitMetadataAdmitted(): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
-    const [projects, workspaces] = await Promise.all([
+    const [projects, workspaces] = await settleOperations([
       this.projectRegistry.list(),
       this.workspaceRegistry.listActive(),
     ]);
@@ -244,7 +341,11 @@ export class WorkspaceReconciliationService {
     return { changesApplied: changes, durationMs: Date.now() - start };
   }
 
-  async runOnce(): Promise<ReconciliationResult> {
+  runOnce(): Promise<ReconciliationResult> {
+    return this.trackActivity(() => this.runOnceAdmitted());
+  }
+
+  private async runOnceAdmitted(): Promise<ReconciliationResult> {
     const start = Date.now();
     const changes: ReconciliationChange[] = [];
 
@@ -366,11 +467,11 @@ export class WorkspaceReconciliationService {
       if (root) root.projects.push(project);
       else roots.push({ rootPath: project.rootPath, projects: [project] });
     }
-    await Promise.all(
+    await settleOperations(
       roots.map(async ({ rootPath, projects }) => {
         try {
           const rootGit = await readCheckout(rootPath);
-          await Promise.all(
+          await settleOperations(
             projects.map((project) =>
               this.reconcileProject({
                 project,
@@ -382,6 +483,7 @@ export class WorkspaceReconciliationService {
             ),
           );
         } catch (error) {
+          if (this.disposed) throw error;
           this.logger.warn(
             { err: error, rootPath },
             "Skipped workspace reconciliation after Git read failed",
@@ -393,7 +495,7 @@ export class WorkspaceReconciliationService {
 
   private async reconcileProject(input: ProjectReconciliationInput): Promise<void> {
     const { siblings, currentGit, readCheckout, changes } = input;
-    const workspaceCheckouts = await Promise.all(
+    const workspaceCheckouts = await settleOperations(
       siblings.map(async (workspace) => {
         const current = await this.workspaceRegistry.get(workspace.workspaceId);
         if (!current || current.cwd !== workspace.cwd || current.projectId !== workspace.projectId)
@@ -437,7 +539,7 @@ export class WorkspaceReconciliationService {
         });
     }
 
-    await Promise.all(
+    await settleOperations(
       workspaceCheckouts.map(async (entry) => {
         if (!entry) return;
         const { workspace, checkout: wsGit } = entry;
@@ -480,7 +582,7 @@ export class WorkspaceReconciliationService {
         areEquivalentPaths(project.rootPath, target.rootPath),
       );
       if (stillActive) continue;
-      target.watcher.close();
+      this.closeWatcher(target.watcher);
       this.watchers.splice(index, 1);
     }
 
@@ -500,7 +602,7 @@ export class WorkspaceReconciliationService {
             }
           },
           (error) => {
-            watcher.close();
+            this.closeWatcher(watcher);
             const index = this.watchers.findIndex((target) => target.watcher === watcher);
             if (index >= 0) this.watchers.splice(index, 1);
             this.logger.warn(
@@ -529,9 +631,12 @@ export class WorkspaceReconciliationService {
     }, this.debounceMs);
   }
 
-  private async reconcileObservedGitMetadata(
-    mode: "metadata" | "full" = "metadata",
-  ): Promise<void> {
+  private reconcileObservedGitMetadata(mode: "metadata" | "full" = "metadata"): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return this.trackActivity(() => this.reconcileObservedGitMetadataAdmitted(mode));
+  }
+
+  private async reconcileObservedGitMetadataAdmitted(mode: "metadata" | "full"): Promise<void> {
     if (this.disposed) return;
     if (this.reconciling) {
       if (mode === "full" || this.reconcileQueuedMode === null) {
@@ -542,6 +647,7 @@ export class WorkspaceReconciliationService {
     this.reconciling = true;
     try {
       await this.syncProjectRootWatches();
+      if (this.disposed) return;
       const result = mode === "full" ? await this.runOnce() : await this.reconcileGitMetadata();
       const workspaceIds = new Set<string>();
       const projectIds = new Set<string>();
@@ -561,9 +667,8 @@ export class WorkspaceReconciliationService {
         await this.onWorkspacesChanged?.(Array.from(workspaceIds));
       }
     } catch (error) {
-      if (!this.disposed) {
-        this.logger.warn({ err: error }, "Workspace reconciliation failed");
-      }
+      if (this.disposed) throw error;
+      this.logger.warn({ err: error }, "Workspace reconciliation failed");
     } finally {
       this.reconciling = false;
       if (this.reconcileQueuedMode) {
@@ -673,7 +778,7 @@ function isMissingPathError(error: unknown): boolean {
 async function mapBounded<T, R>(items: T[], visit: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = [];
   let next = 0;
-  await Promise.all(
+  await settleOperations(
     Array.from({ length: Math.min(INSPECTION_CONCURRENCY, items.length) }, async () => {
       let count = 0;
       while (next < items.length) {
@@ -684,4 +789,14 @@ async function mapBounded<T, R>(items: T[], visit: (item: T) => Promise<R>): Pro
     }),
   );
   return results;
+}
+
+async function settleOperations<T extends readonly unknown[] | []>(
+  operations: T,
+): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }> {
+  const outcomes = await Promise.allSettled(operations);
+  const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Workspace reconciliation work failed");
+  return Promise.all(operations);
 }

@@ -32,6 +32,7 @@ import type { QualifiedBuiltinProfile } from "./builtin-profile.js";
 import builtinPlugins from "./builtin-inventory.json" with { type: "json" };
 import {
   prepareQualifiedBuiltinGit,
+  refreshPreparedQualifiedBuiltinGit,
   assertPreparedQualifiedBuiltinGit,
   qualifiedBuiltinGitPermit,
 } from "./finite-git-runtime.js";
@@ -339,7 +340,8 @@ export async function refreshBuiltinInstances(owner: object): Promise<void> {
   const records = ownerInstances.get(owner);
   if (!records) return;
   assertBuiltinBindings();
-  for (const record of records)
+  for (const record of records) {
+    await refreshPreparedQualifiedBuiltinGit(record.child, record.owner);
     for (const [child, helper] of record.helpers) {
       await helper.observed;
       if (helper.leaderClosed || !child.pid || !helper.observation) continue;
@@ -351,4 +353,5 @@ export async function refreshBuiltinInstances(owner: object): Promise<void> {
       )
         record.unprovenHelper = true;
     }
+  }
 }

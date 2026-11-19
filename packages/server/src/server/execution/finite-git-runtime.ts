@@ -1,7 +1,7 @@
 import { Writable } from "node:stream";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { open, lstat, readFile, type FileHandle } from "node:fs/promises";
+import { open, lstat, readFile, readlink, type FileHandle } from "node:fs/promises";
 import { userInfo, constants as osConstants } from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -19,11 +19,7 @@ import {
 } from "./finite-git-config.js";
 import { readQualifiedBuiltinContext, getQualifiedDaemonObservation } from "./daemon-owner.js";
 import { readQualifiedBuiltinHelperContext } from "./builtin-instance.js";
-import {
-  assertEnclosingAuthorityUnchanged,
-  assertEnclosingAuthorityUnchangedSync,
-  observeLinuxProcess,
-} from "./daemon-verifier.js";
+import { assertEnclosingAuthorityUnchanged, observeLinuxProcess } from "./daemon-verifier.js";
 import { verifySystemMappings } from "./system-closure.js";
 import { canonicalBuiltinJson } from "./builtin-format.js";
 
@@ -132,7 +128,7 @@ export async function prepareQualifiedBuiltinGit(
       authorityIdentity: authority.authorityIdentity,
     });
     owner.assertFresh();
-    assertFiniteGitConfigUnchanged(config);
+    await assertFiniteGitConfigUnchanged(config);
     preparations.set(instance, {
       owner,
       instance,
@@ -149,26 +145,35 @@ export async function prepareQualifiedBuiltinGit(
     // This is a configuration/eligibility failure, never permission to disable normal work.
   }
 }
-/** Internal private-map assertion, not a public flag or a source of authority. */
+/** Memory-only contract assertion; owner.refresh provides actual async freshness. */
 export function assertPreparedQualifiedBuiltinGit(
   instance: object,
   owner: QualifiedDaemonOwner,
 ): void {
   const prepared = preparations.get(instance);
   if (!prepared || prepared.owner !== owner || !prepared.valid) return fail();
+  owner.assertFresh();
+}
+export async function refreshPreparedQualifiedBuiltinGit(
+  instance: object,
+  owner: QualifiedDaemonOwner,
+): Promise<void> {
+  const prepared = preparations.get(instance);
+  if (!prepared) return;
+  if (prepared.owner !== owner || !prepared.valid) return fail();
   try {
-    owner.assertFresh();
-    assertFiniteGitConfigUnchanged(prepared.config);
-    assertEnclosingAuthorityUnchangedSync({
+    await assertFiniteGitConfigUnchanged(prepared.config);
+    await assertEnclosingAuthorityUnchanged({
       root: owner.root,
       authorityIdentity: prepared.authorityIdentity,
     });
+    if (!prepared.valid) return fail();
   } catch (error) {
     prepared.valid = false;
     try {
       readQualifiedBuiltinHelperContext(instance, owner).activityOwner.markUnknown();
     } catch {
-      /* Keep original work alive. */
+      /* Keep admitted work alive. */
     }
     throw error;
   }
@@ -184,11 +189,6 @@ function assertCurrent(prepared: Prepared, request: PluginHelperAdmissionRequest
   )
     return fail();
   context.activityOwner.assertLiveRoot(request.root);
-  assertFiniteGitConfigUnchanged(prepared.config);
-  assertEnclosingAuthorityUnchangedSync({
-    root: prepared.owner.root,
-    authorityIdentity: prepared.authorityIdentity,
-  });
 }
 function requestFits(
   prepared: Prepared,
@@ -216,7 +216,14 @@ function requestFits(
   return null;
 }
 type WireMessage =
-  | { kind: "spawn" | "ready"; pid: number }
+  | { kind: "preflight" | "spawn" | "ready"; pid: number }
+  | { kind: "unobserved"; pid: number; phase: "preflight" | "postexec" }
+  | {
+      kind: "exec-error" | "launch-error";
+      pid: number;
+      syscall: "fork" | "execveat" | "execvp";
+      errno: number;
+    }
   | { kind: "leader"; pid: number; code: number; signal: number }
   | { kind: "complete"; pid: number; code: number; signal: number; observed: boolean };
 function terminalNumbers(fields: string[]): { code: number; signal: number } {
@@ -230,20 +237,37 @@ function terminalNumbers(fields: string[]): { code: number; signal: number } {
   if (code > 255 || signal > 64) return fail();
   return { code, signal };
 }
-function parseWireMessage(line: string, nonce: string, sequence: number): WireMessage {
+function parseWireMessage(line: string, nonce: string): WireMessage {
   const fields = line.split(" ");
   const kind = fields[0],
     pid = Number(fields[2]);
   if (
     fields[1] !== nonce ||
-    kind !== ["spawn", "ready", "leader", "complete"][sequence - 1] ||
+    line.length > 191 ||
     !/^[1-9][0-9]*$/.test(fields[2] ?? "") ||
     !Number.isSafeInteger(pid)
   )
     return fail();
-  if (kind === "spawn" || kind === "ready") {
+  if (kind === "preflight" || kind === "spawn" || kind === "ready") {
     if (fields.length !== 3) return fail();
     return { kind, pid };
+  }
+  if (kind === "unobserved") {
+    const phase = fields[3];
+    if (fields.length !== 4 || (phase !== "preflight" && phase !== "postexec")) return fail();
+    return { kind, pid, phase };
+  }
+  if (kind === "exec-error" || kind === "launch-error") {
+    const syscall = fields[3];
+    const errno = Number(fields[4]);
+    if (fields.length !== 5 || !/^[1-9][0-9]{0,3}$/.test(fields[4] ?? "") || errno > 4095)
+      return fail();
+    if (kind === "launch-error") {
+      if (syscall !== "fork") return fail();
+      return { kind, pid, syscall: "fork", errno };
+    }
+    if (syscall !== "execveat" && syscall !== "execvp") return fail();
+    return { kind, pid, syscall, errno };
   }
   const terminal = terminalNumbers(fields);
   if (kind === "leader") {
@@ -297,6 +321,21 @@ export function qualifiedBuiltinGitPermit(
     gitIdentity: LinuxObservation | null = null;
   let completion: { code: number; signal: number; observed: boolean } | undefined;
   let leader: { code: number; signal: number } | undefined;
+  let execFailure: Readonly<{ errno: number; syscall: "fork" | "execveat" | "execvp" }> | null =
+    null;
+  let phase = 0;
+  let observationDeadline: NodeJS.Timeout | undefined;
+  function clearDeadline(): void {
+    if (observationDeadline) clearTimeout(observationDeadline);
+    observationDeadline = undefined;
+  }
+  function armDeadline(milliseconds: number): void {
+    clearDeadline();
+    observationDeadline = setTimeout(() => {
+      unknown();
+      endControl();
+    }, milliseconds);
+  }
   let resolveSettled!: () => void, resolveObserved!: (value: LinuxObservation | null) => void;
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
@@ -304,10 +343,14 @@ export function qualifiedBuiltinGitPermit(
   const observed = new Promise<LinuxObservation | null>((resolve) => {
     resolveObserved = resolve;
   });
-  const environment = { ...prepared.profile.recipe.environment };
-  const args = [...request.operation.args];
-  const options = { cwd: prepared.profile.recipe.repository.cwd, env: environment };
+  let environment: Record<string, string> = {};
+  let args: string[] = [];
+  let options: { cwd: string; env: Record<string, string> } = {
+    cwd: prepared.profile.recipe.repository.cwd,
+    env: environment,
+  };
   const unknown = () => {
+    clearDeadline();
     prepared.valid = false;
     try {
       original.activityOwner.markUnknown();
@@ -324,6 +367,69 @@ export function qualifiedBuiltinGitPermit(
     } catch {
       unknown();
     }
+  }
+  function launchControl(): void {
+    const stream = child?.stdio[4];
+    if (!(stream instanceof Writable)) return fail();
+    stream.write(`launch ${nonce}\n`);
+  }
+  async function bounded(action: () => Promise<void>, milliseconds: number): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Finite Git observation deadline")), milliseconds);
+    });
+    try {
+      await Promise.race([action(), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  async function preflight(pid: number): Promise<void> {
+    const actualChild = child;
+    if (!actualChild?.pid || actualChild.pid !== pid || exited || !bound) return fail();
+    const observation = await observeLinuxProcess(pid);
+    if (observation.executable !== path.join(owner.root, prepared!.profile.recipe.tools.observer))
+      return fail();
+    const status = await readFile(`/proc/${pid}/stat`, "utf8");
+    if (Number(status.slice(status.lastIndexOf(")") + 2).split(" ")[1]) !== process.pid)
+      return fail();
+    const cwd = await readlink(`/proc/${pid}/cwd`);
+    const actualEnvironment = Object.fromEntries(
+      (await readFile(`/proc/${pid}/environ`, "utf8"))
+        .split("\0")
+        .filter(Boolean)
+        .map((entry) => {
+          const split = entry.indexOf("=");
+          return [entry.slice(0, split), entry.slice(split + 1)];
+        }),
+    );
+    const command = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0");
+    command.pop();
+    if (
+      cwd !== options.cwd ||
+      canonicalBuiltinJson(actualEnvironment) !== canonicalBuiltinJson(environment) ||
+      canonicalBuiltinJson(command) !==
+        canonicalBuiltinJson([
+          path.join(owner.root, prepared!.profile.recipe.tools.observer),
+          nonce,
+          operation,
+        ])
+    )
+      return fail();
+    const context = readQualifiedBuiltinContext(owner);
+    const mapped = await verifySystemMappings(owner.root, context.manifest, pid);
+    const system = getQualifiedDaemonObservation(owner).systemObservation;
+    if (
+      mapped.namespaceIdentity !== system.namespaceIdentity ||
+      mapped.mountinfoSha256 !== system.mountinfoSha256
+    )
+      return fail();
+    await refreshPreparedQualifiedBuiltinGit(instance, owner);
+    assertCurrent(prepared!, request);
+    if (exited || !bound) return fail();
+    observerIdentity = observation;
+    launchControl();
+    armDeadline(4000);
   }
   async function ready(pid: number): Promise<void> {
     if (!child?.pid || exited || gitPid !== pid || gitIdentity) return fail();
@@ -354,14 +460,12 @@ export function qualifiedBuiltinGitPermit(
       exited
     )
       return fail();
-    await assertEnclosingAuthorityUnchanged({
-      root: owner.root,
-      authorityIdentity: prepared!.authorityIdentity,
-    });
+    await refreshPreparedQualifiedBuiltinGit(instance, owner);
     assertCurrent(prepared!, request);
     if (!bound || exited) return fail();
     observerIdentity = observer;
     gitIdentity = actual;
+    clearDeadline();
     resolveObserved(observer);
     endControl(`resume ${nonce}\n`);
   }
@@ -370,15 +474,52 @@ export function qualifiedBuiltinGitPermit(
     bytes = 0,
     count = 0;
   function message(line: string): void {
-    const value = parseWireMessage(line, nonce, ++count);
+    if (++count > 8) return fail();
+    const value = parseWireMessage(line, nonce);
+    if (value.kind === "unobserved") {
+      if (value.pid !== child?.pid || phase < 1) return fail();
+      unknown();
+      endControl();
+      return;
+    }
+    if (value.kind === "launch-error" || value.kind === "exec-error") {
+      const expected = value.kind === "launch-error" ? child?.pid : gitPid;
+      if (
+        value.pid !== expected ||
+        execFailure ||
+        (value.kind === "launch-error" ? phase !== 1 : phase !== 2)
+      )
+        return fail();
+      execFailure = Object.freeze({ errno: value.errno, syscall: value.syscall });
+      unknown();
+      endControl();
+      return;
+    }
+    if (value.kind === "preflight") {
+      if (phase !== 0 || value.pid !== child?.pid) return fail();
+      phase = 1;
+      clearDeadline();
+      pipeline = pipeline
+        .then(() => bounded(() => preflight(value.pid), 4000))
+        .catch(() => {
+          unknown();
+          endControl();
+        });
+      return;
+    }
     if (value.kind === "spawn") {
+      if (phase !== 1 || gitPid) return fail();
+      phase = 2;
       gitPid = value.pid;
       return;
     }
     if (value.pid !== gitPid) return fail();
     if (value.kind === "ready") {
+      if (phase !== 2) return fail();
+      phase = 3;
+      clearDeadline();
       pipeline = pipeline
-        .then(() => ready(value.pid))
+        .then(() => bounded(() => ready(value.pid), 3000))
         .catch(() => {
           unknown();
           endControl();
@@ -386,16 +527,20 @@ export function qualifiedBuiltinGitPermit(
       return;
     }
     if (value.kind === "leader") {
+      if (phase !== 2 && phase !== 3) return fail();
+      phase = 4;
       leader = { code: value.code, signal: value.signal };
       return;
     }
     if (
       value.kind !== "complete" ||
+      phase !== 4 ||
       !leader ||
       leader.code !== value.code ||
       leader.signal !== value.signal
     )
       return fail();
+    phase = 5;
     completion = { code: value.code, signal: value.signal, observed: value.observed };
     if (!completion.observed) unknown();
   }
@@ -423,6 +568,7 @@ export function qualifiedBuiltinGitPermit(
   }
   async function close(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     closed = true;
+    clearDeadline();
     await pipeline;
     const actualSignal = signal ? osConstants.signals[signal] : 0;
     if (
@@ -438,10 +584,7 @@ export function qualifiedBuiltinGitPermit(
       unknown();
       return;
     }
-    await assertEnclosingAuthorityUnchanged({
-      root: owner.root,
-      authorityIdentity: prepared!.authorityIdentity,
-    });
+    await refreshPreparedQualifiedBuiltinGit(instance, owner);
     assertCurrent(prepared!, request);
     resolveSettled();
   }
@@ -459,14 +602,43 @@ export function qualifiedBuiltinGitPermit(
         closed,
       }),
     builtinExecFile: {
+      readExecFailure: () => (closed ? execFailure : null),
       start(): ChildProcess {
         if (started) return fail();
         started = true;
+        // Capture actual mutable inputs at synchronous start, before any await.
+        args = [...request.operation.args];
+        const originalOptions = { ...request.operation.options };
+        const rawEnvironment = { ...(originalOptions.env ?? process.env) };
+        environment = Object.fromEntries(
+          Object.entries(rawEnvironment).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        );
+        options = { cwd: prepared!.profile.recipe.repository.cwd, env: environment };
+        const snapshot = {
+          ...request,
+          operation: {
+            ...request.operation,
+            args,
+            options: { ...originalOptions, env: environment },
+          },
+        };
         try {
-          assertCurrent(prepared!, request);
+          if (
+            Object.entries(rawEnvironment).some(
+              (entry) => entry[1] !== undefined && typeof entry[1] !== "string",
+            )
+          )
+            return fail();
+          if (requestFits(prepared!, snapshot) !== operation) return fail();
+          assertCurrent(prepared!, snapshot);
         } catch {
           unknown();
-          child = spawn("git", args, options);
+          child = spawn(request.operation.command, args, {
+            ...originalOptions,
+            env: rawEnvironment,
+          });
           return child;
         }
         child = spawn(
@@ -477,6 +649,7 @@ export function qualifiedBuiltinGitPermit(
             stdio: ["pipe", "pipe", "pipe", "pipe", "pipe", prepared!.git.fd, prepared!.gate.fd],
           },
         );
+        armDeadline(4000);
         child.stdio[3]?.on("data", data);
         for (const stream of [child.stdio[3], child.stdio[4]]) stream?.on("error", unknown);
         child.once("error", unknown);

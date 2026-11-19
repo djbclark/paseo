@@ -519,6 +519,141 @@ class ExistingNamespaceReadOnlyTests(unittest.TestCase):
         f.cache_backing.close.assert_called_once_with()
 
 
+class AdministrativeDiagnosticTests(unittest.TestCase):
+    """Actual Admin control flow with syscall doubles; never privileged proof."""
+
+    SITES = (
+        ("namespace-unshare", "unshare", "private_namespace", 1),
+        ("namespace-private", "mount", "private_namespace", 1),
+        ("bind-source", "mount", "bind", 1),
+        ("bind-readonly", "mount", "bind", 2),
+        ("drop-ambient", "prctl", "drop", 1),
+        ("drop-keepcaps", "prctl", "drop", 2),
+        ("drop-bounding", "prctl", "drop", 3),
+        ("drop-no-new-privileges", "prctl", "drop", 4),
+        ("drop-capset", "capset", "drop", 1),
+    )
+
+    def fixture(self, method):
+        admin = ns.Admin.__new__(ns.Admin)
+        admin.libc = types.SimpleNamespace(**{name: mock.Mock(return_value=0)
+            for name in ("unshare", "mount", "prctl", "capset")})
+        admin.private, admin.sealed = method != "private_namespace", method == "drop"
+        admin.namespace, admin.cap_last = (1, 10), 0
+        rows = [{"path": "/", "options": {"rw"}}]
+        admin.mount_snapshot = rows
+        target = "/not-for-logs/private-target.so"
+        original = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
+        bound = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_dev=11, st_ino=22)
+        source = types.SimpleNamespace(fd=7, before=(11, 22, bound.st_mode), check=mock.Mock())
+        caller = types.SimpleNamespace(uid=1001, gid=1002, groups=(1002,), check_alive=mock.Mock())
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(ns, "namespace_identity",
+            side_effect=[(1, 9), (1, 10)] if method == "private_namespace" else None,
+            return_value=(1, 10)))
+        stack.enter_context(mock.patch.object(ns, "verify_private_mounts",
+            side_effect=[rows, [{"path": target, "options": {"ro", "nosuid", "nodev"}}]]
+            if method == "bind" else None, return_value=rows))
+        stack.enter_context(mock.patch.object(ns.os, "stat", side_effect=[original, bound]))
+        stack.enter_context(mock.patch.object(ns, "mount_rows", return_value=rows))
+        for name in ("setgroups", "setresgid", "setresuid"):
+            stack.enter_context(mock.patch.object(ns.os, name))
+        stack.enter_context(mock.patch.object(ns.os, "getresuid", return_value=(caller.uid,) * 3))
+        stack.enter_context(mock.patch.object(ns.os, "getresgid", return_value=(caller.gid,) * 3))
+        stack.enter_context(mock.patch.object(ns.os, "getgroups", return_value=list(caller.groups)))
+        stack.enter_context(mock.patch.object(ns, "bounded_proc", return_value=
+            "CapInh: 0\nCapPrm: 0\nCapEff: 0\nCapBnd: 0\nCapAmb: 0\nNoNewPrivs: 1\n"))
+        stack.enter_context(mock.patch.object(ns, "process_record",
+            return_value=(123, 1, 1, (caller.uid,) * 4, (caller.gid,) * 4)))
+        arguments = (source, target) if method == "bind" else (caller,) if method == "drop" else ()
+        return admin, arguments
+
+    def emit(self, error):
+        arguments = ["--distribution", "/not-for-logs/root", "--expected-manifest", "/private/manifest",
+            "--expected-manifest-sha256", "a" * 64, "--launch-recipe", "/secret/recipe", "--caller-pid", "42"]
+        with mock.patch.object(ns.sys, "flags", types.SimpleNamespace(isolated=1)), \
+                mock.patch.object(ns.sys, "executable", "/usr/bin/python3"), \
+                mock.patch.object(ns, "Admin", side_effect=error), \
+                mock.patch.object(ns.sys, "stderr", new_callable=io.StringIO) as output:
+            self.assertEqual(ns.main(arguments), 1)
+        raw = output.getvalue()
+        for secret in ("not-for-logs", "/private/manifest", "/secret/recipe", "Traceback", "arguments"):
+            self.assertNotIn(secret, raw)
+        self.assertLess(len(raw.encode()), 320)
+        return ns.json.loads(raw)["error"]
+
+    def test_each_actual_call_site_captures_errno_and_emits_only_its_closed_pair(self):
+        self.assertEqual(tuple((phase, syscall) for phase, syscall, _method, _index in self.SITES),
+                         ns._ADMINISTRATIVE_SITES)
+        for phase, syscall, method, index in self.SITES:
+            with self.subTest(phase=phase):
+                admin, arguments = self.fixture(method)
+                function = getattr(admin.libc, syscall)
+                function.side_effect = [0] * (index - 1) + [-1]
+                with mock.patch.object(ns.ctypes, "get_errno", return_value=13) as read_errno:
+                    with self.assertRaises(ns._AdministrativeSyscallFailure) as caught:
+                        getattr(admin, method)(*arguments)
+                    read_errno.assert_called_once_with()
+                self.assertEqual(function.call_count, index)
+                # Later errno changes cannot rewrite the saved actual failure.
+                with mock.patch.object(ns.ctypes, "get_errno", return_value=99):
+                    result = self.emit(caught.exception)
+                self.assertEqual(result, {"code": "QUALIFIED_NAMESPACE_HOLD",
+                    "message": "Namespace bootstrap refused", "reason": "administrative-syscall-failed",
+                    "diagnostic": {"phase": phase, "syscall": syscall, "errno": 13}})
+
+    def test_each_call_site_success_preserves_original_flow_and_never_reads_errno(self):
+        for phase, _syscall, method, _index in self.SITES:
+            with self.subTest(phase=phase):
+                admin, arguments = self.fixture(method)
+                with mock.patch.object(ns.ctypes, "get_errno") as read_errno:
+                    self.assertIsNone(getattr(admin, method)(*arguments))
+                    read_errno.assert_not_called()
+
+    def test_invalid_errno_or_phase_never_produces_diagnostics_or_calls_an_unknown_site(self):
+        for value in (-1, 4096, True, "13", None):
+            with self.subTest(value=value), self.assertRaises(ns.Hold) as caught:
+                ns._AdministrativeSyscallFailure("namespace-unshare", value)
+            self.assertNotEqual(type(caught.exception), ns._AdministrativeSyscallFailure)
+            self.assertNotIn("diagnostic", self.emit(caught.exception))
+        admin, _arguments = self.fixture("private_namespace")
+        function = mock.Mock(return_value=-1)
+        with self.assertRaises(ns.Hold) as caught:
+            admin.call("not-for-logs-unknown-site", function, "/secret/argument")
+        function.assert_not_called()
+        self.assertNotIn("diagnostic", self.emit(caught.exception))
+        for number in (0, 4095):
+            diagnostic = self.emit(ns._AdministrativeSyscallFailure("drop-capset", number))["diagnostic"]
+            self.assertEqual(diagnostic["errno"], number)
+
+    def test_exact_private_type_and_all_fields_are_revalidated_before_emission(self):
+        class Derived(ns._AdministrativeSyscallFailure):
+            pass
+        ordinary = ns.Hold("administrative-syscall-failed")
+        ordinary.phase, ordinary.syscall, ordinary.error_number = "bind-source", "mount", 13
+        for error in (ordinary, Derived("bind-source", 13), OSError("/secret/recipe")):
+            with self.subTest(kind=type(error)):
+                self.assertNotIn("diagnostic", self.emit(error))
+        for field, value in (("phase", "not-for-logs-unknown"), ("syscall", "execve"),
+                             ("error_number", -1), ("error_number", True), ("error_number", "13")):
+            error = ns._AdministrativeSyscallFailure("bind-source", 13)
+            setattr(error, field, value)
+            with self.subTest(field=field, value=value):
+                self.assertNotIn("diagnostic", self.emit(error))
+
+    def test_arguments_and_exception_repr_are_never_diagnostic_inputs(self):
+        admin, _arguments = self.fixture("private_namespace")
+        secret = mock.Mock()
+        secret.__repr__ = mock.Mock(side_effect=AssertionError("repr must never run"))
+        function = mock.Mock(return_value=-1)
+        with mock.patch.object(ns.ctypes, "get_errno", return_value=1):
+            with self.assertRaises(ns._AdministrativeSyscallFailure) as caught:
+                admin.call("namespace-unshare", function, secret, "/secret/argument")
+        self.assertEqual(self.emit(caught.exception)["diagnostic"]["errno"], 1)
+        secret.__repr__.assert_not_called()
+
+
 class AdministrativeOrderingTests(unittest.TestCase):
     def admin(self):
         value = ns.Admin.__new__(ns.Admin)

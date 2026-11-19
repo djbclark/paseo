@@ -1,0 +1,321 @@
+name: Fork Desktop Build
+
+on:
+  push:
+    branches: ["local/main-desktop-2026-11-19-a9a65e9f"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-main-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  build:
+    name: macOS arm64 source, tests and desktop artifact
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify approved push identity and runner
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/local/main-desktop-2026-11-19-a9a65e9f
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          git merge-base --is-ancestor 1a45b4684074f5128721753ec73e94347ece9501 HEAD
+          git merge-base --is-ancestor 68cfad2c8a482bc9fc8901d8bdd9d9395cc56f8e HEAD
+          mkdir -p evidence
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Record immutable source and toolchain inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          import subprocess
+
+          def command(*argv):
+              return subprocess.check_output(argv, text=True).strip()
+
+          def digest(path):
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+          row = {
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "actor": os.environ["GITHUB_ACTOR"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "ref": os.environ["GITHUB_REF"],
+              "sha": command("git", "rev-parse", "HEAD"),
+              "tree": command("git", "rev-parse", "HEAD^{tree}"),
+              "base": "1a45b4684074f5128721753ec73e94347ece9501",
+              "selectedPatches": [
+                  "cacbf1e145731786726c0d7d623a6abc4fb788c0",
+                  "c50c53583e935b0c9ab883f90ab197dfdf05bc46",
+              ],
+              "workflowSha256": digest(".github/workflows/fork-desktop-build.yml"),
+              "packageLockSha256": digest("package-lock.json"),
+              "sourceVersion": json.loads(pathlib.Path("package.json").read_text())["version"],
+              "electronVersion": json.loads(pathlib.Path("packages/desktop/package.json").read_text())["devDependencies"]["electron"],
+              "runnerName": os.environ["RUNNER_NAME"],
+              "runnerOS": os.environ["RUNNER_OS"],
+              "runnerArch": os.environ["RUNNER_ARCH"],
+              "imageOS": os.environ.get("ImageOS"),
+              "imageVersion": os.environ.get("ImageVersion"),
+              "machine": platform.machine(),
+              "macOS": command("sw_vers", "-productVersion"),
+              "node": command("node", "--version"),
+              "npm": command("npm", "--version"),
+              "xcode": command("xcodebuild", "-version"),
+              "sdk": command("xcrun", "--sdk", "macosx", "--show-sdk-version"),
+              "clang": command("clang", "--version"),
+              "installationAuthorized": False,
+          }
+          pathlib.Path("evidence/source-inputs.json").write_text(json.dumps(row, indent=2) + "\n")
+          PY
+
+      - name: Install JS dependencies once
+        id: install
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Check selected source formatting
+        id: formatting
+        run: >-
+          npm run format:check:files --
+          .github/workflows/fork-desktop-build.yml
+          packages/app/src/components/status-ring/clock.web.ts
+          packages/app/src/components/status-ring/clock.browser.test.tsx
+          packages/server/src/server/orchestration-skills/internal/operations.ts
+          packages/server/src/server/orchestration-skills/internal/sync.ts
+          packages/server/src/server/orchestration-skills/internal/operations.test.ts
+
+      - name: Lint selected TypeScript sources
+        id: lint
+        run: >-
+          npm run lint --
+          packages/app/src/components/status-ring/clock.web.ts
+          packages/app/src/components/status-ring/clock.browser.test.tsx
+          packages/server/src/server/orchestration-skills/internal/operations.ts
+          packages/server/src/server/orchestration-skills/internal/sync.ts
+          packages/server/src/server/orchestration-skills/internal/operations.test.ts
+
+      - name: Build desktop exactly once
+        id: desktop
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          EP_GH_IGNORE_TIME: "true"
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          set -euo pipefail
+          npm run build:desktop -- --publish never --mac --arm64 --dir \
+            -c.mac.notarize=false -c.mac.identity=null > evidence/build.log 2>&1 || {
+              status=$?
+              cat evidence/build.log
+              exit "$status"
+            }
+          cat evidence/build.log
+
+      - name: Typecheck built owning workspaces
+        id: types
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run typecheck --workspace=@getpaseo/app
+          npm run typecheck --workspace=@getpaseo/server
+          npm run typecheck --workspace=@getpaseo/desktop
+
+      - name: All desktop non-E2E unit tests
+        id: desktop_tests
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        run: >-
+          npm run test --workspace=@getpaseo/desktop --
+          --reporter=default --reporter=junit
+          --outputFile.junit=${{ github.workspace }}/evidence/desktop-junit.xml
+
+      - name: Full existing skills operations regression file
+        id: skills_tests
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        run: >-
+          npm run test:unit --workspace=@getpaseo/server --
+          src/server/orchestration-skills/internal/operations.test.ts
+          --maxWorkers=1 --reporter=default --reporter=junit
+          --outputFile.junit=${{ github.workspace }}/evidence/skills-junit.xml
+
+      - name: Full existing committed-diff worktree regression file
+        id: worktree_tests
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        run: >-
+          npm run test:unit --workspace=@getpaseo/server --
+          src/utils/checkout-git.test.ts
+          --maxWorkers=1 --reporter=default --reporter=junit
+          --outputFile.junit=${{ github.workspace }}/evidence/worktree-junit.xml
+
+      - name: Install the existing app harness Chromium
+        id: chromium
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        run: npm exec --workspace=@getpaseo/app -- playwright install chromium
+
+      - name: Real status-ring hook in the existing Chromium harness
+        id: status_ring_tests
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' && steps.chromium.outcome == 'success' }}
+        run: >-
+          npm run test --workspace=@getpaseo/app --
+          --project=browser src/components/status-ring/clock.browser.test.tsx
+          --reporter=default --reporter=junit
+          --outputFile.junit=${{ github.workspace }}/evidence/status-ring-junit.xml
+
+      - name: Ad-hoc sign and verify the arm64 app
+        id: signing
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=packages/desktop/release/mac-arm64/Paseo.app
+          test "$(lipo -archs "$app/Contents/MacOS/Paseo")" = arm64
+          codesign --force --deep -s - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app" > evidence/codesign.log 2>&1
+          cat evidence/codesign.log
+
+      - name: Existing packaged-app smoke exactly once
+        id: smoke
+        if: ${{ !cancelled() && steps.signing.outcome == 'success' }}
+        env:
+          PASEO_DESKTOP_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/evidence/packaged-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          node packages/desktop/e2e/packaged-app-smoke.js \
+            --app packages/desktop/release/mac-arm64/Paseo.app > evidence/packaged-smoke.log 2>&1 || {
+              status=$?
+              cat evidence/packaged-smoke.log
+              exit "$status"
+            }
+          cat evidence/packaged-smoke.log
+
+      - name: Preserve app metadata, file identities and installable ZIP
+        id: artifact
+        if: ${{ !cancelled() && steps.signing.outcome == 'success' && steps.smoke.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=packages/desktop/release/mac-arm64/Paseo.app
+          codesign --verify --deep --strict "$app"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import plistlib
+          import stat
+
+          app = pathlib.Path("packages/desktop/release/mac-arm64/Paseo.app")
+          with (app / "Contents/Info.plist").open("rb") as stream:
+              info = plistlib.load(stream)
+          fields = {key: info.get(key) for key in (
+              "CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion",
+              "CFBundleExecutable", "LSMinimumSystemVersion",
+          )}
+          assert fields["CFBundleIdentifier"] == "sh.paseo.desktop"
+          assert fields["LSMinimumSystemVersion"] == "13.0.0"
+          pathlib.Path("evidence/app-info.json").write_text(json.dumps(fields, indent=2) + "\n")
+          with pathlib.Path("evidence/app-files.jsonl").open("w") as output:
+              for path in [app, *sorted(app.rglob("*"))]:
+                  observed = path.lstat()
+                  row = {"path": str(path.relative_to(app.parent)), "mode": stat.S_IMODE(observed.st_mode)}
+                  if stat.S_ISLNK(observed.st_mode):
+                      row.update(kind="symlink", target=os.readlink(path))
+                  elif stat.S_ISDIR(observed.st_mode):
+                      row.update(kind="directory")
+                  elif stat.S_ISREG(observed.st_mode):
+                      digest = hashlib.sha256()
+                      with path.open("rb") as stream:
+                          for block in iter(lambda: stream.read(1024 * 1024), b""):
+                              digest.update(block)
+                      row.update(kind="file", size=observed.st_size, sha256=digest.hexdigest())
+                  else:
+                      raise RuntimeError("Unexpected special app member")
+                  output.write(json.dumps(row, sort_keys=True) + "\n")
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$app" evidence/Paseo-main-arm64.zip
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+
+          path = pathlib.Path("evidence/Paseo-main-arm64.zip")
+          digest = hashlib.sha256()
+          with path.open("rb") as stream:
+              for block in iter(lambda: stream.read(1024 * 1024), b""):
+                  digest.update(block)
+          pathlib.Path("evidence/app-zip.json").write_text(json.dumps({
+              "file": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest(),
+          }, indent=2) + "\n")
+          PY
+
+      - name: Retain actual stage outcomes and JUnit counts
+        if: ${{ always() }}
+        env:
+          JOB_STEPS_JSON: ${{ toJSON(steps) }}
+        shell: bash
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          root = pathlib.Path("evidence")
+          counts = {}
+          for name in ("desktop", "skills", "worktree", "status-ring"):
+              path = root / (name + "-junit.xml")
+              if not path.exists():
+                  counts[name] = {"executedEvidence": False}
+                  continue
+              tree = ET.parse(path).getroot()
+              cases = list(tree.iter("testcase"))
+              counts[name] = {
+                  "executedEvidence": True, "cases": len(cases),
+                  "failures": sum(case.find("failure") is not None for case in cases),
+                  "errors": sum(case.find("error") is not None for case in cases),
+                  "skipped": sum(case.find("skipped") is not None for case in cases),
+              }
+          (root / "job-outcomes.json").write_text(json.dumps({
+              "steps": json.loads(os.environ["JOB_STEPS_JSON"]),
+              "testCounts": counts,
+              "noInstallation": True,
+          }, indent=2) + "\n")
+          PY
+
+      - name: Upload this attempt's app and diagnostic evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Paseo-main-arm64-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error

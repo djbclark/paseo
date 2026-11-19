@@ -249,3 +249,39 @@ test("retained system metadata refuses old missing-payload manifests and unknown
     false,
   );
 });
+
+// These are data-only ELF validation checks. No native addon is imported/executed.
+test("exact copied Sherpa recipe preserves code/relocation/init semantics and rejects changed input", async () => {
+  const { createRequire } = await import("node:module");
+  const { readFile } = await import("node:fs/promises");
+  const require = createRequire(import.meta.url);
+  const { assertExactSherpaInput } = await import("./adapt-qualified-sherpa.mjs");
+  const { auditSherpaElf, assertSherpaAdaptationSemantics } =
+    await import("./sherpa-elf-audit.mjs");
+  const original = await readFile(require.resolve("sherpa-onnx-linux-x64/sherpa-onnx.node"));
+  const before = assertExactSherpaInput(original);
+  const changed = Buffer.from(original);
+  changed[changed.length - 1] ^= 1;
+  assert.throws(() => assertExactSherpaInput(changed));
+  const old = "$ORIGIN:/home/runner/work/sherpa-onnx/sherpa-onnx/build/install/lib:";
+  const strings = before.sections.find((row) => row.name === ".dynstr");
+  assert.ok(strings);
+  const offset = original.indexOf(Buffer.from(old), strings.offset);
+  assert.ok(offset >= strings.offset && offset + old.length < strings.offset + strings.size);
+  const rewritten = Buffer.from(original);
+  rewritten.fill(0, offset, offset + old.length);
+  rewritten.write("$ORIGIN", offset);
+  const after = auditSherpaElf(rewritten);
+  assertSherpaAdaptationSemantics(before, after);
+  const text = after.sections.find((row) => row.name === ".text");
+  assert.ok(text?.size);
+  const corruptCode = Buffer.from(rewritten);
+  corruptCode[text.offset] ^= 1;
+  assert.throws(() => assertSherpaAdaptationSemantics(before, auditSherpaElf(corruptCode)));
+  const reloc = after.sections.find((row) => row.name === ".rela.dyn");
+  assert.ok(reloc?.size);
+  const corruptReloc = Buffer.from(rewritten);
+  corruptReloc[reloc.offset] ^= 1;
+  assert.throws(() => assertSherpaAdaptationSemantics(before, auditSherpaElf(corruptReloc)));
+  assert.throws(() => assertSherpaAdaptationSemantics(after, before));
+});

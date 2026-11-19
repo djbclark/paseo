@@ -178,9 +178,15 @@ function assertManifestIdentity(
     return unsupported();
 }
 function assertBuiltinModuleTable(manifest: DaemonManifest): void {
+  const adaptation = manifest.files.find(
+    (file) => file.path === "native-provenance/sherpa-addon-adaptation.json",
+  );
+  const recipe = adaptation
+    ? { ...builtinBindingsRecipe, copiedSherpaAddonRecipeSha256: adaptation.sha256 }
+    : builtinBindingsRecipe;
   const expectedTable = {
     schemaVersion: 1,
-    recipe: builtinBindingsRecipe,
+    recipe,
     runtimeSha256: manifest.runtime.sha256,
     daemonSha256: manifest.files.find((file) => file.path === "daemon.mjs")?.sha256,
     externalLibraries: manifest.externalLibraries,
@@ -289,9 +295,11 @@ export async function verifyEnclosingDistribution(root: string) {
     ...manifest.files.filter(
       (file) =>
         file.path.startsWith("system-closure/") ||
+        file.path.startsWith("native-provenance/") ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||
+        /\.so(?:\.[0-9]+)*$/.test(file.path) ||
         file.path.endsWith("spawn-helper") ||
         file.path.startsWith("node_modules/esbuild/") ||
         file.path === "node_modules/typescript/lib/typescript.js",

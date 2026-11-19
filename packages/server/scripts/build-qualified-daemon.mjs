@@ -4,6 +4,7 @@ import { isBuiltin, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { adaptQualifiedSherpa } from "./adapt-qualified-sherpa.mjs";
 import { buildQualifiedGit } from "./build-qualified-git.mjs";
 import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
 import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
@@ -180,6 +181,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     `sherpa-onnx-linux-${process.arch}`,
   ])
     await copyPackage(name, require);
+  const copiedSherpa = await adaptQualifiedSherpa(outDir);
   await cp(
     path.join(packageRoot, "src/terminal/shell-integration"),
     path.join(outDir, "shell-integration"),
@@ -199,6 +201,11 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     ...compiledBuiltins.sourceInputs,
     ...finiteGit.sourceInputs,
   ];
+  for (const name of ["adapt-qualified-sherpa.mjs", "sherpa-elf-audit.mjs"]) {
+    const file = path.join(packageRoot, "scripts", name);
+    const raw = await readFile(file);
+    sourceInputs.push({ path: inputName(file), bytes: raw.length, sha256: digest(raw) });
+  }
   const inputNames = [
     ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
   ].sort();
@@ -228,6 +235,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       ].sort(),
       packageLockSha256: digest(await readFile(path.join(repositoryRoot, "package-lock.json"))),
       finiteGit,
+      copiedSherpa,
       toolchain: {
         node: process.version,
         versions: process.versions,

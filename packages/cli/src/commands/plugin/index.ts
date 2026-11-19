@@ -33,6 +33,7 @@ import {
   withPluginLogsClient,
   withPluginUpdateClient,
   withPluginManagementClient,
+  withPluginListClient,
   withPluginSourceClient,
 } from "./shared.js";
 
@@ -126,7 +127,7 @@ export async function runPluginListCommand(
   options: PluginOptions,
   _command: Command,
 ): Promise<ListResult<PluginListItem>> {
-  const plugins = await withPluginManagementClient(options.daemonTarget, (client) =>
+  const plugins = await withPluginListClient(options.daemonTarget, (client) =>
     client.listPlugins(),
   );
   const data = pluginId ? plugins.filter((plugin) => plugin.id === pluginId) : plugins;

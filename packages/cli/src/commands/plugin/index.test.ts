@@ -104,6 +104,7 @@ vi.mock("../../utils/client.js", () => ({
 }));
 
 import { render } from "../../output/index.js";
+import { connectToDaemon } from "../../utils/client.js";
 import {
   createPluginCommand,
   runPluginInstallCommand,
@@ -117,6 +118,56 @@ import {
 } from "./index.js";
 
 describe("plugin management commands", () => {
+  it.each(["list", "logs", "managed-status", "cohort-status", "cohort-v2-status"])(
+    "does not persist a CLI client ID for plugin %s observation",
+    async (operation) => {
+      features.pluginManagement = true;
+      features.pluginLogs = true;
+      features.managedPluginStatus = true;
+      features.managedPluginCohortStatus = true;
+      features.managedPluginCohortV2 = true;
+      const options = { daemonTarget };
+      switch (operation) {
+        case "list":
+          await runPluginListCommand(undefined, options, {} as never);
+          break;
+        case "logs":
+          await runPluginLogsCommand("managed", options, {} as never);
+          break;
+        case "managed-status":
+          await runManagedPluginStatusCommand("managed", options, {} as never);
+          break;
+        case "cohort-status":
+          await runManagedPluginCohortStatusCommand(options, {} as never);
+          break;
+        case "cohort-v2-status":
+          await runManagedPluginCohortV2StatusCommand(options, {} as never);
+          break;
+      }
+      expect(connectToDaemon).toHaveBeenCalledExactlyOnceWith({
+        target: daemonTarget,
+        persistClientId: false,
+      });
+      expect(close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps ordinary persistent client initialization for plugin mutations", async () => {
+    features.pluginSourceInstallation = true;
+    features.pluginSourceUpdates = true;
+    features.managedPluginPromotions = true;
+    await runPluginInstallCommand("git:owner/plugin", { daemonTarget }, {} as never);
+    await runPluginUpdateCommand("managed", { daemonTarget, check: true }, {} as never);
+    await runPluginRecoverCommand(
+      "managed",
+      { daemonTarget, expectedPath: "/snapshots/old", expectedGeneration: "4" },
+      {} as never,
+    );
+    expect(connectToDaemon).toHaveBeenCalledTimes(3);
+    for (const call of vi.mocked(connectToDaemon).mock.calls)
+      expect(call).toEqual([{ target: daemonTarget }]);
+  });
+
   it("gates managed status once and preserves uncertain native evidence", async () => {
     await expect(
       runManagedPluginStatusCommand("managed", { daemonTarget }, {} as never),
@@ -178,6 +229,10 @@ describe("plugin management commands", () => {
     await command.parseAsync(["status"], { from: "user" });
 
     expect(listPlugins).toHaveBeenCalledTimes(1);
+    expect(connectToDaemon).toHaveBeenCalledExactlyOnceWith({
+      target: daemonTarget,
+      persistClientId: false,
+    });
     const help = command.helpInformation();
     expect(help).not.toMatch(/^\s+status(?:\s|$)/m);
     expect(help).toMatch(/^\s+cohort-status(?:\s|$)/m);

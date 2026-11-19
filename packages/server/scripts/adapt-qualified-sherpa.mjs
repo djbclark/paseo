@@ -36,7 +36,7 @@ const dependencies = [
 ];
 const stamp = (s) =>
   [s.dev, s.ino, s.mode, s.uid, s.gid, s.nlink, s.size, s.mtimeNs, s.ctimeNs].join(":");
-async function bytes(file, limit, trustedTool = false) {
+async function readStableBytes(file, limit, trustedTool = false) {
   const descriptor = await open(
     file,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -105,11 +105,11 @@ export async function adaptQualifiedSherpa(root) {
   assert.equal(process.platform, "linux");
   assert.equal(process.arch, "x64");
   const member = path.join(root, sherpaAddonMember);
-  const original = await bytes(member, 840296);
+  const original = await readStableBytes(member, 840296);
   const before = assertExactSherpaInput(original);
   const siblingRows = [];
   for (const [name, size, expected] of dependencies) {
-    const data = await bytes(path.join(path.dirname(member), name), size);
+    const data = await readStableBytes(path.join(path.dirname(member), name), size);
     assert.equal(data.length, size);
     assert.equal(sha(data), expected);
     siblingRows.push({
@@ -128,7 +128,7 @@ export async function adaptQualifiedSherpa(root) {
     if (parent === "/") break;
     parent = path.dirname(parent);
   }
-  const toolBytes = await bytes(tool, 16 * 1024 * 1024, true);
+  const toolBytes = await readStableBytes(tool, 16 * 1024 * 1024, true);
   const toolVersion = (
     await run(tool, ["--version"], { timeout: 10000, maxBuffer: 4096 })
   ).stdout.trim();
@@ -137,6 +137,7 @@ export async function adaptQualifiedSherpa(root) {
   const toolProvenance = await retain(root, "patchelf-build-tool.gz", gzipSync(toolBytes));
   const sources = [];
   for (const [name, file] of [
+    ["sherpa-LICENSE.txt", "LICENSE"],
     ["sherpa-cmake.txt", "scripts/node-addon-api/CMakeLists.txt"],
     ["sherpa-publish.txt", ".github/scripts/node-addon/run.sh"],
     ["sherpa-cpu-session.txt", "sherpa-onnx/csrc/session.cc"],
@@ -163,10 +164,10 @@ export async function adaptQualifiedSherpa(root) {
       ),
     );
   const argv = ["--set-rpath", "$ORIGIN", sherpaAddonMember];
-  assert.equal(sha(await bytes(member, 840296)), originalSha);
+  assert.equal(sha(await readStableBytes(member, 840296)), originalSha);
   await run(tool, argv, { cwd: root, timeout: 15000, maxBuffer: 65536 });
-  assert.equal(sha(await bytes(tool, 16 * 1024 * 1024, true)), sha(toolBytes));
-  const adapted = await bytes(member, 2 * 1024 * 1024);
+  assert.equal(sha(await readStableBytes(tool, 16 * 1024 * 1024, true)), sha(toolBytes));
+  const adapted = await readStableBytes(member, 2 * 1024 * 1024);
   const after = auditSherpaElf(adapted);
   assertSherpaAdaptationSemantics(before, after);
   const strict = describeElf(adapted);

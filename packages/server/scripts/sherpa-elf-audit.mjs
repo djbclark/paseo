@@ -123,7 +123,20 @@ export function auditSherpaElf(bytes) {
         row.address >= p.address &&
         row.address + row.size <= p.address + p.memorySize,
     );
-    return { ...row, name, loadFlags, relro, sha256: data === null ? null : sha(data) };
+    return {
+      nameOffset: row.nameOffset,
+      type: row.type,
+      flags: row.flags,
+      address: row.address,
+      offset: row.offset,
+      size: row.size,
+      alignment: row.alignment,
+      entrySize: row.entrySize,
+      name,
+      loadFlags,
+      relro,
+      sha256: data === null ? null : sha(data),
+    };
   });
   const dynamic = programs.filter((p) => p.type === 2);
   assert.equal(dynamic.length, 1);

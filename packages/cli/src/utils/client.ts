@@ -13,10 +13,10 @@ import {
   parseConnectionUri,
 } from "@getpaseo/protocol/daemon-endpoints";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { getOrCreateCliClientId } from "./client-id.js";
+import { getOrCreateCliClientId, type CliClientIdOptions } from "./client-id.js";
 import { resolveCliVersion } from "../version.js";
 
-export interface ConnectOptions {
+export interface ConnectOptions extends CliClientIdOptions {
   target: DaemonTarget;
   timeout?: number;
   instance?: DaemonInstance;
@@ -192,7 +192,7 @@ async function connectSelectedDaemon(options: ConnectOptions): Promise<DaemonCli
   const home = resolveClientPaseoHome(options.target);
   const credential = resolveDaemonCredential(host, home);
   const client = createHostClient(host, {
-    clientId: await getOrCreateCliClientId(home),
+    clientId: await getOrCreateCliClientId(home, { persistClientId: options.persistClientId }),
     clientType: "cli",
     appVersion: resolveCliVersion(),
     ...(credential?.kind === "password" ? { password: credential.password } : {}),

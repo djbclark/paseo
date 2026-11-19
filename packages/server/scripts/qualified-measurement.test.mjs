@@ -225,7 +225,7 @@ test(
       );
     } finally {
       for (const held of gates) held.resolve();
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled(pending);
       promises.open = originalOpen;
       promises.realpath = originalRealpath;
       syncBuiltinESMExports();

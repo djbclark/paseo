@@ -70,14 +70,22 @@ async function snapshotBytes(
   } catch (error) {
     failed = { error };
   }
+  let closeFailed: { error: unknown } | null = null;
   try {
     await handle.close();
   } catch (error) {
+    closeFailed = { error };
+  }
+  if (closeFailed) {
     if (failed)
-      throw new AggregateError([failed.error, error], "Fresh file read and close failed", {
-        cause: failed.error,
-      });
-    throw error;
+      throw new AggregateError(
+        [failed.error, closeFailed.error],
+        "Fresh file read and close failed",
+        {
+          cause: failed.error,
+        },
+      );
+    throw closeFailed.error;
   }
   if (failed) throw failed.error;
   if (!snapshot) return unsupported();

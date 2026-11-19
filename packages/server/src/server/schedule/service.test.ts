@@ -500,6 +500,7 @@ describe("ScheduleService", () => {
       await inspected.promise;
       const stopping = service.stop().then(() => {
         drained = true;
+        return undefined;
       });
       await expect(service.runOnce(schedule.id)).rejects.toThrow("stopped");
       await service.tick();
@@ -546,6 +547,7 @@ describe("ScheduleService", () => {
       const stopping = service.stop();
       const restarting = service.start().then(() => {
         restarted = true;
+        return undefined;
       });
       await service.tick();
       expect(restarted).toBe(false);
@@ -610,9 +612,11 @@ describe("ScheduleService", () => {
         void starting.then(
           () => {
             startSettled = true;
+            return undefined;
           },
           () => {
             startSettled = true;
+            return undefined;
           },
         );
         const originalFailure = expect(starting).rejects.toBe(gate.failure);
@@ -631,9 +635,11 @@ describe("ScheduleService", () => {
           void stopping.then(
             () => {
               stopSettled = true;
+              return undefined;
             },
             () => {
               stopSettled = true;
+              return undefined;
             },
           );
           const drainFailure = expect(stopping).rejects.toMatchObject({

@@ -362,7 +362,7 @@ export class ScheduleService {
   private async drainActivity(): Promise<void> {
     const failures: unknown[] = [];
     while (this.pendingActivity.size > 0) {
-      const results = await Promise.allSettled([...this.pendingActivity]);
+      const results = await Promise.allSettled(this.pendingActivity);
       for (const result of results) if (result.status === "rejected") failures.push(result.reason);
     }
     if (this.startupFailure && !failures.includes(this.startupFailure.error)) {

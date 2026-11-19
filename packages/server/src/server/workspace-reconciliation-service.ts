@@ -301,7 +301,7 @@ export class WorkspaceReconciliationService {
         ...this.pendingInspections.values(),
         ...this.watcherClosures,
       ]);
-      const results = await Promise.allSettled([...pending]);
+      const results = await Promise.allSettled(pending);
       for (const result of results) if (result.status === "rejected") failures.add(result.reason);
     }
     for (const failure of this.closeFailures) failures.add(failure);

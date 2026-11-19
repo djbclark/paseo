@@ -236,6 +236,7 @@ describe("WorkspaceReconciliationService", () => {
       await inspected.promise;
       const closing = fixture.service.close().then(() => {
         closed = true;
+        return undefined;
       });
       await Promise.resolve();
       expect(closed).toBe(false);
@@ -266,6 +267,7 @@ describe("WorkspaceReconciliationService", () => {
       let closed = false;
       const closing = fixture.service.close().then(() => {
         closed = true;
+        return undefined;
       });
       await Promise.resolve();
       expect(closed).toBe(false);
@@ -293,6 +295,7 @@ describe("WorkspaceReconciliationService", () => {
       let closed = false;
       const closing = fixture.service.close().then(() => {
         closed = true;
+        return undefined;
       });
       await Promise.resolve();
       expect(closed).toBe(false);
@@ -359,6 +362,7 @@ describe("WorkspaceReconciliationService", () => {
       let closed = false;
       const closing = fixture.service.close().then(() => {
         closed = true;
+        return undefined;
       });
       await clock.fire();
       expect(closed).toBe(false);

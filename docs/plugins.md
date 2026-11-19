@@ -24,6 +24,28 @@ source as ordinary, and retained history holds restart if its policy disappears.
 Always bind resources to `sourceDirectory`; use `managedSource === true` only to
 select managed snapshot validation rules. It cannot bypass native policy gates.
 
+## Finite ADE helper SDK (fork source prerequisite)
+
+`@getpaseo/plugin/server/ade-helpers` exports `runAdeDirectoryOperation` and its
+strict request/result types. It accepts the seven finite repository/claim/naming
+operations, never an executable, argv, environment, script path or supplied Git
+facts. Business exit/status envelopes remain distinct from execution failure.
+A missing qualified producer refuses; this API has no raw-process fallback.
+
+The private adapter acquires an operation descriptor before asynchronous fact
+preparation can launch anything. Its actual-settlement promise covers prerequisite
+Git helpers and the selected Python helper and descendants, including preparation
+failure. Both the parent and worker capture the original hook event before plugin
+code can change its input; their private execution bindings remain separate.
+Initialization cannot acquire a helper root. Neither semantic JSON nor source
+metadata creates a binding or maintenance permission.
+
+The SDK source alone does not install `ade-directory-helpers-v1` execution support.
+The fixed producer must bind the actual interpreter/import closure, finite Git
+recipes, consumed namespaces and original live activity root before evaluating a
+selected bundle. Until that integration and proof exist, the selected helper
+profile stays unsupported. The existing passive evaluator stays unchanged.
+
 ## Complete cohort observation (fork)
 
 Use `plugin cohort-v2-status --json` for a host with in-process builtins. It requires

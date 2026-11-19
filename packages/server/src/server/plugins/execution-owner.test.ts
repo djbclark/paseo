@@ -84,3 +84,23 @@ it("cannot authorize held child termination using a fabricated reservation scope
   owner.terminated();
   expect(native.holdForUnknownWork).toHaveBeenCalledOnce();
 });
+
+it("retains an immutable original hook event only for its actual live parent incarnation", () => {
+  const { owner, release } = fixture();
+  const message = {
+    type: "hook" as const,
+    requestId: "original-hook",
+    name: "worktree.create.after",
+    input: { cwd: "/original" },
+  };
+  owner.admit(message);
+  message.input.cwd = "/changed";
+  const origin = owner.readAdmittedOrigin("instance", "original-hook");
+  expect(origin?.message).toMatchObject({ input: { cwd: "/original" } });
+  expect(Object.isFrozen(origin?.message)).toBe(true);
+  expect(() => owner.readAdmittedOrigin("other-instance", "original-hook")).toThrow("incarnation");
+  expect(release).not.toHaveBeenCalled();
+  owner.settled("instance", "original-hook");
+  expect(owner.readAdmittedOrigin("instance", "original-hook")).toBeUndefined();
+  expect(release).toHaveBeenCalledOnce();
+});

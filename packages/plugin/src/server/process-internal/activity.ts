@@ -13,6 +13,30 @@ interface ActivityLease {
   references: number;
   allowHelpers: boolean;
   onSettled: () => void;
+  readonly origin?: PluginActivityOrigin;
+}
+/** Captured by the real worker before dispatch; DATA identity never grants permission. */
+export interface PluginActivityOrigin {
+  readonly requestKey: string;
+  readonly message: unknown;
+}
+export function capturePluginActivityOrigin(
+  requestKey: string,
+  message: unknown,
+): PluginActivityOrigin {
+  return Object.freeze({ requestKey, message: snapshotPluginActivityData(message) });
+}
+/** Immutable DATA snapshot only; it cannot mint an execution root or producer binding. */
+export function snapshotPluginActivityData<T>(value: T): T {
+  const snapshot = structuredClone(value);
+  freezeOrigin(snapshot, new WeakSet());
+  return snapshot;
+}
+function freezeOrigin(value: unknown, seen: WeakSet<object>): void {
+  if (typeof value !== "object" || value === null || seen.has(value)) return;
+  seen.add(value);
+  for (const child of Object.values(value)) freezeOrigin(child, seen);
+  Object.freeze(value);
 }
 const activityScope = new AsyncLocalStorage<ActivityLease>();
 export interface PluginHelperOperation {
@@ -105,10 +129,10 @@ export class PluginActivityOwner {
       waiter.reject(new Error("Plugin activity is uncertain"));
     this.drainWaiters.clear();
   }
-  acquire(onSettled: () => void = () => {}): PluginActivityLease {
+  acquire(onSettled: () => void = () => {}, origin?: PluginActivityOrigin): PluginActivityLease {
     if (this.barrier || this.uncertain || this.retired)
       throw new Error("Plugin maintenance admission is closed");
-    return this.makeLease(true, onSettled);
+    return this.makeLease(true, onSettled, origin);
   }
   /** Lifecycle cleanup is admitted once by the actual worker, before closing new roots. */
   retirementCleanup(): PluginActivityLease {
@@ -143,13 +167,18 @@ export class PluginActivityOwner {
       },
     };
   }
-  private makeLease(allowHelpers: boolean, onSettled: () => void): PluginActivityLease {
+  private makeLease(
+    allowHelpers: boolean,
+    onSettled: () => void,
+    origin?: PluginActivityOrigin,
+  ): PluginActivityLease {
     const lease: ActivityLease = {
       owner: this,
       resource: new AsyncResource("paseo.plugin.activity"),
       references: 1,
       allowHelpers,
       onSettled,
+      origin,
     };
     originalActivityRoots.add(lease);
     this.activity++;
@@ -195,6 +224,20 @@ export interface PluginActivityLease {
   run<T>(task: () => T): T;
   release(): void;
 }
+/** Internal fixed-directory bridge; registration and expired roots cannot start preparation. */
+export function acquireAdeDirectoryActivity(): {
+  readonly activityOwner: PluginActivityOwner;
+  readonly root: object;
+  readonly originalEvent: PluginActivityOrigin;
+  release(): void;
+} {
+  const root = activityScope.getStore();
+  if (!root?.origin) throw new Error("Missing original directory hook activity");
+  root.owner.assertLiveRoot(root);
+  const release = root.owner.helper(root);
+  return { activityOwner: root.owner, root, originalEvent: root.origin, release };
+}
+
 export function acquirePluginHelper(operation: PluginHelperOperation): PluginHelperLease {
   const lease = activityScope.getStore();
   const admission = qualifiedHelperAdmission?.({

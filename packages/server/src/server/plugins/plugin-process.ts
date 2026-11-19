@@ -1,4 +1,8 @@
-import { PluginActivityOwner, type PluginActivityLease } from "@getpaseo/plugin/internal/activity";
+import {
+  capturePluginActivityOrigin,
+  PluginActivityOwner,
+  type PluginActivityLease,
+} from "@getpaseo/plugin/internal/activity";
 import {
   isPluginExecutionRoot,
   pluginExecutionKey,
@@ -625,7 +629,10 @@ export function createPluginWorker(
     let lease: PluginActivityLease;
     try {
       if (stopping) throw new Error("Plugin is stopping");
-      lease = activity.acquire(settled);
+      lease = activity.acquire(
+        settled,
+        message.type === "hook" ? capturePluginActivityOrigin(requestKey, message) : undefined,
+      );
     } catch (error) {
       rejectRoot(message, error);
       settled();

@@ -17,6 +17,7 @@ it("keeps React out of the plugin host's runtime dependency graph", async () => 
         "@getpaseo/plugin/server",
         "@getpaseo/plugin/server/provider",
         "@getpaseo/plugin/server/acp",
+        "@getpaseo/plugin/server/ade-helpers",
       ],
       outdir: "unused",
       conditions: ["source"],

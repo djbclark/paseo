@@ -68,6 +68,16 @@
       "types": "./dist/server/process-internal/builtin-helper.d.ts",
       "source": "./src/server/process-internal/builtin-helper.ts",
       "default": "./dist/server/process-internal/builtin-helper.js"
+    },
+    "./server/ade-helpers": {
+      "types": "./dist/server/ade-helpers.d.ts",
+      "source": "./src/server/ade-helpers.ts",
+      "default": "./dist/server/ade-helpers.js"
+    },
+    "./internal/ade-directory": {
+      "types": "./dist/server/process-internal/ade-directory.d.ts",
+      "source": "./src/server/process-internal/ade-directory.ts",
+      "default": "./dist/server/process-internal/ade-directory.js"
     }
   },
   "publishConfig": {

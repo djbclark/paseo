@@ -29,113 +29,188 @@ const execute = promisify(execFile);
 const sha = (raw) => createHash("sha256").update(raw).digest("hex");
 const limits = { zip: 128 * 1024 * 1024, tar: 512 * 1024 * 1024, members: 10000 };
 async function runFdFixture(root, descriptor, caseName) {
-  const fixture=path.join(process.env.RUNNER_TEMP,"qualified-python-fd-exec");
-  return await new Promise((resolve,reject)=>{
-    const child=spawn(fixture,[root],{
-      env:{PATH:"/usr/bin:/bin",LANG:"C",LC_ALL:"C",HOME:os.userInfo().homedir},
-      stdio:["ignore","pipe","pipe","ignore","ignore",descriptor??"ignore"],
+  const fixture = path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec");
+  return await new Promise((resolve, reject) => {
+    const child = spawn(fixture, [root], {
+      env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", HOME: os.userInfo().homedir },
+      stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", descriptor ?? "ignore"],
     });
-    let stdout="",stderr="",overflow=false,spawnError;
-    const collect=(target,data)=>{
-      if(Buffer.byteLength(target)+data.length>65536) {overflow=true;return target;}
-      return target+data.toString("utf8");
+    let stdout = "",
+      stderr = "",
+      overflow = false,
+      spawnError;
+    const collect = (target, data) => {
+      if (Buffer.byteLength(target) + data.length > 65536) {
+        overflow = true;
+        return target;
+      }
+      return target + data.toString("utf8");
     };
-    child.stdout.on("data",(data)=>{stdout=collect(stdout,data);});
-    child.stderr.on("data",(data)=>{stderr=collect(stderr,data);});
-    child.once("error",(error)=>{spawnError=error;});
-    child.once("close",(code,signal)=>{
-      const result={code,signal,stdout,stderr,overflow};
-      const raw=JSON.stringify(result)+"\n";
-      writeFile(path.join(process.env.RUNNER_TEMP,"qualified-python-fd-exec-"+caseName+".json"),raw,{flag:"wx",mode:0o444}).then(()=>{
-        if(spawnError) reject(spawnError);
-        else if(overflow) reject(new Error("FD fixture bounded output exceeded"));
-        else resolve(result);
-      },reject);
+    child.stdout.on("data", (data) => {
+      stdout = collect(stdout, data);
+    });
+    child.stderr.on("data", (data) => {
+      stderr = collect(stderr, data);
+    });
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    child.once("close", (code, signal) => {
+      const result = { code, signal, stdout, stderr, overflow };
+      const raw = JSON.stringify(result) + "\n";
+      writeFile(
+        path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec-" + caseName + ".json"),
+        raw,
+        { flag: "wx", mode: 0o444 },
+      ).then(() => {
+        if (spawnError) return reject(spawnError);
+        else if (overflow) return reject(new Error("FD fixture bounded output exceeded"));
+        else return resolve(result);
+      }, reject);
     });
   });
 }
 function compareFdProbe(observation, record, root) {
-  const prefix=path.join(root,"python");
-  assert.equal(observation.schemaVersion,2);
-  assert.equal(observation.executable,path.join(prefix,"bin/python3"));
-  for(const key of ["prefix","execPrefix","basePrefix","baseExecPrefix"])
-    assert.equal(observation[key],prefix);
-  assert.deepEqual(observation.flags,{isolated:1,noSite:1,dontWriteBytecode:1});
-  assert.deepEqual(observation.path,[path.join(prefix,"lib/python312.zip"),path.join(prefix,"lib/python3.12"),path.join(prefix,"lib/python3.12/lib-dynload")]);
-  assert.deepEqual(observation.build,record.observed.source.build);
-  const files=new Set(record.files.map((row)=>row.path));
-  const relative=(file)=>{
-    assert.ok(file.startsWith(prefix+"/"));
-    return path.relative(root,file);
+  const prefix = path.join(root, "python");
+  assert.equal(observation.schemaVersion, 2);
+  assert.equal(observation.executable, path.join(prefix, "bin/python3"));
+  for (const key of ["prefix", "execPrefix", "basePrefix", "baseExecPrefix"])
+    assert.equal(observation[key], prefix);
+  assert.deepEqual(observation.flags, { isolated: 1, noSite: 1, dontWriteBytecode: 1 });
+  assert.deepEqual(observation.path, [
+    path.join(prefix, "lib/python312.zip"),
+    path.join(prefix, "lib/python3.12"),
+    path.join(prefix, "lib/python3.12/lib-dynload"),
+  ]);
+  assert.deepEqual(observation.build, record.observed.source.build);
+  const files = new Set(record.files.map((row) => row.path));
+  const relative = (file) => {
+    assert.ok(file.startsWith(prefix + "/"));
+    return path.relative(root, file);
   };
-  for(const row of observation.modules)
-    if(!["built-in","frozen"].includes(row.origin)) assert.ok(files.has(relative(row.origin)));
-  const ctypes=observation.modules.find((row)=>row.name==="_ctypes");
-  assert.equal(path.dirname(ctypes.origin),observation.extensionDirectory);
+  for (const row of observation.modules)
+    if (!["built-in", "frozen"].includes(row.origin)) assert.ok(files.has(relative(row.origin)));
+  const ctypes = observation.modules.find((row) => row.name === "_ctypes");
+  assert.equal(path.dirname(ctypes.origin), observation.extensionDirectory);
   assert.ok(observation.nativeMapFiles.includes(ctypes.origin));
-  for(const key of ["stdlib","platstdlib","extensionDirectory"])
-    assert.equal(relative(observation[key]),record.observed.relocated[key]);
-  const normalize=(file)=>file.startsWith(prefix+"/")?relative(file):file;
-  assert.deepEqual(observation.modules.map((row)=>({...row,origin:["built-in","frozen"].includes(row.origin)?row.origin:relative(row.origin)})),record.observed.relocated.modules);
-  assert.deepEqual(observation.nativeMapFiles.map(normalize),record.observed.relocated.nativeMapFiles);
+  for (const key of ["stdlib", "platstdlib", "extensionDirectory"])
+    assert.equal(relative(observation[key]), record.observed.relocated[key]);
+  const normalize = (file) => (file.startsWith(prefix + "/") ? relative(file) : file);
+  assert.deepEqual(
+    observation.modules.map((row) => ({
+      ...row,
+      origin: ["built-in", "frozen"].includes(row.origin) ? row.origin : relative(row.origin),
+    })),
+    record.observed.relocated.modules,
+  );
+  assert.deepEqual(
+    observation.nativeMapFiles.map(normalize),
+    record.observed.relocated.nativeMapFiles,
+  );
 }
-async function fdExecEvidence(root,retained,record) {
-  const python=path.join(root,"python/bin/python3");
-  const handle=await open(python,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-  const evidence={kind:"retained-python-fd-exec-CI-DATA",qualification:false,productionAuthority:false,controls:[]};
-  for(const [role,file] of [
-    ["source",path.resolve("packages/server/scripts/qualified-python-fd-exec.c")],
-    ["compiled",path.join(process.env.RUNNER_TEMP,"qualified-python-fd-exec")],
-    ["compiler","/usr/bin/gcc"],
+async function fdExecEvidence(root, retained, record) {
+  const python = path.join(root, "python/bin/python3");
+  const handle = await open(
+    python,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  const evidence = {
+    kind: "retained-python-fd-exec-CI-DATA",
+    qualification: false,
+    productionAuthority: false,
+    controls: [],
+  };
+  for (const [role, file] of [
+    ["source", path.resolve("packages/server/scripts/qualified-python-fd-exec.c")],
+    ["compiled", path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec")],
+    ["compiler", "/usr/bin/gcc"],
   ]) {
-    const resolved=await realpath(file);
-    const raw=await readFile(resolved);
-    evidence[role]={path:file,realpath:resolved,mode:(await lstat(resolved)).mode&0o777,size:raw.length,sha256:sha(raw)};
+    const resolved = await realpath(file);
+    const raw = await readFile(resolved);
+    evidence[role] = {
+      path: file,
+      realpath: resolved,
+      mode: (await lstat(resolved)).mode & 0o777,
+      size: raw.length,
+      sha256: sha(raw),
+    };
   }
-  await writeFile(path.join(process.env.RUNNER_TEMP,"qualified-python-fd-exec-build.json"),JSON.stringify({source:evidence.source,compiled:evidence.compiled,compiler:evidence.compiler})+"\n",{flag:"wx",mode:0o444});
+  await writeFile(
+    path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec-build.json"),
+    JSON.stringify({
+      source: evidence.source,
+      compiled: evidence.compiled,
+      compiler: evidence.compiler,
+    }) + "\n",
+    { flag: "wx", mode: 0o444 },
+  );
   try {
-    const original=await handle.stat({bigint:true});
-    const identity=retained.files.find((row)=>row.path==="python/bin/python3");
-    assert.equal(original.nlink,1n);assert.equal(Number(original.mode&0o7777n),0o555);
-    assert.equal(sha(await handle.readFile()),identity.sha256);
-    const result=await runFdFixture(root,handle.fd,"positive");
-    assert.equal(result.code,0,result.stderr);assert.equal(result.signal,null);
-    const messages=result.stderr.trim().split("\n").map((row)=>JSON.parse(row));
-    assert.equal(messages.length,2);
-    const descriptor=messages[0];
-    assert.equal(descriptor.kind,"python-fd-exec-descriptor");
-    assert.equal(descriptor.fd,5);assert.equal(descriptor.cloexec,true);
-    assert.equal(descriptor.dev,String(original.dev));assert.equal(descriptor.ino,String(original.ino));
-    assert.equal(descriptor.mode,0o555);assert.equal(descriptor.size,Number(original.size));
-    assert.equal(descriptor.home,os.userInfo().homedir);
-    const observation=JSON.parse(result.stdout);
-    compareFdProbe(observation,record,root);
-    evidence.originalInterpreter=identity;evidence.descriptor=descriptor;
-    evidence.probe=observation;evidence.sysconfig=messages[1];
-    assert.equal(messages[1].kind,"retained-python-sysconfig-source-diagnostic");
-    const after=await handle.stat({bigint:true});
-    for(const key of ["dev","ino","mode","nlink","size","mtimeNs","ctimeNs"])
-      assert.equal(after[key],original[key]);
-  } finally {await handle.close();}
-  const wrong=path.join(path.dirname(root),"wrong-python-image");
-  await writeFile(wrong,"not an ELF or shebang image\n",{flag:"wx",mode:0o555});
-  const bad=await open(wrong,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
+    const original = await handle.stat({ bigint: true });
+    const identity = retained.files.find((row) => row.path === "python/bin/python3");
+    assert.equal(original.nlink, 1n);
+    assert.equal(Number(original.mode & 0o7777n), 0o555);
+    assert.equal(sha(await handle.readFile()), identity.sha256);
+    const result = await runFdFixture(root, handle.fd, "positive");
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.signal, null);
+    const messages = result.stderr
+      .trim()
+      .split("\n")
+      .map((row) => JSON.parse(row));
+    assert.equal(messages.length, 2);
+    const descriptor = messages[0];
+    assert.equal(descriptor.kind, "python-fd-exec-descriptor");
+    assert.equal(descriptor.fd, 5);
+    assert.equal(descriptor.cloexec, true);
+    assert.equal(descriptor.dev, String(original.dev));
+    assert.equal(descriptor.ino, String(original.ino));
+    assert.equal(descriptor.mode, 0o555);
+    assert.equal(descriptor.size, Number(original.size));
+    assert.equal(descriptor.home, os.userInfo().homedir);
+    const observation = JSON.parse(result.stdout);
+    compareFdProbe(observation, record, root);
+    evidence.originalInterpreter = identity;
+    evidence.descriptor = descriptor;
+    evidence.probe = observation;
+    evidence.sysconfig = messages[1];
+    assert.equal(messages[1].kind, "retained-python-sysconfig-source-diagnostic");
+    const after = await handle.stat({ bigint: true });
+    for (const key of ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"])
+      assert.equal(after[key], original[key]);
+  } finally {
+    await handle.close();
+  }
+  const wrong = path.join(path.dirname(root), "wrong-python-image");
+  await writeFile(wrong, "not an ELF or shebang image\n", { flag: "wx", mode: 0o555 });
+  const bad = await open(wrong, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const result=await runFdFixture(root,bad.fd,"wrong");
-    assert.equal(result.code,126);assert.equal(result.signal,null);assert.equal(result.stdout,"");
-    const error=JSON.parse(result.stderr.trim().split("\n").at(-1));
-    assert.equal(error.phase,"execveat");assert.equal(error.errno,8);
-    evidence.controls.push({kind:"wrong-fd-no-path-fallback",...result});
-  } finally {await bad.close();}
-  const closed=await runFdFixture(root,undefined,"closed");
-  assert.equal(closed.code,126);assert.equal(closed.signal,null);assert.equal(closed.stdout,"");
-  const error=JSON.parse(closed.stderr.trim());
-  assert.equal(error.phase,"cloexec");assert.equal(error.errno,9);
-  evidence.controls.push({kind:"closed-fd-no-path-fallback",...closed});
-  const raw=JSON.stringify(evidence)+"\n";
-  assert.ok(Buffer.byteLength(raw)<=131072);
-  await writeFile(path.join(process.env.RUNNER_TEMP,"qualified-python-fd-exec-evidence.json"),raw,{flag:"wx",mode:0o444});
-  await assertRetainedQualifiedPython(root,retained.record);
+    const result = await runFdFixture(root, bad.fd, "wrong");
+    assert.equal(result.code, 126);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout, "");
+    const error = JSON.parse(result.stderr.trim().split("\n").at(-1));
+    assert.equal(error.phase, "execveat");
+    assert.equal(error.errno, 8);
+    evidence.controls.push({ kind: "wrong-fd-no-path-fallback", ...result });
+  } finally {
+    await bad.close();
+  }
+  const closed = await runFdFixture(root, undefined, "closed");
+  assert.equal(closed.code, 126);
+  assert.equal(closed.signal, null);
+  assert.equal(closed.stdout, "");
+  const error = JSON.parse(closed.stderr.trim());
+  assert.equal(error.phase, "cloexec");
+  assert.equal(error.errno, 9);
+  evidence.controls.push({ kind: "closed-fd-no-path-fallback", ...closed });
+  const raw = JSON.stringify(evidence) + "\n";
+  assert.ok(Buffer.byteLength(raw) <= 131072);
+  await writeFile(
+    path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec-evidence.json"),
+    raw,
+    { flag: "wx", mode: 0o444 },
+  );
+  await assertRetainedQualifiedPython(root, retained.record);
 }
 async function unlinkIfPresent(file) {
   try {
@@ -547,9 +622,12 @@ test(
         /fixed record/,
       );
     });
-    await t.test("actual original retained interpreter FD5 execveat and refusal controls",async()=>{
-      await fdExecEvidence(root,retained,record);
-    });
+    await t.test(
+      "actual original retained interpreter FD5 execveat and refusal controls",
+      async () => {
+        await fdExecEvidence(root, retained, record);
+      },
+    );
     await t.test(
       "standalone actual TAR+ZIP budgets, not combined producer acceptance",
       async () => {

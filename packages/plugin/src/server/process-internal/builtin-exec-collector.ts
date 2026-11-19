@@ -98,7 +98,7 @@ function readInnerExecFailure(
     if (
       !Number.isSafeInteger(failure.errno) ||
       failure.errno <= 0 ||
-      (failure.syscall !== "execveat" && failure.syscall !== "execvp")
+      (failure.syscall !== "fork" && failure.syscall !== "execveat" && failure.syscall !== "execvp")
     )
       throw new Error("Invalid private builtin exec failure");
     const errno = -failure.errno;

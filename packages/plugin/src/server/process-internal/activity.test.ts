@@ -361,7 +361,7 @@ it("preserves the original command after postlaunch observation failure while ho
 });
 
 it("distinguishes definite inner exec errno from actual carrier exit 126 at close", async () => {
-  for (const errno of [null, 2]) {
+  for (const errno of [null, 2, 11]) {
     let closed = false;
     let reads = 0;
     let callbacks = 0;
@@ -378,7 +378,7 @@ it("distinguishes definite inner exec errno from actual carrier exit 126 at clos
           readExecFailure() {
             expect(closed).toBe(true);
             reads++;
-            return errno === null ? null : { errno, syscall: "execveat" };
+            return errno === null ? null : { errno, syscall: errno === 11 ? "fork" : "execveat" };
           },
         },
         { kind: "execFile", command: "git", args: ["query"], options: {} },
@@ -394,8 +394,8 @@ it("distinguishes definite inner exec errno from actual carrier exit 126 at clos
       errno === null
         ? { code: 126 }
         : {
-            code: "ENOENT",
-            errno: -2,
+            code: errno === 11 ? "EAGAIN" : "ENOENT",
+            errno: -errno,
             syscall: "spawn git",
             path: "git",
             spawnargs: ["query"],

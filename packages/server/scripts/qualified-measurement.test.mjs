@@ -328,11 +328,15 @@ test("finite Git startup projects only the declared original closed environment"
 test("counterfeit continuation data and SDK roots never mint an owner continuation", async () => {
   const {
     captureQualifiedBuiltinContinuation,
+    activateQualifiedBuiltinContinuation,
+    assertQualifiedBuiltinContinuationIdentity,
     readQualifiedBuiltinContinuation,
     finishQualifiedBuiltinContinuation,
     isQualifiedDaemonOwner,
   } = await import("../dist/server/server/execution/daemon-owner.js");
   const token = { settled: Promise.resolve() };
+  await assert.rejects(() => activateQualifiedBuiltinContinuation(token));
+  assert.throws(() => assertQualifiedBuiltinContinuationIdentity(token));
   assert.throws(() => readQualifiedBuiltinContinuation(token));
   await assert.rejects(() => finishQualifiedBuiltinContinuation(token));
   assert.throws(() =>

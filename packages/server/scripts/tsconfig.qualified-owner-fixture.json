@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.server.json",
+  "compilerOptions": { "rootDir": "..", "noEmit": true },
+  "include": ["qualified-owner-composition-probe.ts", "../src/executable-resolution/which.d.ts"]
+}

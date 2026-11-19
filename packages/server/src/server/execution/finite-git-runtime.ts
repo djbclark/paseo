@@ -1,3 +1,4 @@
+import { publishBuiltinGitPhase } from "./builtin-git-observation.js";
 import {
   observeOriginalGitSelection,
   assertOriginalGitSelection,
@@ -28,6 +29,8 @@ import {
   readQualifiedBuiltinContext,
   getQualifiedDaemonObservation,
   captureQualifiedBuiltinContinuation,
+  activateQualifiedBuiltinContinuation,
+  assertQualifiedBuiltinContinuationIdentity,
   readQualifiedBuiltinContinuation,
   invalidateQualifiedBuiltinContinuation,
   finishQualifiedBuiltinContinuation,
@@ -204,18 +207,6 @@ export async function refreshPreparedQualifiedBuiltinGit(
     throw error;
   }
 }
-function assertCurrent(prepared: Prepared, request: PluginHelperAdmissionRequest): void {
-  if (!prepared.valid) return fail();
-  prepared.owner.assertFresh();
-  const context = readQualifiedBuiltinHelperContext(prepared.instance, prepared.owner);
-  if (
-    context.activityOwner !== request.activityOwner ||
-    !request.root ||
-    context.profile?.finiteGit?.recipeSha256 !== prepared.profile.recipeSha256
-  )
-    return fail();
-  context.activityOwner.assertLiveRoot(request.root);
-}
 function requestFits(
   prepared: Prepared,
   request: PluginHelperAdmissionRequest,
@@ -324,8 +315,7 @@ export function qualifiedBuiltinGitPermit(
 ): QualifiedGitPermit | null {
   const prepared = preparations.get(instance);
   if (!prepared || prepared.owner !== owner || !prepared.valid) return null;
-  const original = readQualifiedBuiltinHelperContext(instance, owner);
-  if (!original.profile?.finiteGit) return null;
+  const original = { activityOwner: prepared.activityOwner };
   let operation: "ls-files" | "check-ignore" | null;
   try {
     operation = requestFits(prepared, request);
@@ -333,22 +323,21 @@ export function qualifiedBuiltinGitPermit(
     return null;
   }
   if (!operation) return null;
+  let continuation: ReturnType<typeof captureQualifiedBuiltinContinuation>;
   try {
-    assertCurrent(prepared, request);
+    continuation = captureQualifiedBuiltinContinuation(owner, instance, request);
   } catch {
     prepared.valid = false;
     try {
       original.activityOwner.markUnknown();
     } catch {
-      /* Original work must continue. */
+      /* Preserve original work. */
     }
     return null;
   }
-  const continuation = captureQualifiedBuiltinContinuation(owner, instance, request);
   function assertAdmittedCurrent(): void {
     if (!prepared!.valid) return fail();
-    const context = readQualifiedBuiltinContinuation(continuation);
-    if (context.authorityIdentity !== prepared!.authorityIdentity) return fail();
+    assertQualifiedBuiltinContinuationIdentity(continuation, prepared!.authorityIdentity);
   }
   const nonce = randomBytes(32).toString("hex");
   let started = false,
@@ -455,6 +444,8 @@ export function qualifiedBuiltinGitPermit(
         ])
     )
       return fail();
+    await activateQualifiedBuiltinContinuation(continuation);
+    await publishBuiltinGitPhase(instance, "preflight");
     const context = readQualifiedBuiltinContinuation(continuation);
     const mapped = await verifySystemMappings(owner.root, context.manifest, pid);
     const system = context.systemObservation;
@@ -489,6 +480,7 @@ export function qualifiedBuiltinGitPermit(
       exited
     )
       return fail();
+    await publishBuiltinGitPhase(instance, "ready");
     const context = readQualifiedBuiltinContinuation(continuation);
     const mapped = await verifySystemMappings(owner.root, context.manifest, pid);
     await verifySystemMappings(owner.root, context.manifest, child.pid);
@@ -633,6 +625,7 @@ export function qualifiedBuiltinGitPermit(
       unknown();
       return;
     }
+    await publishBuiltinGitPhase(instance, "settlement");
     await refreshPreparedQualifiedBuiltinGit(instance, owner);
     assertAdmittedCurrent();
     await finishQualifiedBuiltinContinuation(continuation);
@@ -681,7 +674,7 @@ export function qualifiedBuiltinGitPermit(
           )
             return fail();
           if (requestFits(prepared!, snapshot) !== operation) return fail();
-          assertAdmittedCurrent();
+          assertQualifiedBuiltinContinuationIdentity(continuation);
         } catch {
           unknown();
           child = spawn(request.operation.command, args, {

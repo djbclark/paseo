@@ -142,14 +142,16 @@ export function readQualifiedBuiltinHelperContext(instance: unknown, owner: unkn
     profile: enrolledProfile(record),
   };
 }
-/** Captured only at fresh admission; never a general pending-owner reader. */
+/** Original live-root witness only; the producer separately activates a fresh scope. */
 export function captureBuiltinContinuationWitness(
   instance: object,
   owner: QualifiedDaemonOwner,
   activityOwner: PluginHelperAdmissionRequest["activityOwner"],
   root: object,
 ) {
-  const record = actualRecord(instance, owner);
+  const record = instances.get(instance);
+  if (!record || record.owner !== owner || record.closed)
+    throw new Error("Builtin continuation original instance unavailable");
   if (!activityOwner || record.execution.activityOwner !== activityOwner)
     throw new Error("Builtin continuation activity substitution");
   activityOwner.assertLiveRoot(root);
@@ -377,7 +379,9 @@ export async function refreshBuiltinInstances(owner: object): Promise<void> {
   for (const record of records) {
     await refreshPreparedQualifiedBuiltinGit(record.child, record.owner);
     for (const [child, helper] of record.helpers) {
-      await helper.observed;
+      // Pending observations own an actual SDK activity reference. They cannot
+      // be quiet; waiting here would make fresh admission/observation await itself.
+      // Lifetime settlement remains the descriptor's real close/descendant proof.
       if (helper.leaderClosed || !child.pid || !helper.observation) continue;
       const actual = await observeLinuxProcess(child.pid).catch(() => null);
       if (

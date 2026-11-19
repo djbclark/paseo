@@ -46,19 +46,25 @@ const observations = new WeakMap<object, () => QualifiedDaemonObservation>();
 export interface QualifiedBuiltinContinuation {
   readonly settled: Promise<void>;
 }
-type ContinuationContext = {
+interface ContinuationContext {
   manifest: DaemonManifest;
   profiles: QualifiedBuiltinProfile[] | null;
   authorityIdentity: string;
   systemObservation: Awaited<ReturnType<typeof verifyEnclosingProcess>>["systemObservation"];
-};
+}
 const continuationFactories = new WeakMap<
   object,
   (instance: object, request: PluginHelperAdmissionRequest) => QualifiedBuiltinContinuation
 >();
 const continuations = new WeakMap<
   object,
-  { read(): ContinuationContext; invalidate(): void; finish(): Promise<void> }
+  {
+    read(): ContinuationContext;
+    activate(): Promise<void>;
+    assertIdentity(expectedAuthority?: string): void;
+    invalidate(): void;
+    finish(): Promise<void>;
+  }
 >();
 /** Producer-internal; neither this token nor its context is an owner/capability. */
 export function captureQualifiedBuiltinContinuation(
@@ -69,6 +75,21 @@ export function captureQualifiedBuiltinContinuation(
   const capture = continuationFactories.get(owner);
   if (!capture) return unsupported();
   return capture(instance, request);
+}
+export async function activateQualifiedBuiltinContinuation(
+  token: QualifiedBuiltinContinuation,
+): Promise<void> {
+  const entry = continuations.get(token);
+  if (!entry) return unsupported();
+  await entry.activate();
+}
+export function assertQualifiedBuiltinContinuationIdentity(
+  token: QualifiedBuiltinContinuation,
+  expectedAuthority?: string,
+): void {
+  const entry = continuations.get(token);
+  if (!entry) return unsupported();
+  entry.assertIdentity(expectedAuthority);
 }
 export function readQualifiedBuiltinContinuation(
   token: QualifiedBuiltinContinuation,
@@ -702,52 +723,93 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       authorityIdentity: builtinAuthorityIdentity,
     });
   });
+  const admittedRoots = new WeakMap<
+    object,
+    {
+      instance: object;
+      activityOwner: PluginHelperAdmissionRequest["activityOwner"];
+      context: ContinuationContext;
+    }
+  >();
   continuationFactories.set(owner, (originalInstance, request) => {
-    assertFresh();
-    if (!request.root) return unsupported();
+    if (failed || !request.root) return unsupported();
     const witness = captureBuiltinContinuationWitness(
       originalInstance,
       owner,
       request.activityOwner,
       request.root,
     );
-    const context: ContinuationContext = structuredClone({
-      manifest: initial.manifest,
-      profiles: builtinProfiles,
-      authorityIdentity: builtinAuthorityIdentity,
-      systemObservation: initial.systemObservation,
-    });
+    const root = request.root;
+    const prior = admittedRoots.get(root);
+    if (
+      prior &&
+      (prior.instance !== originalInstance || prior.activityOwner !== request.activityOwner)
+    )
+      return unsupported();
+    let context: ContinuationContext | null = prior?.context ?? null;
     let invalid = false;
     let resolve!: () => void;
     const settled = new Promise<void>((done) => {
       resolve = done;
     });
     const token = Object.freeze({ settled });
-    function assertAdmitted(): void {
+    function assertIdentity(expectedAuthority?: string): void {
       if (invalid || failed) return unsupported();
       for (const [key, namespace] of namespaces)
         if (qualifiedBindings[key] !== namespace) return unsupported();
       witness.assertOriginal();
+      if (
+        expectedAuthority !== undefined &&
+        (!context || context.authorityIdentity !== expectedAuthority)
+      )
+        return unsupported();
     }
+    function admitFreshRoot(): void {
+      assertFresh();
+      assertIdentity();
+      context = Object.freeze({
+        manifest: initial.manifest,
+        profiles: builtinProfiles,
+        authorityIdentity: builtinAuthorityIdentity,
+        systemObservation: initial.systemObservation,
+      });
+      admittedRoots.set(root, {
+        instance: originalInstance,
+        activityOwner: request.activityOwner,
+        context,
+      });
+    }
+    // A new root never receives a usable observation context while pending.
+    // Already admitted SAME-root helper continuations keep their original scope.
+    if (!context && fresh && !pending) admitFreshRoot();
     continuations.set(token, {
+      assertIdentity,
+      async activate() {
+        assertIdentity();
+        while (!context) {
+          await refresh();
+          if (pending) continue;
+          admitFreshRoot();
+        }
+      },
       read() {
-        assertAdmitted();
+        assertIdentity();
+        if (!context) return unsupported();
         return structuredClone(context);
       },
       invalidate() {
         invalid = true;
       },
       async finish() {
-        // The helper's observed promise is already published before this phase.
-        // Refresh never awaits settled, so this cannot await its own completion.
         for (;;) {
-          assertAdmitted();
+          assertIdentity();
+          if (!context) return unsupported();
           await refresh();
           const epoch = proofEpoch;
           await witness.refreshCurrent();
           if (pending || proofEpoch !== epoch) continue;
           assertFresh();
-          assertAdmitted();
+          assertIdentity();
           resolve();
           return;
         }

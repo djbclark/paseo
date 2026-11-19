@@ -18,7 +18,7 @@ function inputName(file) {
     throw new Error("Input outside finite source tree");
   return relative.split(path.sep).join("/");
 }
-function inputMetafile(meta, output) {
+export function inputMetafile(meta, output) {
   const inputs = Object.fromEntries(
     Object.entries(meta.inputs).map(([name, value]) => [
       inputName(name),
@@ -46,9 +46,22 @@ function inputMetafile(meta, output) {
   return { inputs, outputs };
 }
 const require = createRequire(import.meta.url);
-const externals = ["node-pty", "sherpa-onnx-node", "esbuild", "typescript"];
-const banner =
+export const externals = ["node-pty", "sherpa-onnx-node", "esbuild", "typescript"];
+export const banner =
   'import {createRequire as __qualifiedRequire} from "node:module"; import {fileURLToPath as __qualifiedFile} from "node:url"; import {dirname as __qualifiedDirname} from "node:path"; const require=__qualifiedRequire(import.meta.url); const __filename=__qualifiedFile(import.meta.url); const __dirname=__qualifiedDirname(__filename);';
+export const qualifiedOptionalNativePlugin = {
+  name: "qualified-no-optional-native-accelerators",
+  setup(builder) {
+    builder.onResolve({ filter: /^(bufferutil|utf-8-validate)$/ }, (args) => ({
+      path: args.path,
+      namespace: "qualified-disabled",
+    }));
+    builder.onLoad({ filter: /.*/, namespace: "qualified-disabled" }, () => ({
+      contents: 'throw new Error("Optional native accelerator disabled");',
+      loader: "js",
+    }));
+  },
+};
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   if (
     !distributionBuildId ||
@@ -97,21 +110,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
         ...define,
       },
-      plugins: [
-        {
-          name: "qualified-no-optional-native-accelerators",
-          setup(builder) {
-            builder.onResolve({ filter: /^(bufferutil|utf-8-validate)$/ }, (args) => ({
-              path: args.path,
-              namespace: "qualified-disabled",
-            }));
-            builder.onLoad({ filter: /.*/, namespace: "qualified-disabled" }, () => ({
-              contents: 'throw new Error("Optional native accelerator disabled");',
-              loader: "js",
-            }));
-          },
-        },
-      ],
+      plugins: [qualifiedOptionalNativePlugin],
       logLevel: "warning",
     });
     for (const emitted of Object.values(result.metafile.outputs))

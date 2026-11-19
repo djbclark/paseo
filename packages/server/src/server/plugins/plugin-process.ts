@@ -1,5 +1,6 @@
 import {
   capturePluginActivityOrigin,
+  snapshotPluginActivityData,
   PluginActivityOwner,
   type PluginActivityLease,
 } from "@getpaseo/plugin/internal/activity";
@@ -74,12 +75,35 @@ async function validateSourceDirectory(directory: string): Promise<string> {
 
 class HostInitializationRejection extends Error {}
 
+type ImmutableInitialization<Value> = Value extends object
+  ? { readonly [Key in keyof Value]: ImmutableInitialization<Value[Key]> }
+  : Value;
+
+export interface PluginWorker {
+  shutdown(): Promise<void>;
+  readonly activityOwner: PluginActivityOwner;
+}
+
+/** Original host objects and immutable DATA; this context is not qualification authority. */
+export interface PluginWorkerInitializationContext {
+  readonly workerIdentity: PluginWorker;
+  readonly activityOwner: PluginActivityOwner;
+  readonly initialize: ImmutableInitialization<
+    Extract<PluginProcessRequest, { type: "initialize" }>
+  >;
+}
+
+export type PluginContributionLoader = (
+  source: string,
+  context: PluginWorkerInitializationContext,
+) => PluginServerContribution | Promise<PluginServerContribution>;
+
 export function createPluginWorker(
   options: { channel: PluginWorkerChannel } & (
     | { contribute: PluginServerContribution }
-    | { loadContribution: (source: string) => PluginServerContribution }
+    | { loadContribution: PluginContributionLoader }
   ),
-): { shutdown(): Promise<void>; readonly activityOwner: PluginActivityOwner } {
+): PluginWorker {
   const { channel } = options;
   const activity = new PluginActivityOwner(() =>
     send({ type: "execution.unknown", instanceId: hostInstanceId }),
@@ -418,7 +442,14 @@ export function createPluginWorker(
     },
   });
 
-  async function initialize(message: Extract<PluginProcessRequest, { type: "initialize" }>) {
+  async function initialize(request: Extract<PluginProcessRequest, { type: "initialize" }>) {
+    // Capture before realpath/connect/loader awaits. Only the host loader sees these references.
+    const message = snapshotPluginActivityData(request);
+    const initializationContext: PluginWorkerInitializationContext = Object.freeze({
+      workerIdentity: worker,
+      activityOwner: activity,
+      initialize: message,
+    });
     if (initializationStarted) {
       activity.markUnknown();
       throw new Error("Plugin initialization already started");
@@ -479,9 +510,15 @@ export function createPluginWorker(
         configurable: false,
         enumerable: true,
       });
-      const contribute = initializationActivity.run(() =>
-        "contribute" in options ? options.contribute : options.loadContribution(message.bundle),
+      const loading = initializationActivity.run(() =>
+        "contribute" in options
+          ? options.contribute
+          : options.loadContribution(message.bundle, initializationContext),
       );
+      // Preserve the synchronous path; asynchronous host preparation keeps the SAME init root.
+      const contribute = typeof loading === "function" ? loading : await loading;
+      if (stopping || activity.state() === "unknown")
+        throw new Error("Plugin initialization is unavailable");
       registrationPhase = true;
       const contributedCleanup = initializationActivity.run(() => contribute(context));
       registrationPhase = false;
@@ -815,21 +852,21 @@ export function createPluginWorker(
         return;
     }
   }
+  const worker: PluginWorker = Object.freeze({ shutdown, activityOwner: activity });
   channel.onMessage(handleMessage);
-
-  return Object.freeze({ shutdown, activityOwner: activity });
+  return worker;
 }
 
 /** Producer entry supplies its fixed evaluator after private host validation and helper admission. */
 export function attachPluginWorkerChannel(
   channel: PluginWorkerChannel,
-  loadContribution: (source: string) => PluginServerContribution,
-): ReturnType<typeof createPluginWorker> {
+  loadContribution: PluginContributionLoader,
+): PluginWorker {
   return createPluginWorker({
     channel,
-    loadContribution: (source) => {
+    loadContribution: (source, context) => {
       initializeEnvironmentProxy();
-      return loadContribution(source);
+      return loadContribution(source, context);
     },
   });
 }

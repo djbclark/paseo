@@ -101,8 +101,12 @@ ACK. A restored reservation stays held; startup cannot END it. Ordinary source/d
 launches cannot create this initialization scope.
 
 The producer imports `attachPluginWorkerChannel(channel, loadContribution)` only
-after its private execution validation. Contribution loading runs inside the
-already-created initialization activity owner. Its build defines
+after its private execution validation. The host loader may prepare asynchronously inside the
+original initialization activity. Only that loader receives the immutable original initialize
+snapshot and original worker/activity references; those identify the invocation and grant no
+execution permission. Contributions still register synchronously and return cleanup immediately.
+Selected directory helper initialization remains unavailable until its genuine producer realm,
+module table and backend are integrated; loader API presence does not enable it. The build defines
 `__PASEO_QUALIFIED_PLUGIN_ENTRY__` to suppress legacy direct-entry auto-wiring;
 this literal supplies no execution authority. The internal SDK's one-shot
 `installQualifiedHelperAdmission` hook receives the current private activity root

@@ -1,3 +1,8 @@
+import {
+  attachPluginWorkerChannel,
+  type PluginContributionLoader,
+  type PluginWorkerInitializationContext,
+} from "./plugin-process.js";
 import { spawnProcess } from "@getpaseo/plugin/server";
 import type { ChildProcess } from "node:child_process";
 import { MaintenanceReservation } from "../maintenance-reservation.js";
@@ -590,4 +595,261 @@ it("does not release the callback's actual helper lifetime when its listener and
   await closed;
   await fixture.idle();
   expect(fixture.execution.activityOwner.state()).toBe("held");
+});
+
+/** Exercises the actual exported host port; it does not create producer qualification. */
+async function hostLoaderFixture(loader: PluginContributionLoader) {
+  const directory = await realpath(await mkdtemp(nodePath.join(tmpdir(), "plugin-host-loader-")));
+  const handlers = new Set<(message: PluginProcessRequest) => void>();
+  const events: PluginProcessMessage[] = [];
+  const ready = deferred();
+  const fatal = deferred<string>();
+  const cleanup: Array<() => void> = [];
+  const dispatch = (message: PluginProcessRequest) => {
+    for (const handler of handlers) handler(message);
+  };
+  const worker = attachPluginWorkerChannel(
+    {
+      onMessage(handler) {
+        handlers.add(handler);
+        return () => handlers.delete(handler);
+      },
+      disconnect() {},
+      send(message, callback) {
+        events.push(message);
+        if (message.type === "ready") ready.resolve();
+        if (message.type === "fatal") fatal.resolve(message.error);
+        if (message.type === "paseo_frame" && typeof message.data === "string") {
+          const frame = JSON.parse(message.data);
+          if (frame.type === "hello")
+            queueMicrotask(() =>
+              dispatch({
+                type: "paseo_frame",
+                isBinary: false,
+                data: JSON.stringify({
+                  type: "session",
+                  message: {
+                    type: "status",
+                    payload: {
+                      status: "server_info",
+                      serverId: "host-loader-test",
+                      hostname: "host-loader-test",
+                      version: "0.4.0",
+                      features: {},
+                    },
+                  },
+                }),
+              }),
+            );
+        }
+        callback?.();
+      },
+    },
+    loader,
+  );
+  const initialize: Extract<PluginProcessRequest, { type: "initialize" }> = {
+    type: "initialize",
+    pluginId: "original-loader",
+    pluginDirectory: directory,
+    bundle: "original-loader-bytes",
+    appVersion: "0.4.0",
+    hostInstanceId: "original-host-instance",
+    passiveInitialization: {
+      contract: "native-passive-contract-1",
+      hold: {
+        generation: 4,
+        transactionId: "inherited-loader-hold",
+        instanceId: "original-host-instance",
+      },
+    },
+  };
+  onTestFinished(async () => {
+    for (const release of cleanup) release();
+    if (worker.activityOwner.state() !== "unknown") await worker.shutdown();
+    await rm(directory, { recursive: true, force: true });
+  });
+  return {
+    worker,
+    events,
+    initialize,
+    dispatch,
+    ready: ready.promise,
+    fatal: fatal.promise,
+    cleanup,
+  };
+}
+
+it("passes only original frozen worker/activity and immutable initialization to the awaited host loader", async () => {
+  const loading = deferred<PluginWorkerInitializationContext>();
+  const permitLoad = deferred();
+  const contributionCalled = deferred();
+  const drain = deferred();
+  let continuation:
+    | ReturnType<PluginWorkerInitializationContext["activityOwner"]["retainCurrent"]>
+    | undefined;
+  const host = await hostLoaderFixture(async (source, context) => {
+    loading.resolve(context);
+    await permitLoad.promise;
+    expect(source).toBe("original-loader-bytes");
+    expect(context.initialize.pluginId).toBe("original-loader");
+    expect(context.initialize.passiveInitialization?.hold?.generation).toBe(4);
+    // This continuation still runs on the ORIGINAL no-helper initialization root after await.
+    expect(() => spawnProcess(process.execPath, ["-e", "process.exit(0)"])).toThrow(
+      "initialization",
+    );
+    continuation = context.activityOwner.retainCurrent();
+    void continuation.run(async () => {
+      try {
+        await drain.promise;
+      } finally {
+        continuation?.release();
+      }
+    });
+    return () => {
+      contributionCalled.resolve();
+      return () => {};
+    };
+  });
+  host.cleanup.push(() => {
+    permitLoad.resolve();
+    drain.resolve();
+  });
+  host.dispatch(host.initialize);
+  const context = await loading.promise;
+  expect(context.workerIdentity).toBe(host.worker);
+  expect(context.activityOwner).toBe(host.worker.activityOwner);
+  expect(Object.isFrozen(host.worker)).toBe(true);
+  expect(Object.isFrozen(context)).toBe(true);
+  expect(Object.isFrozen(context.initialize)).toBe(true);
+  expect(Object.isFrozen(context.initialize.passiveInitialization?.hold)).toBe(true);
+  expect(context.initialize).not.toBe(host.initialize);
+  expect(Reflect.set(context.initialize, "pluginId", "candidate-data")).toBe(false);
+  if (host.initialize.passiveInitialization?.hold)
+    host.initialize.passiveInitialization.hold.generation = 99;
+  host.initialize.bundle = "changed-after-dispatch";
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+  expect(host.worker.activityOwner.state()).toBe("known-busy");
+  permitLoad.resolve();
+  await contributionCalled.promise;
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+  expect(host.worker.activityOwner.state()).toBe("known-busy");
+  drain.resolve();
+  await host.ready;
+  expect(host.worker.activityOwner.state()).toBe("held");
+});
+
+it("refuses missing host preparation before contribution without raw evaluator fallback", async () => {
+  const refused = deferred();
+  const permitRefusal = deferred();
+  const host = await hostLoaderFixture(async () => {
+    refused.resolve();
+    await permitRefusal.promise;
+    // Simulates unavailable host preparation, not a producer permission callback.
+    throw new Error("selected backend unavailable");
+  });
+  host.cleanup.push(() => permitRefusal.resolve());
+  host.dispatch(host.initialize);
+  await refused.promise;
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+  permitRefusal.resolve();
+  expect(await host.fatal).toContain("selected backend unavailable");
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+  // No successful/known-held initialization is synthesized from a loader's mere presence.
+  expect(host.events.some((message) => message.type === "initialization.rejected")).toBe(false);
+});
+
+it("rejects unsupported directory initialization DATA before even calling the host loader", async () => {
+  let loads = 0;
+  const host = await hostLoaderFixture(() => {
+    loads++;
+    return () => () => {};
+  });
+  const unsupported = {
+    ...host.initialize,
+    directoryInitialization: {
+      contract: "ade-directory-helpers-v1",
+      activationGeneration: 1,
+    },
+  };
+  host.dispatch(unsupported);
+  expect(await host.fatal).toContain("Invalid plugin process request");
+  expect(loads).toBe(0);
+  expect(host.worker.activityOwner.state()).toBe("unknown");
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+});
+
+it("continues requiring immediate contribution cleanup after async host loading", async () => {
+  const { evaluateBundle } = await import("./bundle-evaluator.js");
+  const host = await hostLoaderFixture(async () =>
+    evaluateBundle("(require) => ({ default: async () => () => {} })"),
+  );
+  host.dispatch(host.initialize);
+  expect(await host.fatal).toContain("Plugin contribution must return a cleanup function");
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+});
+
+it("does not invoke contribution after integrity loss during an actual pending host load", async () => {
+  const loading = deferred();
+  const continueLoad = deferred();
+  let contributed = false;
+  const host = await hostLoaderFixture(async () => {
+    loading.resolve();
+    await continueLoad.promise;
+    return () => {
+      contributed = true;
+      return () => {};
+    };
+  });
+  host.cleanup.push(() => continueLoad.resolve());
+  host.dispatch(host.initialize);
+  await loading.promise;
+  host.worker.activityOwner.markUnknown();
+  continueLoad.resolve();
+  expect(await host.fatal).toContain("Plugin initialization is unavailable");
+  expect(contributed).toBe(false);
+  expect(host.worker.activityOwner.state()).toBe("unknown");
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
+});
+
+it("keeps existing one-argument synchronous host loaders compatible under passive initialization", async () => {
+  let calls = 0;
+  const host = await hostLoaderFixture((source) => {
+    expect(source).toBe("original-loader-bytes");
+    calls++;
+    return () => () => {};
+  });
+  host.dispatch(host.initialize);
+  await host.ready;
+  expect(calls).toBe(1);
+  expect(host.worker.activityOwner.state()).toBe("held");
+});
+
+it("keeps actual shutdown waiting for a pending host loader without evaluating its late contribution", async () => {
+  const loading = deferred();
+  const finishLoad = deferred();
+  let contributed = false;
+  const host = await hostLoaderFixture(async () => {
+    loading.resolve();
+    await finishLoad.promise;
+    return () => {
+      contributed = true;
+      return () => {};
+    };
+  });
+  host.cleanup.push(() => finishLoad.resolve());
+  host.dispatch(host.initialize);
+  await loading.promise;
+  let stopped = false;
+  const stop = host.worker.shutdown().then(() => {
+    stopped = true;
+    return undefined;
+  });
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  expect(host.worker.activityOwner.state()).toBe("known-busy");
+  finishLoad.resolve();
+  expect(await host.fatal).toContain("Plugin initialization is unavailable");
+  await stop;
+  expect(contributed).toBe(false);
+  expect(host.events.some((message) => message.type === "ready")).toBe(false);
 });

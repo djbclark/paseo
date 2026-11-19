@@ -1,8 +1,11 @@
 import type { PluginActivityOwner } from "@getpaseo/plugin/internal/activity";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import type { PluginServerContribution } from "@getpaseo/plugin/server";
-import { createPluginWorker, type PluginWorkerChannel } from "./plugin-process.js";
+import {
+  createPluginWorker,
+  type PluginWorkerChannel,
+  type PluginContributionLoader,
+} from "./plugin-process.js";
 import type { PluginProcessMessage, PluginProcessRequest } from "./plugin-process-protocol.js";
 
 export class InternalPluginChild extends EventEmitter {
@@ -14,7 +17,7 @@ export class InternalPluginChild extends EventEmitter {
   private readonly workerMessages = new Set<(message: PluginProcessRequest) => void>();
   private closing: Promise<void> | null = null;
 
-  constructor(loadContribution: (source: string) => PluginServerContribution) {
+  constructor(loadContribution: PluginContributionLoader) {
     super();
     const channel: PluginWorkerChannel = {
       send: (message: PluginProcessMessage, callback?: () => void) => {

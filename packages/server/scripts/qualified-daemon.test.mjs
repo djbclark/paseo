@@ -129,6 +129,117 @@ async function exists(file) {
   }
 }
 test(
+  "retained OpenCode bridge uses original built bytes at flattened loader paths",
+  { skip: !enabled },
+  async () => {
+    const root = process.env.QUALIFIED_DAEMON_ROOT;
+    assert.ok(root && path.isAbsolute(root));
+    const { pathToFileURL, fileURLToPath } = await import("node:url");
+    const { loadOpenCodeBridgePluginArtifact } =
+      await import("../dist/server/server/agent/providers/opencode/bridge.js");
+    const manifest = JSON.parse(await readFile(`${root}.manifest.json`, "utf8"));
+    const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));
+    const record = JSON.parse(
+      await readFile(path.join(root, "bridge-assets/identity.json"), "utf8"),
+    );
+    const repository = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+    let compilationAttempts = 0;
+    const noSourceCompilation = async () => {
+      compilationAttempts++;
+      throw new Error("Packaged loader must not compile bridge source");
+    };
+    const moduleUrl = pathToFileURL(path.join(root, "daemon.mjs")).href;
+    for (const [version, relative] of [
+      [1, "bridge-plugin.bundle.mjs"],
+      [2, "v2/bridge-plugin.bundle.mjs"],
+    ]) {
+      const original = await readFile(
+        path.join(
+          repository,
+          "packages/server/dist/server/server/agent/providers/opencode",
+          relative,
+        ),
+      );
+      const loaded = Buffer.from(
+        await loadOpenCodeBridgePluginArtifact(moduleUrl, noSourceCompilation, version),
+      );
+      assert.deepEqual(
+        loaded,
+        original,
+        "Real flattened loader must return unchanged original bundle",
+      );
+      const expected = manifest.files.find((row) => row.path === relative);
+      assert.ok(expected);
+      assert.equal(expected.sha256, createHash("sha256").update(loaded).digest("hex"));
+      assert.equal(expected.size, loaded.length);
+      assert.deepEqual(
+        manifest.helperInventory.find((row) => row.path === relative),
+        expected,
+      );
+      assert.equal(record.outputs.find((row) => row.path === relative).sha256, expected.sha256);
+      assert.ok(
+        inputs.metafiles[relative].outputs[relative].entryPoint.endsWith(
+          `opencode/${version === 2 ? "v2/" : ""}bridge-plugin.mjs`,
+        ),
+      );
+      for (const name of Object.keys(inputs.metafiles[relative].inputs))
+        assert.ok(
+          inputs.sourceInputs.some((row) => row.path === name),
+          `Missing actual module input ${name}`,
+        );
+    }
+    const state = await readFile(path.join(root, "v2/state.mjs"));
+    assert.deepEqual(
+      state,
+      await readFile(
+        path.join(repository, "packages/server/src/server/agent/providers/opencode/v2/state.mjs"),
+      ),
+    );
+    assert.deepEqual(
+      state,
+      await readFile(
+        path.join(
+          repository,
+          "packages/server/dist/server/server/agent/providers/opencode/v2/state.mjs",
+        ),
+      ),
+    );
+    assert.ok(
+      manifest.helperInventory.some(
+        (row) =>
+          row.path === "v2/state.mjs" &&
+          row.sha256 === createHash("sha256").update(state).digest("hex"),
+      ),
+    );
+    assert.ok(
+      inputs.sourceInputs.some(
+        (row) => row.path === "packages/server/scripts/build-opencode-bridge-plugin.mjs",
+      ),
+    );
+    assert.ok(
+      inputs.sourceInputs.some(
+        (row) => row.path === "packages/server/src/server/agent/providers/opencode/v2/state.mjs",
+      ),
+    );
+    const missing = mkdtempSync(path.join(tmpdir(), "missing-retained-bridge-"));
+    try {
+      for (const version of [1, 2])
+        await assert.rejects(
+          () =>
+            loadOpenCodeBridgePluginArtifact(
+              pathToFileURL(path.join(missing, "daemon.mjs")).href,
+              noSourceCompilation,
+              version,
+            ),
+          /artifact is missing/,
+        );
+    } finally {
+      rmSync(missing, { recursive: true, force: true });
+    }
+    assert.equal(compilationAttempts, 0, "No packaged source-build or alternate asset fallback");
+  },
+);
+test(
   "actual owner refresh overlaps SAME SDK root and original worktree Git hook",
   { skip: !enabled || !process.env.QUALIFIED_OWNER_FIXTURE_ROOT },
   async () => {

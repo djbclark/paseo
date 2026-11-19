@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { retainSystemClosure } from "./retain-system-closure.mjs";
+import { assertRetainedOpenCodeBridge } from "./retain-qualified-opencode-bridge.mjs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import builtinBindingsRecipe from "../src/server/execution/builtin-bindings-recipe.json" with { type: "json" };
@@ -74,11 +75,15 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     if (a.path > b.path) return 1;
     return 0;
   });
+  await assertRetainedOpenCodeBridge(root, inputs, files);
   const helperInventory = [
     ...files.filter(
       (file) =>
         file.path.startsWith("system-closure/") ||
         file.path.startsWith("native-provenance/") ||
+        file.path.startsWith("bridge-assets/") ||
+        /^(?:v2\/)?bridge-plugin\.bundle\.mjs$/.test(file.path) ||
+        file.path === "v2/state.mjs" ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||

@@ -89,6 +89,8 @@ async function main() {
   const scripts = {};
   for (const name of [
     "build-qualified-daemon.mjs",
+    "build-opencode-bridge-plugin.mjs",
+    "retain-qualified-opencode-bridge.mjs",
     "build-qualified-git.mjs",
     "qualified-git.test.mjs",
     "qualified-builtin-sources.mjs",

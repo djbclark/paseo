@@ -8,6 +8,7 @@ import { adaptQualifiedSherpa } from "./adapt-qualified-sherpa.mjs";
 import { buildQualifiedGit } from "./build-qualified-git.mjs";
 import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
 import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
+import { retainQualifiedOpenCodeBridge } from "./retain-qualified-opencode-bridge.mjs";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = path.resolve(packageRoot, "../..");
 const digest = (data) => createHash("sha256").update(data).digest("hex");
@@ -195,10 +196,15 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     inputMetafile,
   );
   const finiteGit = await buildQualifiedGit(outDir);
+  // Flattened bridge.ts resolves import.meta.url beside daemon.mjs. Preserve
+  // both original bridge outputs and v2's separate dynamic state module there.
+  const bridge = await retainQualifiedOpenCodeBridge(repositoryRoot, outDir, inputMetafile);
+  Object.assign(allInputs, bridge.metafiles);
   const sourceInputs = [
     ...retainedBuiltins.sourceInputs,
     ...compiledBuiltins.sourceInputs,
     ...finiteGit.sourceInputs,
+    ...bridge.sourceInputs,
   ];
   for (const name of ["adapt-qualified-sherpa.mjs", "sherpa-elf-audit.mjs"]) {
     const file = path.join(packageRoot, "scripts", name);

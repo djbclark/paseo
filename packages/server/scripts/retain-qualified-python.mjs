@@ -197,6 +197,7 @@ async function probe(executable, script, receiveDiagnostic = () => {}) {
   console.log(JSON.stringify(diagnostic));
   require(Buffer.byteLength(result.stdout) <= 65536, "probe output");
   const value = JSON.parse(result.stdout);
+  console.log(JSON.stringify({kind:"retained-python-fixed-probe-observation",qualification:false,observation:value}));
   require(value.schemaVersion === 1 &&
     value.qualification === false &&
     value.implementation === "cpython" &&
@@ -212,10 +213,10 @@ async function probe(executable, script, receiveDiagnostic = () => {}) {
 }
 function normalizeProbe(value, root) {
   const prefix = path.join(root, "python");
-  const inside = (location) => {
+  const inside = (location, field = "path") => {
     const name = path.relative(root, location);
     require(location.startsWith(prefix + "/") ||
-      location === prefix, "host Python lookup fallback");
+      location === prefix, "host Python lookup fallback " + JSON.stringify({field,location}));
     return relative(name);
   };
   for (const key of ["prefix", "execPrefix", "basePrefix", "baseExecPrefix"])
@@ -241,7 +242,7 @@ function normalizeProbe(value, root) {
         "stdlib",
         "platstdlib",
         "extensionDirectory",
-      ].map((k) => [k, inside(value[k])]),
+      ].map((k) => [k, inside(value[k], k)]),
     ),
     path: value.path.map(inside),
     modules: value.modules.map((r) => ({
@@ -526,15 +527,22 @@ async function readSourceAlias(file, source) {
 }
 
 function sourceMappingKeys(row) {
-  return ["sourcePath", "path", "sourceMode", "mode", "size", "sha256",
-    ...(Object.hasOwn(row,"sourceLink")?["sourceLink"]:[]),
-    ...(Object.hasOwn(row,"sourceMaterialization")?["sourceMaterialization"]:[])];
+  return [
+    "sourcePath",
+    "path",
+    "sourceMode",
+    "mode",
+    "size",
+    "sha256",
+    ...(Object.hasOwn(row, "sourceLink") ? ["sourceLink"] : []),
+    ...(Object.hasOwn(row, "sourceMaterialization") ? ["sourceMaterialization"] : []),
+  ];
 }
 function sourceMappings(record, files, abi) {
   const mapped = new Set();
   let previous = "";
   for (const row of record.sourceFiles) {
-    exact(row,sourceMappingKeys(row));
+    exact(row, sourceMappingKeys(row));
     sourceAlias(record, row);
     materializationRow(record, row);
     require(typeof row.sourcePath === "string" &&
@@ -1528,9 +1536,9 @@ export async function retainQualifiedPython(root) {
     // A cross-parent directory rename needs write permission to update `..`.
     // Only the private staging root is writable during this move; acceptance and
     // execution still require the sealed tree and complete verifier below.
-    await chmod(stage,0o755);
+    await chmod(stage, 0o755);
     await rename(stage, prefix);
-    await chmod(prefix,0o555);
+    await chmod(prefix, 0o555);
     await assertRetainedQualifiedPython(root, recordFile);
     await recheckSources();
     record.observed.relocated = normalizeProbe(

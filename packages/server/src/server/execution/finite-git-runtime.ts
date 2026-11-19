@@ -257,18 +257,26 @@ function parseWireMessage(line: string, nonce: string): WireMessage {
     if (fields.length !== 4 || (phase !== "preflight" && phase !== "postexec")) return fail();
     return { kind, pid, phase };
   }
-  if (kind === "exec-error" || kind === "launch-error") {
-    const syscall = fields[3];
-    const errno = Number(fields[4]);
-    if (fields.length !== 5 || !/^[1-9][0-9]{0,3}$/.test(fields[4] ?? "") || errno > 4095)
-      return fail();
-    if (kind === "launch-error") {
-      if (syscall !== "fork") return fail();
-      return { kind, pid, syscall: "fork", errno };
-    }
-    if (syscall !== "execveat" && syscall !== "execvp") return fail();
-    return { kind, pid, syscall, errno };
+  if (kind === "exec-error" || kind === "launch-error") return parseFailureFrame(fields, kind, pid);
+  return parseTerminalFrame(fields, kind, pid);
+}
+function parseFailureFrame(
+  fields: string[],
+  kind: "exec-error" | "launch-error",
+  pid: number,
+): WireMessage {
+  const syscall = fields[3];
+  const errno = Number(fields[4]);
+  if (fields.length !== 5 || !/^[1-9][0-9]{0,3}$/.test(fields[4] ?? "") || errno > 4095)
+    return fail();
+  if (kind === "launch-error") {
+    if (syscall !== "fork") return fail();
+    return { kind, pid, syscall: "fork", errno };
   }
+  if (syscall !== "execveat" && syscall !== "execvp") return fail();
+  return { kind, pid, syscall, errno };
+}
+function parseTerminalFrame(fields: string[], kind: string | undefined, pid: number): WireMessage {
   const terminal = terminalNumbers(fields);
   if (kind === "leader") {
     if (fields.length !== 5) return fail();
@@ -473,14 +481,12 @@ export function qualifiedBuiltinGitPermit(
     pending = "",
     bytes = 0,
     count = 0;
-  function message(line: string): void {
-    if (++count > 8) return fail();
-    const value = parseWireMessage(line, nonce);
+  function failureMessage(value: WireMessage): boolean {
     if (value.kind === "unobserved") {
       if (value.pid !== child?.pid || phase < 1) return fail();
       unknown();
       endControl();
-      return;
+      return true;
     }
     if (value.kind === "launch-error" || value.kind === "exec-error") {
       const expected = value.kind === "launch-error" ? child?.pid : gitPid;
@@ -493,8 +499,11 @@ export function qualifiedBuiltinGitPermit(
       execFailure = Object.freeze({ errno: value.errno, syscall: value.syscall });
       unknown();
       endControl();
-      return;
+      return true;
     }
+    return false;
+  }
+  function prepareMessage(value: WireMessage): boolean {
     if (value.kind === "preflight") {
       if (phase !== 0 || value.pid !== child?.pid) return fail();
       phase = 1;
@@ -505,17 +514,16 @@ export function qualifiedBuiltinGitPermit(
           unknown();
           endControl();
         });
-      return;
+      return true;
     }
     if (value.kind === "spawn") {
       if (phase !== 1 || gitPid) return fail();
       phase = 2;
       gitPid = value.pid;
-      return;
+      return true;
     }
-    if (value.pid !== gitPid) return fail();
     if (value.kind === "ready") {
-      if (phase !== 2) return fail();
+      if (phase !== 2 || value.pid !== gitPid) return fail();
       phase = 3;
       clearDeadline();
       pipeline = pipeline
@@ -524,8 +532,12 @@ export function qualifiedBuiltinGitPermit(
           unknown();
           endControl();
         });
-      return;
+      return true;
     }
+    return false;
+  }
+  function terminalMessage(value: WireMessage): void {
+    if (value.pid !== gitPid) return fail();
     if (value.kind === "leader") {
       if (phase !== 2 && phase !== 3) return fail();
       phase = 4;
@@ -543,6 +555,12 @@ export function qualifiedBuiltinGitPermit(
     phase = 5;
     completion = { code: value.code, signal: value.signal, observed: value.observed };
     if (!completion.observed) unknown();
+  }
+  function message(line: string): void {
+    if (++count > 8) return fail();
+    const value = parseWireMessage(line, nonce);
+    if (failureMessage(value) || prepareMessage(value)) return;
+    terminalMessage(value);
   }
   function data(buffer: Buffer): void {
     bytes += buffer.length;

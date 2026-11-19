@@ -178,15 +178,23 @@ function sourceRecord(source) {
   require(record.source.requestedExecutable === "/usr/bin/python3" && record.source.implementation === "cpython" && record.source.platlibdir === "lib" && Array.isArray(record.source.version) && record.source.version.length === 3 && record.source.version.every((n) => Number.isSafeInteger(n) && n >= 0) && record.source.version[0] === 3, "source layout");
   const abi = record.source.version.slice(0,2).join(".");
   require(record.source.abiFlags==="" && typeof record.source.cacheTag==="string" && record.source.cacheTag.length<=128 && record.source.stdlib===`/usr/lib/python${abi}` && record.source.platstdlib===record.source.stdlib && record.source.extensionDirectory===record.source.stdlib+"/lib-dynload", "finite source ABI paths");
+  sourceExecutable(record.source);
+  packageEvidence(record.source.packageProvenance);
+  return abi;
+}
+function sourceExecutable(source) {
+  const record={source};
   const executable=record.source.executableIdentity;
   exact(executable,["path","mode","size","sha256"]);
   require(typeof record.source.resolvedExecutable==="string" && /^\/usr\/bin\/python3\.[0-9]+$/.test(record.source.resolvedExecutable) && executable.path===record.source.resolvedExecutable && Number.isInteger(executable.mode) && executable.mode>=0 && executable.mode<=0o777 && !(executable.mode&0o022) && Number.isSafeInteger(executable.size) && executable.size>0 && executable.size<=leafLimit && typeof executable.sha256==="string" && /^[a-f0-9]{64}$/.test(executable.sha256), "source executable identity");
+}
+function packageEvidence(packageProvenance) {
+  const record={source:{packageProvenance}};
   require(Array.isArray(record.source.packageProvenance) && record.source.packageProvenance.length>0 && record.source.packageProvenance.length<=32, "package evidence");
   for(const row of record.source.packageProvenance) {
     exact(row,["package","version","sourcePackage","sourceVersion"]);
     for(const v of Object.values(row)) require(typeof v==="string" && v.length>0 && v.length<=1024 && !/[\0\r\n]/.test(v), "package evidence text");
   }
-  return abi;
 }
 function retainedInventory(record,abi) {
   exact(record.layout,["executable","stdlib","extensionDirectory","argvFlags"]);
@@ -216,6 +224,7 @@ function sourceMappings(record,files,abi) {
     mapped.add(row.path);
   }
   require(files.has(probePath) && files.has("python/bin/python3") && files.has(`python/lib/python${abi}/os.py`) && files.has(`python/lib/python${abi}/encodings/__init__.py`) && mapped.size === files.size-1 && !mapped.has(probePath), "complete source coverage");
+  const executable=record.source.executableIdentity;
   const capturedInterpreter=record.sourceFiles.find((row) => row.path==="python/bin/python3");
   require(capturedInterpreter.sourceMode===executable.mode && capturedInterpreter.size===executable.size && capturedInterpreter.sha256===executable.sha256, "interpreter source/retained binding");
 }

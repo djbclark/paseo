@@ -380,7 +380,12 @@ describe("ScheduleService", () => {
       await allowRun.promise;
       return { agentId: null, output: "naturally finished" };
     });
-    const { service, schedule } = await createDrainSchedule(tempDir, agentStorage, () => now, runner);
+    const { service, schedule } = await createDrainSchedule(
+      tempDir,
+      agentStorage,
+      () => now,
+      runner,
+    );
     const originalInspect = service.inspect.bind(service);
     const inspect = vi.spyOn(service, "inspect").mockImplementationOnce(async (id) => {
       inspected.resolve();
@@ -391,7 +396,9 @@ describe("ScheduleService", () => {
     const original = service.runOnce(schedule.id);
     try {
       await inspected.promise;
-      const stopping = service.stop().then(() => { drained = true; });
+      const stopping = service.stop().then(() => {
+        drained = true;
+      });
       await expect(service.runOnce(schedule.id)).rejects.toThrow("stopped");
       await service.tick();
       expect(runner).not.toHaveBeenCalled();
@@ -423,17 +430,21 @@ describe("ScheduleService", () => {
     const { service } = await createDrainSchedule(tempDir, agentStorage, () => now, runner);
     now = new Date("2026-01-01T00:01:00.000Z");
     const originalList = ScheduleStore.prototype.list;
-    const list = vi.spyOn(ScheduleStore.prototype, "list").mockImplementationOnce(async function (this: ScheduleStore) {
-      listed.resolve();
-      await allowList.promise;
-      return originalList.call(this);
-    });
+    const list = vi
+      .spyOn(ScheduleStore.prototype, "list")
+      .mockImplementationOnce(async function (this: ScheduleStore) {
+        listed.resolve();
+        await allowList.promise;
+        return originalList.call(this);
+      });
     let restarted = false;
     const original = service.tick();
     try {
       await listed.promise;
       const stopping = service.stop();
-      const restarting = service.start().then(() => { restarted = true; });
+      const restarting = service.start().then(() => {
+        restarted = true;
+      });
       await service.tick();
       expect(restarted).toBe(false);
       expect(runner).not.toHaveBeenCalled();
@@ -455,8 +466,12 @@ describe("ScheduleService", () => {
     const listed = scheduleDrainGate();
     const allowList = scheduleDrainGate();
     const failure = new Error("original schedule store failed");
-    const { service } = await createDrainSchedule(tempDir, agentStorage, () => now,
-      async () => ({ agentId: null, output: "unused" }));
+    const { service } = await createDrainSchedule(
+      tempDir,
+      agentStorage,
+      () => now,
+      async () => ({ agentId: null, output: "unused" }),
+    );
     const list = vi.spyOn(ScheduleStore.prototype, "list").mockImplementationOnce(async () => {
       listed.resolve();
       await allowList.promise;

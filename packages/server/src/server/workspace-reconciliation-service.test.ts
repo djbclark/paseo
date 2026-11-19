@@ -167,13 +167,23 @@ function createTempGitRepo(prefix: string): string {
 
 const timestamp = "2025-01-01T00:00:00.000Z";
 
-function reconciliationDrainFixture(overrides: Partial<WorkspaceReconciliationServiceOptions> = {}) {
+function reconciliationDrainFixture(
+  overrides: Partial<WorkspaceReconciliationServiceOptions> = {},
+) {
   const registries = createTestRegistries();
   const rootPath = "/source-reconciliation-drain";
-  registries.projects.set("p1", createPersistedProjectRecord({
-    projectId: "p1", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
-    kind: "non_git", displayName: "drain", createdAt: timestamp, updatedAt: timestamp,
-  }));
+  registries.projects.set(
+    "p1",
+    createPersistedProjectRecord({
+      projectId: "p1",
+      rootPath,
+      projectKey: canonicalLocalProjectKey(rootPath),
+      kind: "non_git",
+      displayName: "drain",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }),
+  );
   const service = new WorkspaceReconciliationService({
     projectRegistry: registries.projectRegistry,
     workspaceRegistry: registries.workspaceRegistry,
@@ -188,7 +198,10 @@ function reconciliationDrainFixture(overrides: Partial<WorkspaceReconciliationSe
 function reconciliationDrainClock() {
   const intervals: Array<() => void | Promise<void>> = [];
   const clock: ReconciliationClock = {
-    setInterval: (callback) => { intervals.push(callback); return {}; },
+    setInterval: (callback) => {
+      intervals.push(callback);
+      return {};
+    },
     clearInterval: () => undefined,
     setTimeout: () => ({}),
     clearTimeout: () => undefined,
@@ -221,7 +234,9 @@ describe("WorkspaceReconciliationService", () => {
     try {
       await fixture.service.runOnce();
       await inspected.promise;
-      const closing = fixture.service.close().then(() => { closed = true; });
+      const closing = fixture.service.close().then(() => {
+        closed = true;
+      });
       await Promise.resolve();
       expect(closed).toBe(false);
       release.resolve();
@@ -249,7 +264,9 @@ describe("WorkspaceReconciliationService", () => {
     try {
       await listed.promise;
       let closed = false;
-      const closing = fixture.service.close().then(() => { closed = true; });
+      const closing = fixture.service.close().then(() => {
+        closed = true;
+      });
       await Promise.resolve();
       expect(closed).toBe(false);
       release.resolve();
@@ -274,7 +291,9 @@ describe("WorkspaceReconciliationService", () => {
       fixture.service.dispose();
       expect(closeWatch).toHaveBeenCalledTimes(1);
       let closed = false;
-      const closing = fixture.service.close().then(() => { closed = true; });
+      const closing = fixture.service.close().then(() => {
+        closed = true;
+      });
       await Promise.resolve();
       expect(closed).toBe(false);
       await expect(fixture.service.reconcileGitMetadata()).rejects.toThrow("disposed");
@@ -290,15 +309,28 @@ describe("WorkspaceReconciliationService", () => {
 
   test("async watcher close failure is observable and does not prevent other watchers closing", async () => {
     const failure = new Error("actual watcher close failed");
-    const first = vi.fn(async () => { throw failure; });
+    const first = vi.fn(async () => {
+      throw failure;
+    });
     const second = vi.fn(async () => undefined);
-    const watch = vi.fn().mockReturnValueOnce({ close: first }).mockReturnValueOnce({ close: second });
+    const watch = vi
+      .fn()
+      .mockReturnValueOnce({ close: first })
+      .mockReturnValueOnce({ close: second });
     const fixture = reconciliationDrainFixture({ watchProjectRoot: watch });
     const rootPath = fixture.rootPath + "-other";
-    fixture.projects.set("p2", createPersistedProjectRecord({
-      projectId: "p2", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
-      kind: "non_git", displayName: "other", createdAt: timestamp, updatedAt: timestamp,
-    }));
+    fixture.projects.set(
+      "p2",
+      createPersistedProjectRecord({
+        projectId: "p2",
+        rootPath,
+        projectKey: canonicalLocalProjectKey(rootPath),
+        kind: "non_git",
+        displayName: "other",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
     await fixture.service.start();
     const closing = fixture.service.close();
     await expect(closing).rejects.toMatchObject({ errors: expect.arrayContaining([failure]) });
@@ -316,13 +348,18 @@ describe("WorkspaceReconciliationService", () => {
       await release.promise;
       return createCheckout(cwd);
     });
-    const fixture = reconciliationDrainFixture({ clock: clock.clock, workspaceGitService: { getCheckout } });
+    const fixture = reconciliationDrainFixture({
+      clock: clock.clock,
+      workspaceGitService: { getCheckout },
+    });
     await fixture.service.start();
     const observing = clock.fire();
     try {
       await reading.promise;
       let closed = false;
-      const closing = fixture.service.close().then(() => { closed = true; });
+      const closing = fixture.service.close().then(() => {
+        closed = true;
+      });
       await clock.fire();
       expect(closed).toBe(false);
       expect(getCheckout).toHaveBeenCalledTimes(1);
@@ -343,29 +380,43 @@ describe("WorkspaceReconciliationService", () => {
     const allowFailure = deferred();
     const allowOther = deferred();
     const failure = new Error("original metadata read failed");
-    const fixture = reconciliationDrainFixture({ workspaceGitService: {
-      getCheckout: async (cwd) => {
-        if (cwd.endsWith("-other")) {
-          otherReading.resolve();
-          await allowOther.promise;
-          return createCheckout(cwd);
-        }
-        await allowFailure.promise;
-        throw failure;
+    const fixture = reconciliationDrainFixture({
+      workspaceGitService: {
+        getCheckout: async (cwd) => {
+          if (cwd.endsWith("-other")) {
+            otherReading.resolve();
+            await allowOther.promise;
+            return createCheckout(cwd);
+          }
+          await allowFailure.promise;
+          throw failure;
+        },
       },
-    } });
+    });
     const rootPath = fixture.rootPath + "-other";
-    fixture.projects.set("p2", createPersistedProjectRecord({
-      projectId: "p2", rootPath, projectKey: canonicalLocalProjectKey(rootPath),
-      kind: "non_git", displayName: "other", createdAt: timestamp, updatedAt: timestamp,
-    }));
+    fixture.projects.set(
+      "p2",
+      createPersistedProjectRecord({
+        projectId: "p2",
+        rootPath,
+        projectKey: canonicalLocalProjectKey(rootPath),
+        kind: "non_git",
+        displayName: "other",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    );
     const running = fixture.service.runOnce();
     const originalFailure = expect(running).rejects.toBe(failure);
     try {
       await otherReading.promise;
       let closed = false;
-      const closing = fixture.service.close().finally(() => { closed = true; });
-      const closeFailure = expect(closing).rejects.toMatchObject({ errors: expect.arrayContaining([failure]) });
+      const closing = fixture.service.close().finally(() => {
+        closed = true;
+      });
+      const closeFailure = expect(closing).rejects.toMatchObject({
+        errors: expect.arrayContaining([failure]),
+      });
       allowFailure.resolve();
       await Promise.resolve();
       await Promise.resolve();

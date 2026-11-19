@@ -296,12 +296,17 @@ export class WorkspaceReconciliationService {
   private async drainDisposedActivity(): Promise<void> {
     const failures = new Set<unknown>();
     while (this.pendingActivity.size || this.pendingInspections.size || this.watcherClosures.size) {
-      const pending = new Set([...this.pendingActivity, ...this.pendingInspections.values(), ...this.watcherClosures]);
+      const pending = new Set([
+        ...this.pendingActivity,
+        ...this.pendingInspections.values(),
+        ...this.watcherClosures,
+      ]);
       const results = await Promise.allSettled([...pending]);
       for (const result of results) if (result.status === "rejected") failures.add(result.reason);
     }
     for (const failure of this.closeFailures) failures.add(failure);
-    if (failures.size) throw new AggregateError([...failures], "Workspace reconciliation did not close cleanly");
+    if (failures.size)
+      throw new AggregateError([...failures], "Workspace reconciliation did not close cleanly");
   }
 
   /** Reconciles mutable Git facts only; never archives missing records. */
@@ -795,8 +800,11 @@ async function settleOperations<T extends readonly unknown[] | []>(
   operations: T,
 ): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }> {
   const outcomes = await Promise.allSettled(operations);
-  const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+  const failures = outcomes
+    .filter((outcome) => outcome.status === "rejected")
+    .map((outcome) => outcome.reason);
   if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) throw new AggregateError(failures, "Workspace reconciliation work failed");
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Workspace reconciliation work failed");
   return Promise.all(operations);
 }

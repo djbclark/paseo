@@ -368,10 +368,7 @@ async function createStartupFanoutSchedules(
     now,
     runner: async () => ({ agentId: null, output: "unused" }),
   });
-  const agentIds = [
-    "00000000-0000-4000-8000-000000000001",
-    "00000000-0000-4000-8000-000000000002",
-  ];
+  const agentIds = ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"];
   for (const id of agentIds) {
     await agentStorage.upsert(buildAgentRecord({ id, cwd: home, iso: now().toISOString() }));
   }

@@ -17,13 +17,13 @@ lifecycle scripts, a header downloader, or a prebuild fallback.
 `packages/server/scripts/build-qualified-node-pty.mjs`. Options have exactly
 these keys:
 
-| Key | Prepared input |
-| --- | --- |
-| runtime | Exact `root/runtime/node` |
-| headersRoot | Verified official Node distribution with `include/node` |
-| nodeGypRoot | Its `lib/node_modules/npm/node_modules/node-gyp` directory |
-| toolchainRoot | `/usr` on the existing trusted Linux CI baseline |
-| stagingRoot | Separate existing directory for this attempt's build evidence |
+| Key           | Prepared input                                                |
+| ------------- | ------------------------------------------------------------- |
+| runtime       | Exact `root/runtime/node`                                     |
+| headersRoot   | Verified official Node distribution with `include/node`       |
+| nodeGypRoot   | Its `lib/node_modules/npm/node_modules/node-gyp` directory    |
+| toolchainRoot | `/usr` on the existing trusted Linux CI baseline              |
+| stagingRoot   | Separate existing directory for this attempt's build evidence |
 
 Paths must be canonical absolute paths without whitespace. Missing tools,
 changed inputs, competing native loader candidates, malformed receipts, and

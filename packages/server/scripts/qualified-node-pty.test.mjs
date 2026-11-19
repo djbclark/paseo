@@ -5,7 +5,11 @@ import { cp, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/
 import path from "node:path";
 import { before, test } from "node:test";
 import { promisify } from "node:util";
-import { buildQualifiedNodePtyCopy, NODE_PTY_INPUTS, validateNodePtyBuildRecord } from "./build-qualified-node-pty.mjs";
+import {
+  buildQualifiedNodePtyCopy,
+  NODE_PTY_INPUTS,
+  validateNodePtyBuildRecord,
+} from "./build-qualified-node-pty.mjs";
 
 const execute = promisify(execFile);
 const hash = (data) => createHash("sha256").update(data).digest("hex");
@@ -17,12 +21,19 @@ async function copyRoot() {
   const directory = await mkdtemp(path.join(path.dirname(prepared.root), "copy-"));
   await mkdir(path.join(directory, "runtime"));
   await cp(path.join(prepared.root, "runtime/node"), path.join(directory, "runtime/node"));
-  await cp(path.join(prepared.root, "node_modules"), path.join(directory, "node_modules"), { recursive: true });
+  await cp(path.join(prepared.root, "node_modules"), path.join(directory, "node_modules"), {
+    recursive: true,
+  });
   return directory;
 }
-function options(directory) { return { ...prepared.options, runtime: path.join(directory, "runtime/node") }; }
+function options(directory) {
+  return { ...prepared.options, runtime: path.join(directory, "runtime/node") };
+}
 before(async () => {
-  assert.ok(process.env.QUALIFIED_NODE_PTY_INPUTS, "CI must provide checksum-verified prepared inputs");
+  assert.ok(
+    process.env.QUALIFIED_NODE_PTY_INPUTS,
+    "CI must provide checksum-verified prepared inputs",
+  );
   prepared = JSON.parse(await readFile(process.env.QUALIFIED_NODE_PTY_INPUTS, "utf8"));
   root = await copyRoot();
   result = await buildQualifiedNodePtyCopy(root, options(root));
@@ -56,14 +67,30 @@ test("builds the selected source offline and reports the actual new artifact", a
 
 test("strict nested receipt rejects invented authority, inputs, and unknown coverage", () => {
   for (const mutate of [
-    (value) => { value.qualification = true; },
-    (value) => { value.coverage.allFileOpensTraced = true; },
-    (value) => { value.inputs.node.headers.sha256 = "0".repeat(64); },
-    (value) => { value.outputs.addon.path = "../installed/pty.node"; },
-    (value) => { value.commands[0].signal = "SIGTERM"; },
-    (value) => { value.evidence[0].path = "native-provenance/../escape"; },
-    (value) => { value.outputs.original.sha256 = "0".repeat(64); },
-    (value) => { value.toolchain.tools[0].unmeasuredGrant = true; },
+    (value) => {
+      value.qualification = true;
+    },
+    (value) => {
+      value.coverage.allFileOpensTraced = true;
+    },
+    (value) => {
+      value.inputs.node.headers.sha256 = "0".repeat(64);
+    },
+    (value) => {
+      value.outputs.addon.path = "../installed/pty.node";
+    },
+    (value) => {
+      value.commands[0].signal = "SIGTERM";
+    },
+    (value) => {
+      value.evidence[0].path = "native-provenance/../escape";
+    },
+    (value) => {
+      value.outputs.original.sha256 = "0".repeat(64);
+    },
+    (value) => {
+      value.toolchain.tools[0].unmeasuredGrant = true;
+    },
   ]) {
     const changed = structuredClone(record);
     mutate(changed);
@@ -74,8 +101,14 @@ test("strict nested receipt rejects invented authority, inputs, and unknown cove
 test("changed source fails before compiling or replacing the original copy", async () => {
   const directory = await copyRoot();
   await writeFile(path.join(directory, "node_modules/node-pty/src/unix/pty.cc"), "changed\n");
-  await assert.rejects(buildQualifiedNodePtyCopy(directory, options(directory)), /selected input digest/);
-  assert.equal(hash(await readFile(path.join(directory, result.addon.path))), NODE_PTY_INPUTS.original);
+  await assert.rejects(
+    buildQualifiedNodePtyCopy(directory, options(directory)),
+    /selected input digest/,
+  );
+  assert.equal(
+    hash(await readFile(path.join(directory, result.addon.path))),
+    NODE_PTY_INPUTS.original,
+  );
 });
 
 test("competing loader artifact and symlinked runtime never fall back to prebuild", async () => {
@@ -83,16 +116,31 @@ test("competing loader artifact and symlinked runtime never fall back to prebuil
   const competitor = path.join(directory, "node_modules/node-pty/build/Release");
   await mkdir(competitor, { recursive: true });
   await writeFile(path.join(competitor, "pty.node"), "not an addon");
-  await assert.rejects(buildQualifiedNodePtyCopy(directory, options(directory)), /competing loader/);
+  await assert.rejects(
+    buildQualifiedNodePtyCopy(directory, options(directory)),
+    /competing loader/,
+  );
   const alias = path.join(directory, "node-alias");
   await symlink(path.join(directory, "runtime/node"), alias);
-  await assert.rejects(buildQualifiedNodePtyCopy(directory, { ...options(directory), runtime: alias }), /canonical build path/);
+  await assert.rejects(
+    buildQualifiedNodePtyCopy(directory, { ...options(directory), runtime: alias }),
+    /canonical build path/,
+  );
 });
 
 test("missing toolchain inputs and changed headers fail without a downloader", async () => {
-  await assert.rejects(buildQualifiedNodePtyCopy(root, { ...options(root), toolchainRoot: prepared.options.stagingRoot }), /fixed Linux-x64 recipe/);
+  await assert.rejects(
+    buildQualifiedNodePtyCopy(root, {
+      ...options(root),
+      toolchainRoot: prepared.options.stagingRoot,
+    }),
+    /fixed Linux-x64 recipe/,
+  );
   const emptyHeaders = await mkdtemp(path.join(prepared.options.stagingRoot, "headers-"));
-  await assert.rejects(buildQualifiedNodePtyCopy(prepared.root, { ...prepared.options, headersRoot: emptyHeaders }), /ENOENT/);
+  await assert.rejects(
+    buildQualifiedNodePtyCopy(prepared.root, { ...prepared.options, headersRoot: emptyHeaders }),
+    /ENOENT/,
+  );
 });
 
 test("original loader selects ONLY the copied native output; real open/resize/spawn/data/exit APIs work", async () => {
@@ -118,7 +166,10 @@ test("original loader selects ONLY the copied native output; real open/resize/sp
     terminal.onData(data=>{output+=data;if(!sent&&output.includes('ready')){sent=true;terminal.resize(100,30);terminal.write('input\n')}});
     terminal.onExit(event=>{assert.equal(event.exitCode,23);assert.ok(output.includes('done'));assert.equal(terminal.cols,100);assert.equal(terminal.rows,30);process.stdout.write('api-complete\n')});
   `;
-  const child = await execute(path.join(root, "runtime/node"), ["-e", script, root], { env: { PATH: "/usr/bin:/bin", LANG: "C" }, maxBuffer: 1024 * 1024 });
+  const child = await execute(path.join(root, "runtime/node"), ["-e", script, root], {
+    env: { PATH: "/usr/bin:/bin", LANG: "C" },
+    maxBuffer: 1024 * 1024,
+  });
   assert.match(child.stdout, /api-complete/);
 });
 
@@ -131,6 +182,9 @@ test("copied API still reports explicit signal termination of an owned PTY", asy
     terminal.onData(data=>{if(!signaled&&data.includes('ready')){signaled=true;terminal.kill('SIGTERM')}});
     terminal.onExit(event=>{assert.equal(event.signal,15);process.stdout.write('signal-api-complete\n')});
   `;
-  const child = await execute(path.join(root, "runtime/node"), ["-e", script, root], { env: { PATH: "/usr/bin:/bin", LANG: "C" }, maxBuffer: 1024 * 1024 });
+  const child = await execute(path.join(root, "runtime/node"), ["-e", script, root], {
+    env: { PATH: "/usr/bin:/bin", LANG: "C" },
+    maxBuffer: 1024 * 1024,
+  });
   assert.match(child.stdout, /signal-api-complete/);
 });

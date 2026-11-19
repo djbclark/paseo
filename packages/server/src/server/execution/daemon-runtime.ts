@@ -11,6 +11,15 @@ import { loadConfig } from "../config.js";
 import { createRootLogger } from "../logger.js";
 import { resolvePaseoHome } from "../paseo-home.js";
 import { acquireQualifiedDaemonReadiness } from "./daemon-readiness.js";
+
+function throwStartupFailure(error: unknown, cleanup: readonly unknown[]): never {
+  if (cleanup.length)
+    throw new AggregateError([error, ...cleanup], "Daemon startup and metadata cleanup failed", {
+      cause: error,
+    });
+  throw error;
+}
+
 export async function startQualifiedDaemon(): Promise<void> {
   const owner = await getQualifiedDaemonOwner();
   ManagedPluginPolicySchema.parse((await readFixedManagedPluginPolicy()).document);
@@ -101,10 +110,6 @@ export async function startQualifiedDaemon(): Promise<void> {
       cleanup.push(failure);
     }
     // Partial construction/start is not known stopped: retain the non-ready record.
-    if (cleanup.length)
-      throw new AggregateError([error, ...cleanup], "Daemon startup and metadata cleanup failed", {
-        cause: error,
-      });
-    throw error;
+    throwStartupFailure(error, cleanup);
   }
 }

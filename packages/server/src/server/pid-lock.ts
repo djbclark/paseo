@@ -419,11 +419,10 @@ export async function updatePidLock(
   await closePidLockHandle(fd, failed, options?.startedAt !== undefined);
 }
 
-async function releaseStrictPidLock(
-  paseoHome: string,
-  options: { ownerPid?: number; startedAt?: string },
-): Promise<void> {
-  const pidPath = getPidFilePath(paseoHome);
+function assertStrictPidOwner(options: {
+  ownerPid?: number;
+  startedAt?: string;
+}): asserts options is { ownerPid: number; startedAt: string } {
   if (
     typeof options.ownerPid !== "number" ||
     !Number.isSafeInteger(options.ownerPid) ||
@@ -432,6 +431,14 @@ async function releaseStrictPidLock(
     !options.startedAt
   )
     throw new PidLockError("Strict PID release requires the original PID and start stamp");
+}
+
+async function releaseStrictPidLock(
+  paseoHome: string,
+  options: { ownerPid?: number; startedAt?: string },
+): Promise<void> {
+  const pidPath = getPidFilePath(paseoHome);
+  assertStrictPidOwner(options);
   let lock: PidLockInfo | null;
   try {
     lock = parsePidLockInfo(JSON.parse(await readFile(pidPath, "utf-8")));

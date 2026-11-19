@@ -1,4 +1,8 @@
 import {
+  DirectoryHelperRecipeSchema,
+  parseDirectoryHelperRecipe,
+} from "../execution/directory-recipe.js";
+import {
   PassivePluginProfileSchema,
   DirectoryHelperPluginProfileSchema,
   type PassivePluginProfile,
@@ -42,6 +46,7 @@ const Authorization = z
     forbiddenEnvironment: z.array(z.string()),
     passiveProfile: PassivePluginProfileSchema.optional(),
     directoryHelperProfile: DirectoryHelperPluginProfileSchema.optional(),
+    directoryHelperRecipe: DirectoryHelperRecipeSchema.optional(),
   })
   .strict()
   .refine(
@@ -53,7 +58,26 @@ export const ManagedPluginPolicySchema = z
     version: z.literal(1),
     plugins: z.record(z.string(), z.object({ authorizations: z.array(Authorization) }).strict()),
   })
-  .strict();
+  .strict()
+  .superRefine((policy, context) => {
+    for (const [id, entry] of Object.entries(policy.plugins)) {
+      entry.authorizations.forEach((authorization, index) => {
+        if (
+          authorization.directoryHelperRecipe !== undefined &&
+          !parseDirectoryHelperRecipe(
+            authorization.directoryHelperRecipe,
+            authorization.directoryHelperProfile,
+            id,
+          )
+        )
+          context.addIssue({
+            code: "custom",
+            message: "Invalid protected directory compiler recipe",
+            path: ["plugins", id, "authorizations", index, "directoryHelperRecipe"],
+          });
+      });
+    }
+  });
 const State = z.object({
   version: z.literal(1),
   generation: z.number().int().nonnegative(),
@@ -91,6 +115,66 @@ export interface ActivationTicket {
   policyRevision: string;
 }
 
+type ImmutableTicketData<T> = T extends readonly (infer Item)[]
+  ? readonly ImmutableTicketData<Item>[]
+  : T extends object
+    ? { readonly [Key in keyof T]: ImmutableTicketData<T[Key]> }
+    : T;
+export interface OriginalActivationTicket {
+  readonly pluginId: string;
+  readonly directory: string;
+  readonly operation: ActivationOperation;
+  readonly generation: number;
+  readonly authorization: ImmutableTicketData<ManagedAuthorization>;
+  readonly policyRevision: string;
+}
+const originalPolicies = new WeakSet<object>();
+const originalPolicyOwners = new WeakMap<object, QualifiedDaemonOwner>();
+const originalTickets = new WeakMap<
+  object,
+  {
+    policy: ManagedPluginActivationPolicy;
+    owner: QualifiedDaemonOwner | undefined;
+    snapshot: OriginalActivationTicket;
+  }
+>();
+function freezeTicketData(value: unknown): void {
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) freezeTicketData(item);
+    Object.freeze(value);
+  }
+}
+/** Origin only: current policy, CAS, artifact and live scope checks remain independent. */
+export function readOriginalActivationTicket(
+  ticket: unknown,
+  policy: unknown,
+  owner: unknown,
+): OriginalActivationTicket | undefined {
+  if (ticket === null || typeof ticket !== "object") return undefined;
+  const origin = originalTickets.get(ticket);
+  if (
+    !origin ||
+    origin.policy !== policy ||
+    !origin.owner ||
+    origin.owner !== owner ||
+    !isQualifiedDaemonOwner(owner) ||
+    originalPolicyOwners.get(origin.policy) !== owner ||
+    !hasOriginalPolicyMethods(origin.policy)
+  )
+    return undefined;
+  return origin.snapshot;
+}
+function hasOriginalPolicyMethods(policy: ManagedPluginActivationPolicy): boolean {
+  return (
+    originalPolicies.has(policy) &&
+    Object.getPrototypeOf(policy) === ManagedPluginActivationPolicy.prototype &&
+    Object.entries(originalPolicyMethods).every(
+      ([name, descriptor]) =>
+        typeof descriptor.value !== "function" || Reflect.get(policy, name) === descriptor.value,
+    )
+  );
+}
+
 /** Hash the complete administrator snapshot, including helper dependencies. Symlinks are refused. */
 export async function hashPluginSnapshot(root: string): Promise<string> {
   if ((await realpath(root)) !== root) throw new Error("Snapshot root must be canonical");
@@ -119,7 +203,9 @@ export class ManagedPluginActivationPolicy {
   bindQualifiedAuthority(owner: QualifiedDaemonOwner): void {
     if (!isQualifiedDaemonOwner(owner) || (this.qualifiedOwner && this.qualifiedOwner !== owner))
       throw new Error("Managed policy qualified owner mismatch");
+    if (!originalPolicies.has(this)) throw new Error("Original managed policy required");
     this.qualifiedOwner = owner;
+    originalPolicyOwners.set(this, owner);
   }
   private policyObservationEpoch = 0;
   private lastPolicyBytes: string | undefined;
@@ -150,7 +236,9 @@ export class ManagedPluginActivationPolicy {
   constructor(
     private readonly policyFile: string | undefined,
     private readonly stateDirectory: string,
-  ) {}
+  ) {
+    originalPolicies.add(this);
+  }
   get configured(): boolean {
     return this.policyFile !== undefined;
   }
@@ -248,6 +336,7 @@ export class ManagedPluginActivationPolicy {
     bundle?: string,
     ticket?: ActivationTicket,
   ): Promise<ActivationTicket | undefined> {
+    const originOwner = originalPolicyOwners.get(this);
     if (this.policyFile === undefined) {
       await this.assertUnconfiguredActivationAllowed(id);
       return undefined;
@@ -284,7 +373,20 @@ export class ManagedPluginActivationPolicy {
     await verifyAuthorizedArtifact({ id, canonical, authorization, bundle });
     if ((await this.readPolicy()) !== rawPolicy)
       throw new Error("Managed policy changed during verification");
-    return { generation: generation + 1, authorization, policyRevision };
+    const minted = { generation: generation + 1, authorization, policyRevision };
+    if (hasOriginalPolicyMethods(this) && originalPolicyOwners.get(this) === originOwner) {
+      const snapshot: OriginalActivationTicket = structuredClone({
+        pluginId: id,
+        directory: canonical,
+        operation,
+        generation: minted.generation,
+        authorization,
+        policyRevision,
+      });
+      freezeTicketData(snapshot);
+      originalTickets.set(minted, { policy: this, owner: originOwner, snapshot });
+    }
+    return minted;
   }
   /** Activation callers cannot downgrade an unsupported protected realm to an ordinary child. */
   async authorizeForExecution(
@@ -566,3 +668,7 @@ interface PluginDispatch {
   canPublish: () => boolean;
   dispatch: () => void;
 }
+
+const originalPolicyMethods = Object.getOwnPropertyDescriptors(
+  ManagedPluginActivationPolicy.prototype,
+);

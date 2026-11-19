@@ -1,5 +1,8 @@
+import { canonicalBuiltinJson } from "../execution/builtin-format.js";
 import { directoryInitializationFromTicket } from "./directory-initialization.js";
 import {
+  readOriginalActivationTicket,
+  requireAvailablePluginExecutionProfile,
   ManagedPluginPolicySchema,
   managedPluginExecutionProfile,
   ManagedPluginActivationPolicy,
@@ -2505,4 +2508,128 @@ it("propagates exact protected F4 ticket DATA without authorizing child launch o
   expect(runtime.getLoadedReceipt("managed-runtime")).toBeUndefined();
   expect((await policy.status("managed-runtime")).generation).toBe(0);
   expect(directoryInitializationFromTicket(undefined)).toBeUndefined();
+});
+
+function protectedCompilerRecipe() {
+  const recipe = {
+    version: 1,
+    contract: "ade-directory-helpers-v1",
+    initialization: "registration-only",
+    qualificationSha256: "a".repeat(64),
+    runtimeClosureSha256: "b".repeat(64),
+    helperClosureSha256: "c".repeat(64),
+    moduleTableSha256: "d".repeat(64),
+    compiler: {
+      version: 1,
+      contract: "ade-directory-entry-v1",
+      role: "claim",
+      entry: "index.directory.server.ts",
+      target: "server",
+      client: "none",
+    },
+  };
+  const profile = {
+    version: recipe.version,
+    contract: recipe.contract,
+    initialization: recipe.initialization,
+    qualificationSha256: recipe.qualificationSha256,
+    runtimeClosureSha256: recipe.runtimeClosureSha256,
+    helperClosureSha256: recipe.helperClosureSha256,
+    moduleTableSha256: recipe.moduleTableSha256,
+    recipeSha256: createHash("sha256").update(canonicalBuiltinJson(recipe)).digest("hex"),
+  };
+  return { recipe, profile };
+}
+
+it("reads the exact protected compiler body on actual authorization without enabling selected execution", async () => {
+  const fixture = await managedRuntimeFixture("export default () => () => {};");
+  const document = JSON.parse(await readFile(fixture.file, "utf8"));
+  const authorization = document.plugins["managed-runtime"].authorizations[0];
+  const { recipe, profile } = protectedCompilerRecipe();
+  authorization.directoryHelperProfile = profile;
+  authorization.directoryHelperRecipe = recipe;
+  const enrolled = { version: 1, plugins: { "ade-claim": { authorizations: [authorization] } } };
+  expect(ManagedPluginPolicySchema.safeParse(enrolled).success).toBe(true);
+  await writeFile(fixture.file, JSON.stringify(enrolled));
+  const policy = new ManagedPluginActivationPolicy(
+    fixture.file,
+    path.join(fixture.home, "journal"),
+  );
+  const ticket = await policy.authorize("ade-claim", fixture.directory);
+  expect(ticket?.authorization.directoryHelperRecipe).toEqual(recipe);
+  expect(() => requireAvailablePluginExecutionProfile(ticket?.authorization)).toThrow(
+    "producer unavailable",
+  );
+  await expect(policy.authorizeForExecution("ade-claim", fixture.directory)).rejects.toThrow(
+    "producer unavailable",
+  );
+  expect((await policy.status("ade-claim")).generation).toBe(0);
+  // A genuinely minted ordinary-policy ticket still cannot impersonate a producer-bound origin.
+  expect(readOriginalActivationTicket(ticket, policy, {})).toBeUndefined();
+  expect(readOriginalActivationTicket(structuredClone(ticket), policy, {})).toBeUndefined();
+});
+
+it.each([
+  "missing-profile",
+  "wrong-hash",
+  "changed-digest",
+  "wrong-role",
+  "wrong-entry",
+  "extra-body",
+  "passive-only",
+])("refuses a protected compiler body with %s through the real policy read", async (change) => {
+  const fixture = await managedRuntimeFixture("export default () => () => {};");
+  const document = JSON.parse(await readFile(fixture.file, "utf8"));
+  const authorization = document.plugins["managed-runtime"].authorizations[0];
+  const { recipe, profile } = protectedCompilerRecipe();
+  const changedRecipe = { ...recipe, compiler: { ...recipe.compiler } };
+  if (change === "wrong-role") changedRecipe.compiler.role = "window";
+  if (change === "wrong-entry") changedRecipe.compiler.entry = "index.server.ts";
+  if (change === "changed-digest") changedRecipe.moduleTableSha256 = "f".repeat(64);
+  authorization.directoryHelperProfile = profile;
+  authorization.directoryHelperRecipe =
+    change === "extra-body" ? { ...changedRecipe, allow: true } : changedRecipe;
+  if (change === "missing-profile" || change === "passive-only")
+    delete authorization.directoryHelperProfile;
+  if (change === "passive-only")
+    authorization.passiveProfile = {
+      version: 1,
+      contract: "native-passive-contract-1",
+      initialization: "registration-only",
+      qualificationSha256: profile.qualificationSha256,
+      runtimeClosureSha256: profile.runtimeClosureSha256,
+      helperClosureSha256: profile.helperClosureSha256,
+    };
+  if (change === "wrong-hash") profile.recipeSha256 = "0".repeat(64);
+  const enrolled = { version: 1, plugins: { "ade-claim": { authorizations: [authorization] } } };
+  expect(ManagedPluginPolicySchema.safeParse(enrolled).success).toBe(false);
+  await writeFile(fixture.file, JSON.stringify(enrolled));
+  const policy = new ManagedPluginActivationPolicy(
+    fixture.file,
+    path.join(fixture.home, "journal"),
+  );
+  await expect(policy.authorize("ade-claim", fixture.directory)).rejects.toThrow();
+  expect((await policy.status("ade-claim")).generation).toBe(0);
+});
+
+it("never accepts ticket shapes, subclass tickets or injected owner metadata as original producer provenance", async () => {
+  const fixture = await managedRuntimeFixture("export default () => () => {};");
+  const policy = new ManagedPluginActivationPolicy(
+    fixture.file,
+    path.join(fixture.home, "journal"),
+  );
+  const ticket = await policy.authorize("managed-runtime", fixture.directory);
+  const assertFresh = vi.fn();
+  const ownerMetadata = { assertFresh, evidenceDigest: "a".repeat(64), binding: {} };
+  expect(() => Reflect.apply(policy.bindQualifiedAuthority, policy, [ownerMetadata])).toThrow(
+    "owner mismatch",
+  );
+  expect(readOriginalActivationTicket(ticket, policy, ownerMetadata)).toBeUndefined();
+  expect(readOriginalActivationTicket({ ...ticket }, policy, ownerMetadata)).toBeUndefined();
+  class DerivedPolicy extends ManagedPluginActivationPolicy {}
+  const derived = new DerivedPolicy(fixture.file, path.join(fixture.home, "derived-journal"));
+  const derivedTicket = await derived.authorize("managed-runtime", fixture.directory);
+  expect(readOriginalActivationTicket(derivedTicket, derived, ownerMetadata)).toBeUndefined();
+  expect(readOriginalActivationTicket(ticket, derived, ownerMetadata)).toBeUndefined();
+  expect(assertFresh).not.toHaveBeenCalled();
 });

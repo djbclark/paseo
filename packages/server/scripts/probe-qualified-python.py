@@ -61,8 +61,14 @@ def main():
                 assert not fields[5].endswith(" (deleted)")
                 maps.add(canonical(fields[5]))
     assert len(maps) <= 256
+    extension = sys.modules["_ctypes"]
+    extension_origin = getattr(extension.__spec__, "origin", None)
+    assert isinstance(extension_origin, str) and os.path.isabs(extension_origin)
+    extension_origin = canonical(extension_origin)
+    assert extension_origin == canonical(extension.__file__)
+    assert extension_origin in maps
     record = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "qualification": False,
         "implementation": sys.implementation.name,
         "version": list(sys.version_info[:3]),
@@ -78,12 +84,12 @@ def main():
         "flags": {"isolated": 1, "noSite": 1, "dontWriteBytecode": 1},
         "stdlib": canonical(sysconfig.get_path("stdlib")),
         "platstdlib": canonical(sysconfig.get_path("platstdlib")),
-        "extensionDirectory": canonical(sysconfig.get_config_var("DESTSHARED")),
+        "extensionDirectory": os.path.dirname(extension_origin),
         "modules": modules,
         "nativeMapFiles": sorted(maps),
         "build": {
             key: str(sysconfig.get_config_var(key))
-            for key in ("SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY")
+            for key in ("SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY", "DESTSHARED")
         },
     }
     diagnostic = {"kind": "retained-python-sysconfig-source-diagnostic", "qualification": False,

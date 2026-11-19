@@ -204,7 +204,7 @@ async function probe(executable, script, receiveDiagnostic = () => {}) {
       observation: value,
     }),
   );
-  require(value.schemaVersion === 1 &&
+  require(value.schemaVersion === 2 &&
     value.qualification === false &&
     value.implementation === "cpython" &&
     value.version.length === 3 &&
@@ -303,6 +303,12 @@ async function sourcePackages(names) {
       };
     });
 }
+function actualExtensionBinding(value) {
+  const extension=value.modules.find((row)=>row.name==="_ctypes");
+  require(extension && path.dirname(extension.origin)===value.extensionDirectory && path.basename(extension.origin)==="_ctypes"+value.build.EXT_SUFFIX,"actual extension module binding");
+  require(value.nativeMapFiles.includes(extension.origin),"actual extension current maps binding");
+  require(value.build.DESTSHARED==="/usr/lib/python3.12/lib-dynload","original compiled DESTSHARED");
+}
 function observation(value, retained) {
   exact(value, [
     "schemaVersion",
@@ -330,7 +336,7 @@ function observation(value, retained) {
     require(typeof s === "string" &&
       Buffer.byteLength(s) <= 8192 &&
       !s.includes("\0"), "probe text");
-  require(value.schemaVersion === 1 &&
+  require(value.schemaVersion === 2 &&
     value.qualification === false &&
     value.implementation === "cpython" &&
     value.abiFlags === "" &&
@@ -382,8 +388,9 @@ function observationLists(value, retained, text) {
     text(p);
     require(path.isAbsolute(p) || (retained && p.startsWith("python/")), "native map path");
   }
-  exact(value.build, ["SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY"]);
+  exact(value.build, ["SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY", "DESTSHARED"]);
   for (const v of Object.values(value.build)) text(v);
+  actualExtensionBinding(value);
 }
 function sourceRecord(source) {
   const record = { source };
@@ -604,6 +611,7 @@ function recordObservations(record, files) {
   if (record.observed.relocated !== null) {
     observation(record.observed.relocated, true);
     const value = record.observed.relocated;
+    require(JSON.stringify(value.build)===JSON.stringify(record.observed.source.build),"source/retained compiled build equality");
     require(JSON.stringify(value.version) === JSON.stringify(record.source.version) &&
       [value.prefix, value.execPrefix, value.basePrefix, value.baseExecPrefix].every(
         (p) => p === "python",
@@ -633,8 +641,8 @@ function validateRecord(record) {
     "observed",
     "budgets",
   ]);
-  require(record.schemaVersion === 1 &&
-    record.kind === "retained-cpython-layout-v1" &&
+  require(record.schemaVersion === 2 &&
+    record.kind === "retained-cpython-layout-v2" &&
     record.qualification === false, "record kind");
   const abi = sourceRecord(record.source);
   const files = retainedInventory(record, abi);
@@ -1472,8 +1480,8 @@ export async function retainQualifiedPython(root) {
     ])
       absent.add(p);
     const record = {
-      schemaVersion: 1,
-      kind: "retained-cpython-layout-v1",
+      schemaVersion: 2,
+      kind: "retained-cpython-layout-v2",
       qualification: false,
       source: {
         requestedExecutable: "/usr/bin/python3",

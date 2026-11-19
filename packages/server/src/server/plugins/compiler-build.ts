@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { stat, lstat, realpath } from "node:fs/promises";
 import { readPluginManifest } from "./manifest.js";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
@@ -15,10 +15,17 @@ import {
 import { loadEsbuild, SERVER_HOST_MODULES } from "./compiler-esbuild.js";
 
 type PluginBuildTarget = "client" | "server";
+// Internal source classification only; no task/candidate argument can grant this layout.
+type ServerEntryLayout = "ordinary" | "directory-selected";
+const SELECTED_DIRECTORY_ENTRY = "index.directory.server.ts";
 
 type PluginModuleLocation = PluginBuildTarget | "shared" | "invalid";
 
-function directoryTarget(filePath: string, pluginDirectory: string): PluginModuleLocation | null {
+function directoryTarget(
+  filePath: string,
+  pluginDirectory: string,
+  serverEntryLayout: ServerEntryLayout = "ordinary",
+): PluginModuleLocation | null {
   const relative = path.relative(pluginDirectory, filePath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return "invalid";
   const segments = relative.split(path.sep);
@@ -27,7 +34,9 @@ function directoryTarget(filePath: string, pluginDirectory: string): PluginModul
   if (segments[0] === "server") return "server";
   if (segments[0] === "shared") return "shared";
   if (/^index\.client\.tsx?$/.test(relative)) return "client";
-  if (/^index\.server\.tsx?$/.test(relative)) return "server";
+  if (serverEntryLayout === "directory-selected") {
+    if (relative === SELECTED_DIRECTORY_ENTRY) return "server";
+  } else if (/^index\.server\.tsx?$/.test(relative)) return "server";
   return "invalid";
 }
 
@@ -93,24 +102,37 @@ function lexicalBoundaryError(
   resolveDirectory: string,
   pluginDirectory: string,
   target: PluginBuildTarget | "shared",
+  serverEntryLayout: ServerEntryLayout = "ordinary",
 ): OnResolveResult | null {
   if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return null;
   const lexicalPath = path.resolve(resolveDirectory, specifier);
   if (containsPath(pluginDirectory, lexicalPath)) {
-    return moduleBoundaryError(directoryTarget(lexicalPath, pluginDirectory), target, lexicalPath);
+    return moduleBoundaryError(
+      directoryTarget(lexicalPath, pluginDirectory, serverEntryLayout),
+      target,
+      lexicalPath,
+    );
   }
   // Normalize only a containing root alias. Resolving the whole import would erase
   // an authored server/ or client/ location when the final file is a symlink.
   for (let ancestor = path.dirname(lexicalPath); ; ancestor = path.dirname(ancestor)) {
     if (existsSync(ancestor) && realpathSync.native(ancestor) === pluginDirectory) {
       const ownedPath = path.join(pluginDirectory, path.relative(ancestor, lexicalPath));
-      return moduleBoundaryError(directoryTarget(ownedPath, pluginDirectory), target, lexicalPath);
+      return moduleBoundaryError(
+        directoryTarget(ownedPath, pluginDirectory, serverEntryLayout),
+        target,
+        lexicalPath,
+      );
     }
     if (path.dirname(ancestor) === ancestor) return null;
   }
 }
 
-function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory: string): Plugin {
+function createRuntimeBoundaryPlugin(
+  target: PluginBuildTarget,
+  pluginDirectory: string,
+  serverEntryLayout: ServerEntryLayout = "ordinary",
+): Plugin {
   const boundaryResolution = {};
   const linkedDependencyRoots = new Set<string>();
   return {
@@ -125,7 +147,7 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         owner: PluginBuildTarget | "shared",
       ) {
         const file = realpathSync.native(resolvedFile);
-        const location = directoryTarget(file, pluginDirectory);
+        const location = directoryTarget(file, pluginDirectory, serverEntryLayout);
         if (location === "invalid") {
           if (
             [...linkedDependencyRoots].some(
@@ -175,7 +197,9 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
       ): Promise<OnResolveResult | null> {
         const file = realpathSync.native(sourcePath);
         const owner =
-          directoryTarget(file, pluginDirectory) === "shared" ? "shared" : inheritedOwner;
+          directoryTarget(file, pluginDirectory, serverEntryLayout) === "shared"
+            ? "shared"
+            : inheritedOwner;
         const key = `${owner}:${file}`;
         if (checked.has(key) || !/\.[cm]?[jt]sx?$/.test(file)) return null;
         checked.add(key);
@@ -187,7 +211,13 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
           const error =
             runtimeSpecifierError(specifier, owner, file) ??
             runtimeSpecifierError(packageSpecifier, owner, file) ??
-            lexicalBoundaryError(specifier, path.dirname(file), pluginDirectory, owner);
+            lexicalBoundaryError(
+              specifier,
+              path.dirname(file),
+              pluginDirectory,
+              owner,
+              serverEntryLayout,
+            );
           if (error) return error;
           // Protocol types are shared host contracts, also exposed by the SDK's peer
           // dependency during development. Erased imports need no plugin-local install;
@@ -220,10 +250,19 @@ function createRuntimeBoundaryPlugin(target: PluginBuildTarget, pluginDirectory:
         const importer =
           args.namespace === "file" ? realpathSync.native(args.importer) : args.importer;
         const resolveDir = args.namespace === "file" ? path.dirname(importer) : args.resolveDir;
-        const owner = directoryTarget(importer, pluginDirectory) === "shared" ? "shared" : target;
+        const owner =
+          directoryTarget(importer, pluginDirectory, serverEntryLayout) === "shared"
+            ? "shared"
+            : target;
         const specifierError = runtimeSpecifierError(args.path, owner, importer);
         if (specifierError) return specifierError;
-        const lexicalError = lexicalBoundaryError(args.path, resolveDir, pluginDirectory, owner);
+        const lexicalError = lexicalBoundaryError(
+          args.path,
+          resolveDir,
+          pluginDirectory,
+          owner,
+          serverEntryLayout,
+        );
         if (lexicalError) return lexicalError;
         const resolution = await buildContext.resolve(args.path, {
           importer,
@@ -310,7 +349,11 @@ function runtimeSpecifierError(
     : null;
 }
 
-function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: string): void {
+function checkSharedDependencies(
+  inputs: Metafile["inputs"],
+  pluginDirectory: string,
+  serverEntryLayout: ServerEntryLayout = "ordinary",
+): void {
   function inputLocation(file: string): PluginModuleLocation | null {
     const absolutePath = path.resolve(file);
     // Metafile keys must stay unchanged for graph traversal. Only filesystem
@@ -318,6 +361,7 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
     return directoryTarget(
       existsSync(absolutePath) ? realpathSync.native(absolutePath) : absolutePath,
       pluginDirectory,
+      serverEntryLayout,
     );
   }
   const pending = Object.keys(inputs).filter((file) => inputLocation(file) === "shared");
@@ -343,7 +387,11 @@ function checkSharedDependencies(inputs: Metafile["inputs"], pluginDirectory: st
   }
 }
 
-async function compileTarget(entryPath: string, target: PluginBuildTarget): Promise<string> {
+async function compileTarget(
+  entryPath: string,
+  target: PluginBuildTarget,
+  serverEntryLayout: ServerEntryLayout = "ordinary",
+): Promise<string> {
   const { build } = loadEsbuild();
   // Use native canonical paths throughout: TypeScript expands Windows short names
   // when resolving type references, while the JS realpath implementation retains them.
@@ -375,13 +423,13 @@ async function compileTarget(entryPath: string, target: PluginBuildTarget): Prom
             "zod",
           ]
         : SERVER_HOST_MODULES,
-    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory)],
+    plugins: [createRuntimeBoundaryPlugin(target, pluginDirectory, serverEntryLayout)],
     metafile: true,
     logLevel: "silent",
     treeShaking: true,
     write: false,
   });
-  checkSharedDependencies(result.metafile.inputs, pluginDirectory);
+  checkSharedDependencies(result.metafile.inputs, pluginDirectory, serverEntryLayout);
   const output = result.outputFiles[0]?.text;
   if (!output) throw new Error(`Plugin ${target} compilation produced no output`);
   // Node must retain live export bindings: an arrow default is initialized after __toCommonJS.
@@ -452,4 +500,18 @@ export async function compileDirectoryPlugin(
   assertPluginCompatibility({ ...manifest, version, runtime: "daemon" });
   const bundles = await compilePlugin(await resolveEntryPaths(directory));
   return { ...bundles, manifest };
+}
+
+/** Finite expected-input byte builder only. This does not authorize production selected tasks. */
+export async function compileSelectedDirectoryPlugin(directory: string, version: string) {
+  if (!path.isAbsolute(directory) || (await realpath(directory)) !== directory)
+    throw new Error("Selected directory source must be absolute and canonical");
+  const entry = path.join(directory, SELECTED_DIRECTORY_ENTRY);
+  const info = await lstat(entry);
+  if (!info.isFile() || (await realpath(entry)) !== entry)
+    throw new Error("Selected directory entry must be a canonical regular file");
+  const manifest = await readPluginManifest(directory);
+  assertPluginCompatibility({ ...manifest, version, runtime: "daemon" });
+  const serverBundle = await compileTarget(entry, "server", "directory-selected");
+  return { manifest, serverBundle, clientBundle: null };
 }

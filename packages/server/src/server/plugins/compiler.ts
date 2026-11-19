@@ -32,6 +32,7 @@ export {
 export type CompilerTask =
   | { kind: "entries"; entries: Parameters<typeof build.compilePlugin>[0] }
   | { kind: "directory"; directory: string; version: string; builtinId?: string }
+  | { kind: "directory-selected"; directory: string; version: string }
   | {
       kind: "prepare";
       directory: string;
@@ -42,6 +43,7 @@ export type CompilerTask =
 interface TaskResult {
   entries: Awaited<ReturnType<typeof build.compilePlugin>>;
   directory: Awaited<ReturnType<typeof build.compileDirectoryPlugin>>;
+  "directory-selected": Awaited<ReturnType<typeof build.compileSelectedDirectoryPlugin>>;
   prepare: void;
 }
 
@@ -136,6 +138,10 @@ class PluginCompiler {
     task: T,
     onLog?: (data: Record<string, unknown>, message: string) => void,
   ): Promise<TaskResult[T["kind"]]> {
+    // A task label is not original producer admission. Refuse BEFORE queue/Worker creation;
+    // this error cannot become an actual-owned-error reply or known-held certificate.
+    if (task.kind === "directory-selected")
+      return Promise.reject(new Error("Selected directory compiler admission unavailable"));
     return this.queue(async () => {
       if (this.idleTimer) clearTimeout(this.idleTimer);
       this.idleTimer = null;

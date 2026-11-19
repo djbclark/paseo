@@ -1,5 +1,5 @@
 import { parentPort } from "node:worker_threads";
-import type { ZodIssue } from "zod";
+import { z, type ZodIssue } from "zod";
 import { compilePlugin, compileDirectoryPlugin } from "./compiler-build.js";
 import { runPluginBuild } from "./preparation-build.js";
 import type { CompilerTask } from "./compiler.js";
@@ -15,6 +15,15 @@ export type CompilerReply =
       errors?: unknown[];
       warnings?: unknown[];
     };
+
+// DATA shape only. Genuine original local producer admission is not implemented yet.
+const selectedDirectoryTask = z
+  .object({
+    kind: z.literal("directory-selected"),
+    directory: z.string().min(1),
+    version: z.string().min(1),
+  })
+  .strict();
 
 const port = parentPort!;
 const admittedTasks = new Set<Promise<void>>();
@@ -57,6 +66,9 @@ async function run(task: CompilerTask): Promise<void> {
       case "directory":
         value = await compileDirectoryPlugin(task.directory, task.version, task.builtinId);
         break;
+      case "directory-selected":
+        selectedDirectoryTask.parse(task);
+        throw new Error("Selected directory compiler admission unavailable");
       case "prepare":
         await runPluginBuild(
           task.directory,

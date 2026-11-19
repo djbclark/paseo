@@ -1,3 +1,5 @@
+import { compileSelectedDirectoryPlugin as buildSelectedDirectoryPlugin } from "./compiler-build.js";
+import { loadEsbuild } from "./compiler-esbuild.js";
 import { realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
@@ -11,6 +13,7 @@ import * as zod from "zod";
 import { ZodError } from "zod";
 import {
   compilePlugin,
+  runCompilerTask,
   compileDirectoryPlugin,
   compileQualifiedDirectoryPlugin,
   readSettledQualifiedCompilerFailure,
@@ -1432,3 +1435,159 @@ syncBuiltinESMExports();
   },
   30_000,
 );
+
+async function createSelectedEntryFixture() {
+  const plugin = await createSplitPlugin();
+  const directory = realpathSync.native(plugin.directory);
+  const selected = path.join(directory, "index.directory.server.ts");
+  const sentinel = path.join(directory, "build-must-not-run");
+  await writeFile(
+    path.join(directory, "paseo-plugin.json"),
+    JSON.stringify({
+      id: "selected-byte-fixture",
+      requirements: { paseo: ">=0.1.0" },
+      build: [
+        [
+          process.execPath,
+          "-e",
+          `require('node:fs').writeFileSync(${JSON.stringify(sentinel)},'ran')`,
+        ],
+      ],
+    }),
+  );
+  await writeFile(
+    path.join(directory, "server", "selected.ts"),
+    'export const marker = "selected-only-marker";',
+  );
+  await writeFile(
+    selected,
+    'import {marker} from "./server/selected"; export default () => { return () => marker; };',
+  );
+  return { directory, selected, sentinel };
+}
+
+it("builds only the literal selected server as DATA while ordinary entry/client selection stays unchanged", async () => {
+  const f = await createSelectedEntryFixture();
+  try {
+    const result = await buildSelectedDirectoryPlugin(f.directory, "0.4.0");
+    expect(result.clientBundle).toBeNull();
+    expect(result.serverBundle).toContain("selected-only-marker");
+    expect(result.serverBundle).not.toContain("Server contribution");
+    const ordinary = await compileDirectoryPlugin(f.directory, "0.4.0");
+    expect(ordinary.serverBundle).toContain("Server contribution");
+    expect(ordinary.serverBundle).not.toContain("selected-only-marker");
+    expect(ordinary.clientBundle).not.toBeNull();
+    await expect(
+      import("node:fs/promises").then(({ stat }) => stat(f.sentinel)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result).not.toHaveProperty("qualification");
+    expect(result).not.toHaveProperty("incarnation");
+  } finally {
+    loadEsbuild().stop();
+  }
+});
+
+it("never falls back to ordinary or tsx entries when the selected literal is absent", async () => {
+  const f = await createSelectedEntryFixture();
+  await rm(f.selected);
+  await writeFile(
+    path.join(f.directory, "index.directory.server.tsx"),
+    "export default () => () => {};",
+  );
+  await expect(buildSelectedDirectoryPlugin(f.directory, "0.4.0")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+
+it("refuses a symlink selected entry and a noncanonical selected root", async () => {
+  const f = await createSelectedEntryFixture();
+  await rm(f.selected);
+  await symlink(path.join(f.directory, "index.server.ts"), f.selected);
+  await expect(buildSelectedDirectoryPlugin(f.directory, "0.4.0")).rejects.toThrow(
+    "canonical regular file",
+  );
+  const alias = await createRootAlias(f.directory);
+  await expect(buildSelectedDirectoryPlugin(alias, "0.4.0")).rejects.toThrow(
+    "absolute and canonical",
+  );
+});
+
+it.each(["./index.server", "./client/surface"])(
+  "keeps selected root boundaries closed to %s",
+  async (specifier) => {
+    const f = await createSelectedEntryFixture();
+    await writeFile(
+      f.selected,
+      `import value from ${JSON.stringify(specifier)}; export default () => () => value;`,
+    );
+    const boundary = specifier === "./index.server" ? "Plugin modules belong" : "client-only";
+    try {
+      await expect(buildSelectedDirectoryPlugin(f.directory, "0.4.0")).rejects.toThrow(boundary);
+    } finally {
+      loadEsbuild().stop();
+    }
+  },
+);
+
+it("does not globally admit the selected root as an ordinary module", async () => {
+  const f = await createSelectedEntryFixture();
+  await writeFile(
+    path.join(f.directory, "index.server.ts"),
+    'import value from "./index.directory.server"; export default value;',
+  );
+  await expect(compileDirectoryPlugin(f.directory, "0.4.0")).rejects.toThrow(
+    "Plugin modules belong",
+  );
+});
+
+it("refuses selected task labels before the parent queue rather than claiming a known compiler failure", async () => {
+  const attempt = runCompilerTask({
+    kind: "directory-selected",
+    directory: "/source-must-not-be-opened",
+    version: "0.4.0",
+  });
+  await expect(attempt).rejects.toThrow("Selected directory compiler admission unavailable");
+  try {
+    await attempt;
+  } catch (error) {
+    expect(error).not.toHaveProperty("outcome");
+    expect(error).not.toHaveProperty("settled");
+  }
+});
+
+it("the actual cold Worker refuses selected DATA/extra entry or role fields before building", async () => {
+  const entry = new URL("../../../dist/server/server/plugins/compiler-worker.js", import.meta.url)
+    .href;
+  const inbox = new CompilerWorkerEvidenceInbox();
+  const worker = new Worker(
+    `const {parentPort}=require("node:worker_threads"); import(${JSON.stringify(entry)}).then(()=>parentPort.postMessage({test:"ready"}));`,
+    { eval: true, execArgv: [] },
+  );
+  worker.on("message", (message: Record<string, unknown>) => inbox.push(message));
+  worker.on("error", (error) => inbox.fail(error));
+  try {
+    await inbox.until(() => inbox.messages.some((message) => message.test === "ready"));
+    const base = { kind: "directory-selected", directory: "/must-not-be-opened", version: "0.4.0" };
+    const tasks = [
+      base,
+      { ...base, entries: { server: "/arbitrary" } },
+      { ...base, role: "claim" },
+      { ...base, entryOverride: "index.server.ts" },
+      { ...base, allowed: true },
+    ];
+    for (const [index, task] of tasks.entries()) {
+      worker.postMessage(task, []);
+      await inbox.until(
+        () => inbox.messages.filter((message) => message.kind === "error").length === index + 1,
+      );
+    }
+    expect(inbox.messages.some((message) => message.kind === "result")).toBe(false);
+    expect(inbox.messages.some((message) => message.outcome === "compiler_error")).toBe(false);
+    expect(inbox.messages.find((message) => message.kind === "error")?.error).toMatchObject({
+      message: "Selected directory compiler admission unavailable",
+    });
+    expect(inbox.messages.filter((message) => message.kind === "error")).toHaveLength(tasks.length);
+  } finally {
+    await worker.terminate();
+  }
+});

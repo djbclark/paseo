@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: node
+      - name: Compile fixed test-only FD exec fixture on trusted Linux CI
+        run: /usr/bin/gcc -std=c11 -O2 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now packages/server/scripts/qualified-python-fd-exec.c -o "$RUNNER_TEMP/qualified-python-fd-exec"
       - name: Actual fixed-source copy, relocation and preexec DATA refusals
         run: node --test packages/server/scripts/retain-qualified-python.test.mjs
       - name: Install isolated CI formatting tools only
@@ -34,3 +36,13 @@ jobs:
           name: python-retention-format-${{ github.sha }}
           path: ${{ runner.temp }}/python-retention-format.patch
           if-no-files-found: ignore
+      - name: Retain bounded FD exec source and DATA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-fd-exec-evidence-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            packages/server/scripts/qualified-python-fd-exec.c
+            ${{ runner.temp }}/qualified-python-fd-exec
+            ${{ runner.temp }}/qualified-python-fd-exec*.json

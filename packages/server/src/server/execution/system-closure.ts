@@ -427,6 +427,16 @@ export async function assertRetainedSearchElf(
   ] as const)
     if (actual.stat[key] !== current[key]) return fail();
 }
+async function assertSearchCandidate(
+  root: string,
+  manifest: ClosureManifest,
+  target: string,
+  kind: "system" | "retained",
+): Promise<void> {
+  if (manifest.externalLibraries.some((item) => item.path === target)) return;
+  if (kind !== "retained") return fail();
+  await assertRetainedSearchElf(root, manifest, target);
+}
 async function verifySearchDirectories(root: string, manifest: ClosureManifest): Promise<void> {
   const layout = manifest.systemClosure.loaderResolution;
   const needed = new Set(layout.elf.flatMap((row) => row.needed));
@@ -448,10 +458,7 @@ async function verifySearchDirectories(root: string, manifest: ClosureManifest):
     for (const name of needed) {
       try {
         const target = await realpath(path.join(directory, name));
-        if (!manifest.externalLibraries.some((item) => item.path === target)) {
-          if (row.kind !== "retained") return fail();
-          await assertRetainedSearchElf(root, manifest, target);
-        }
+        await assertSearchCandidate(root, manifest, target, row.kind);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }

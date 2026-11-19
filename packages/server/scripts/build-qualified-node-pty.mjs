@@ -256,7 +256,8 @@ async function identity(file, label = file) {
   try {
     await handle.close();
   } catch (error) {
-    if (primary) throw new AggregateError([primary, error], "Input read and close failed", { cause: primary });
+    if (primary)
+      throw new AggregateError([primary, error], "Input read and close failed", { cause: primary });
     throw error;
   }
   if (primary) throw primary;
@@ -649,7 +650,12 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     env,
   );
   const makefiles = await makeReceipts(stage, commands);
-  const { headers, map, linkInputs, output, raw, elf } = await compiledEvidence(stage, work, commands, env);
+  const { headers, map, linkInputs, output, raw, elf } = await compiledEvidence(
+    stage,
+    work,
+    commands,
+    env,
+  );
   const preprocessed = path.join(work, "build/Release/obj.target/pty/src/unix/pty.ii");
   const entries = [
     ["build-environment.json", json(env)],

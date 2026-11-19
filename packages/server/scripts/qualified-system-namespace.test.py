@@ -52,6 +52,16 @@ def cache_bytes(hwcap=0):
     return bytes(data)
 
 
+def bind_source_fixture():
+    data = b"source-unit-retained-bytes"
+    before = (11, 22, stat.S_IFREG | 0o444, 0, 0, len(data), 1, 1, 1)
+    source = types.SimpleNamespace(fd=7, path="/retained/lib/object.so", before=before,
+        data=data, ancestors=(("/retained/lib", (1, 2)),), check=mock.Mock(), close=mock.Mock())
+    view = types.SimpleNamespace(**{**source.__dict__, "fd": 8,
+        "check": mock.Mock(), "close": mock.Mock()})
+    return source, view
+
+
 class SchemaTests(unittest.TestCase):
     def test_json_duplicates_and_nonfinite_values_refuse(self):
         for data in (b'{"a":1,"a":2}', b'{"a":NaN}', b'\xff', b'{'):
@@ -545,7 +555,7 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
         target = "/not-for-logs/private-target.so"
         original = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
         bound = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_dev=11, st_ino=22)
-        source = types.SimpleNamespace(fd=7, before=(11, 22, bound.st_mode), check=mock.Mock())
+        source, view = bind_source_fixture()
         caller = types.SimpleNamespace(uid=1001, gid=1002, groups=(1002,), check_alive=mock.Mock())
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
@@ -556,6 +566,7 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
             side_effect=[rows, [{"path": target, "options": {"ro", "nosuid", "nodev"}}]]
             if method == "bind" else None, return_value=rows))
         stack.enter_context(mock.patch.object(ns.os, "stat", side_effect=[original, bound]))
+        stack.enter_context(mock.patch.object(ns, "checked_file", return_value=view))
         stack.enter_context(mock.patch.object(ns, "mount_rows", return_value=rows))
         for name in ("setgroups", "setresgid", "setresuid"):
             stack.enter_context(mock.patch.object(ns.os, name))
@@ -692,25 +703,33 @@ class AdministrativeOrderingTests(unittest.TestCase):
         target = "/usr/lib/libc.so.6"
         original = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
         bound = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o444, st_uid=0, st_dev=11, st_ino=22)
-        source = types.SimpleNamespace(fd=7, before=(11, 22, bound.st_mode), check=mock.Mock())
+        source, view = bind_source_fixture()
         rows = [{"path": "/", "options": {"rw"}}]
         mounted = [{"path": target, "options": {"ro", "nosuid", "nodev"}}]
-        with mock.patch.object(ns.os, "stat", side_effect=[original, bound]), \
+        with mock.patch.object(ns, "checked_file", return_value=view) as open_view, \
+                mock.patch.object(ns.os, "stat", side_effect=[original, bound]), \
                 mock.patch.object(ns, "namespace_identity", return_value=(1, 10)), \
                 mock.patch.object(ns, "verify_private_mounts", side_effect=[rows, mounted]):
             admin.bind(source, target)
         self.assertEqual(admin.libc.mount.call_args_list, [
-            mock.call(b"/proc/self/fd/7", target.encode(), None, ns.Admin.MS_BIND, None),
+            mock.call(b"/proc/self/fd/8", target.encode(), None, ns.Admin.MS_BIND, None),
             mock.call(None, target.encode(), None, ns.Admin.MS_BIND | ns.Admin.MS_REMOUNT |
                       ns.Admin.MS_RDONLY | ns.Admin.MS_NOSUID | ns.Admin.MS_NODEV, None)])
+        open_view.assert_called_once_with(source.path, len(source.data), {
+            "mode": 0o444, "size": len(source.data), "sha256": ns.hashlib.sha256(source.data).hexdigest()})
+        source.close.assert_not_called()
+        view.close.assert_called_once_with()
+        self.assertEqual(source.check.call_count, 3)
+        self.assertEqual(view.check.call_count, 2)
 
     def test_missing_readonly_proof_never_seals_or_executes(self):
         admin = self.admin()
         admin.private = True
         original = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
-        source = types.SimpleNamespace(fd=7, before=(11, 22, original.st_mode), check=mock.Mock())
+        source, view = bind_source_fixture()
         rows = [{"path": "/", "options": {"rw"}}]
-        with mock.patch.object(ns.os, "stat", return_value=original), \
+        with mock.patch.object(ns, "checked_file", return_value=view), \
+                mock.patch.object(ns.os, "stat", return_value=original), \
                 mock.patch.object(ns, "namespace_identity", return_value=(1, 10)), \
                 mock.patch.object(ns, "verify_private_mounts", side_effect=[rows, rows]), \
                 mock.patch.object(ns.os, "execve") as execute:
@@ -718,6 +737,8 @@ class AdministrativeOrderingTests(unittest.TestCase):
                 admin.bind(source, "/usr/lib/libc.so.6")
             execute.assert_not_called()
         self.assertFalse(admin.sealed)
+        view.close.assert_called_once_with()
+        source.close.assert_not_called()
 
     def test_noop_unshare_cannot_make_host_mount_tree_private(self):
         admin = self.admin()
@@ -783,6 +804,156 @@ class AdministrativeOrderingTests(unittest.TestCase):
                     for capability in range(3):
                         self.assertIn(mock.call(24, capability, 0, 0, 0), admin.libc.prctl.call_args_list)
                     self.assertIn(mock.call(38, 1, 0, 0, 0), admin.libc.prctl.call_args_list)
+
+
+class BindViewTests(unittest.TestCase):
+    """Source lifetime/order doubles do not prove kernel mount-namespace identity."""
+
+    def fixture(self):
+        admin = ns.Admin.__new__(ns.Admin)
+        admin.private, admin.sealed, admin.namespace = True, False, (1, 10)
+        admin.libc = types.SimpleNamespace(mount=mock.Mock(return_value=0))
+        source, view = bind_source_fixture()
+        target = "/usr/lib/retained-object.so"
+        original = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
+        bound = types.SimpleNamespace(st_mode=source.before[2], st_uid=0,
+                                      st_dev=source.before[0], st_ino=source.before[1])
+        rows = [{"path": "/", "options": {"rw"}}]
+        mounted = [{"path": target, "options": {"ro", "nosuid", "nodev"}}]
+        scope = contextlib.ExitStack()
+        self.addCleanup(scope.close)
+        opened = scope.enter_context(mock.patch.object(ns, "checked_file", return_value=view))
+        namespace = scope.enter_context(mock.patch.object(ns, "namespace_identity", return_value=(1, 10)))
+        scope.enter_context(mock.patch.object(ns.os, "stat", side_effect=[original, bound]))
+        mounts = scope.enter_context(mock.patch.object(ns, "verify_private_mounts", side_effect=[rows, mounted]))
+        return types.SimpleNamespace(admin=admin, source=source, view=view, target=target,
+            opened=opened, scope=scope, namespace=namespace, mounts=mounts, bound=bound)
+
+    def test_private_namespace_and_live_original_are_required_before_any_reopen(self):
+        for invalid in ("not-private", "sealed", "namespace", "original-check"):
+            f = self.fixture()
+            with self.subTest(invalid=invalid), f.scope:
+                if invalid == "not-private":
+                    f.admin.private = False
+                elif invalid == "sealed":
+                    f.admin.sealed = True
+                elif invalid == "namespace":
+                    f.namespace.return_value = (1, 11)
+                else:
+                    f.source.check.side_effect = ns.Hold("file-changed")
+                with self.assertRaises(ns.Hold):
+                    f.admin.bind(f.source, f.target)
+                f.opened.assert_not_called()
+                f.admin.libc.mount.assert_not_called()
+                f.source.close.assert_not_called()
+                f.view.close.assert_not_called()
+
+    def test_view_lifetime_brackets_mount_and_literal_readonly_remount(self):
+        f = self.fixture()
+        events = []
+        def open_view(path, limit, expected):
+            self.assertTrue(f.admin.private)
+            self.assertFalse(f.admin.sealed)
+            self.assertEqual(path, f.source.path)
+            self.assertFalse(path.startswith("/proc/"))
+            self.assertEqual(limit, len(f.source.data))
+            self.assertEqual(expected["sha256"], ns.hashlib.sha256(f.source.data).hexdigest())
+            events.append("open-current-view")
+            return f.view
+        def mount(*args):
+            self.assertEqual(f.view.close.call_count, 0)
+            self.assertEqual(f.source.close.call_count, 0)
+            self.assertEqual(args[1], f.target.encode())
+            if args[3] == ns.Admin.MS_BIND:
+                self.assertEqual(args[0], b"/proc/self/fd/8")
+                events.append("bind-view")
+            else:
+                self.assertIsNone(args[0])
+                events.append("remount-literal-target")
+            return 0
+        f.opened.side_effect = open_view
+        f.admin.libc.mount.side_effect = mount
+        f.source.check.side_effect = lambda: events.append("original-check")
+        f.view.check.side_effect = lambda: events.append("view-check")
+        f.view.close.side_effect = lambda: events.append("close-view")
+        with f.scope:
+            f.admin.bind(f.source, f.target)
+        self.assertEqual(events, ["original-check", "open-current-view", "original-check", "view-check",
+            "bind-view", "remount-literal-target", "original-check", "view-check", "close-view"])
+        f.source.close.assert_not_called()
+        f.view.close.assert_called_once_with()
+
+    def test_every_original_identity_component_and_bytes_path_ancestry_mismatch_closes_view(self):
+        changes = [("before", (*bind_source_fixture()[0].before[:index], -1,
+                              *bind_source_fixture()[0].before[index + 1:])) for index in range(9)]
+        changes += [("data", b"other bytes"), ("path", "/usr/lib/host-fallback.so"),
+                    ("ancestors", ()), ("fd", 7)]
+        for field, value in changes:
+            f = self.fixture()
+            with self.subTest(field=field, value=value), f.scope:
+                setattr(f.view, field, value)
+                with self.assertRaisesRegex(ns.Hold, "bind-view-identity-mismatch"):
+                    f.admin.bind(f.source, f.target)
+                f.admin.libc.mount.assert_not_called()
+                f.view.close.assert_called_once_with()
+                f.source.close.assert_not_called()
+
+    def test_open_or_close_failure_never_grants_success_or_discards_original(self):
+        f = self.fixture()
+        with f.scope:
+            f.opened.side_effect = OSError("view acquisition failed")
+            with self.assertRaises(OSError):
+                f.admin.bind(f.source, f.target)
+            f.admin.libc.mount.assert_not_called()
+            f.view.close.assert_not_called()
+            f.source.close.assert_not_called()
+        f = self.fixture()
+        with f.scope:
+            f.view.close.side_effect = OSError("close failed")
+            with self.assertRaises(OSError):
+                f.admin.bind(f.source, f.target)
+            f.view.close.assert_called_once_with()
+            f.source.close.assert_not_called()
+
+    def test_original_and_view_checks_before_and_after_syscalls_are_authoritative(self):
+        for owner, index in (("source", 2), ("source", 3), ("view", 1), ("view", 2)):
+            f = self.fixture()
+            with self.subTest(owner=owner, index=index), f.scope:
+                getattr(f, owner).check.side_effect = [None] * (index - 1) + [ns.Hold("file-changed")]
+                with self.assertRaisesRegex(ns.Hold, "file-changed"):
+                    f.admin.bind(f.source, f.target)
+                self.assertEqual(f.admin.libc.mount.call_count, 2 if (owner, index) in
+                                 (("source", 3), ("view", 2)) else 0)
+                f.view.close.assert_called_once_with()
+                f.source.close.assert_not_called()
+
+    def test_each_mount_failure_closes_view_without_retry_or_target_fallback(self):
+        for returns in ([-1], [0, -1]):
+            f = self.fixture()
+            with self.subTest(returns=returns), f.scope, mock.patch.object(ns.ctypes, "get_errno", return_value=22):
+                f.admin.libc.mount.side_effect = returns
+                with self.assertRaises(ns._AdministrativeSyscallFailure):
+                    f.admin.bind(f.source, f.target)
+                self.assertEqual(f.admin.libc.mount.call_count, len(returns))
+                f.view.close.assert_called_once_with()
+                f.source.close.assert_not_called()
+
+    def test_namespace_loss_readonly_or_actual_inode_failure_remains_refusal(self):
+        for invalid in ("namespace-after-open", "namespace-after-bind", "namespace-after-proof", "readonly", "inode"):
+            f = self.fixture()
+            with self.subTest(invalid=invalid), f.scope:
+                if invalid.startswith("namespace"):
+                    index = {"namespace-after-open": 2, "namespace-after-bind": 3,
+                             "namespace-after-proof": 4}[invalid]
+                    f.namespace.side_effect = [(1, 10)] * (index - 1) + [(1, 11)]
+                elif invalid == "readonly":
+                    f.mounts.side_effect = [[{"path": "/", "options": {"rw"}}]] * 2
+                else:
+                    f.bound.st_ino += 1
+                with self.assertRaises(ns.Hold):
+                    f.admin.bind(f.source, f.target)
+                f.view.close.assert_called_once_with()
+                f.source.close.assert_not_called()
 
 
 class RetainedSearchCandidateTests(unittest.TestCase):

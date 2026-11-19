@@ -174,6 +174,7 @@ export function validateNodePtyBuildRecord(record) {
           "compiler-program",
           "tool-libraries",
           "compiler-specs",
+          "node-binding",
           "configure",
           "build",
           "compile",
@@ -297,6 +298,7 @@ async function roots(root, options) {
   keys(options, ["runtime", "headersRoot", "nodeGypRoot", "toolchainRoot", "stagingRoot"]);
   for (const file of [root, ...Object.values(options)]) {
     text(file);
+    if (file.includes(path.delimiter)) refuse("PATH delimiter in build path");
     if (!path.isAbsolute(file) || /\s/.test(file) || (await realpath(file)) !== file)
       refuse("canonical build path");
   }
@@ -500,6 +502,11 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     )[0];
     tools.push({ role, identity: item, version });
   }
+  tools.push({
+    role: "gyp-shell",
+    identity: await identity("/bin/sh"),
+    version: "original GYP command shell",
+  });
   const programs = await compilerPrograms(commands, env, stage);
   const libraries = await toolLibraries(
     commands,
@@ -527,6 +534,23 @@ export async function buildQualifiedNodePtyCopy(root, options) {
   await checkCopiedSource(api, copiedApi);
   env.CXX = await compilerWrapper(stage, options.runtime);
   const gyp = path.join(options.nodeGypRoot, "bin/node-gyp.js");
+  const bindingText = await run(
+    commands,
+    "node-binding",
+    "/bin/sh",
+    [
+      "-c",
+      "exec node -p 'JSON.stringify({executable:process.execPath,version:process.version})'",
+    ],
+    work,
+    env,
+  );
+  const nodeBinding = JSON.parse(bindingText);
+  keys(nodeBinding, ["executable", "version"]);
+  if (nodeBinding.executable !== options.runtime || nodeBinding.version !== "v22.23.5")
+    refuse("GYP selected Node binding");
+  if (json(await identity(nodeBinding.executable)) !== json(inputs.node.runtime))
+    refuse("GYP selected Node changed");
   const configured = await run(
     commands,
     "configure",
@@ -595,6 +619,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
   const preprocessed = path.join(work, "build/Release/obj.target/pty/src/unix/pty.ii");
   const entries = [
     ["build-environment.json", json(env)],
+    ["node-binding.json", json(nodeBinding)],
     ["configure.txt", configured],
     ["build.txt", built],
     ["compiler-specs.txt", specs],

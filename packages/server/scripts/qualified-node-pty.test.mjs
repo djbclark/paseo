@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { before, test } from "node:test";
 import { promisify } from "node:util";
@@ -63,12 +73,54 @@ test("builds the selected source offline and reports the actual new artifact", a
   assert.equal(record.coverage.hermetic, false);
   assert.equal(record.coverage.reproducibleOldPrebuild, false);
   assert.equal(record.inputs.node.runtime.sha256, NODE_PTY_INPUTS.runtime);
-  const environmentFile = record.evidence.find((file) => file.path.endsWith("build-environment.json"));
+  const environmentFile = record.evidence.find((file) =>
+    file.path.endsWith("build-environment.json"),
+  );
   const environment = JSON.parse(await readFile(path.join(root, environmentFile.path), "utf8"));
   assert.equal(environment.PATH, `${path.join(root, "runtime")}:/usr/bin:/bin`);
   assert.equal(environment.SYSROOT_PATH, "");
   assert.equal(environment.PYTHON, "/usr/bin/python3");
   assert.equal(environment.NODE_OPTIONS, undefined);
+});
+
+test("GYP selected Node is proved before configure despite absent or different system candidates", async () => {
+  const bindingFile = record.evidence.find((file) => file.path.endsWith("node-binding.json"));
+  const binding = JSON.parse(await readFile(path.join(root, bindingFile.path), "utf8"));
+  const runtime = path.join(root, "runtime/node");
+  assert.deepEqual(binding, { executable: runtime, version: "v22.23.5" });
+  const bindingIndex = record.commands.findIndex((row) => row.role === "node-binding");
+  const configureIndex = record.commands.findIndex((row) => row.role === "configure");
+  assert.ok(bindingIndex >= 0 && bindingIndex < configureIndex);
+  const empty = await mkdtemp(path.join(prepared.options.stagingRoot, "empty-node-path-"));
+  const different = await mkdtemp(path.join(prepared.options.stagingRoot, "other-node-path-"));
+  const otherNodeScript = "#!/bin/sh\nprintf '%s\\n' 'different-system-node'\n";
+  await writeFile(path.join(different, "node"), otherNodeScript, { mode: 0o755 });
+  const query = [
+    "-c",
+    "exec node -p 'JSON.stringify({executable:process.execPath,version:process.version})'",
+  ];
+  await assert.rejects(execute("/bin/sh", query, { env: { PATH: empty } }), { code: 127 });
+  const other = await execute("/bin/sh", query, { env: { PATH: different } });
+  assert.equal(other.stdout.trim(), "different-system-node");
+  for (const suffix of [empty, different]) {
+    const selected = await execute("/bin/sh", query, {
+      env: { PATH: `${path.dirname(runtime)}:${suffix}`, LANG: "C" },
+    });
+    assert.deepEqual(JSON.parse(selected.stdout), binding);
+  }
+});
+
+test("colon-containing selected root refuses before any tool or configure spawn", async () => {
+  const directory = await copyRoot();
+  const colon = `${directory}:copy`;
+  await rename(directory, colon);
+  const before = await readdir(prepared.options.stagingRoot);
+  await assert.rejects(buildQualifiedNodePtyCopy(colon, options(colon)), /PATH delimiter/);
+  assert.deepEqual(await readdir(prepared.options.stagingRoot), before);
+  assert.equal(
+    hash(await readFile(path.join(colon, result.addon.path))),
+    NODE_PTY_INPUTS.original,
+  );
 });
 
 test("strict nested receipt rejects invented authority, inputs, and unknown coverage", () => {

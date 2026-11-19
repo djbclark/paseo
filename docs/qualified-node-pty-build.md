@@ -10,9 +10,13 @@ node-addon-api exception configuration. The same official archive supplies
 node-gyp and its surrounding npm dependencies. CI downloads and verifies the
 public inputs before the helper runs. Bare `node` calls inside the original
 GYP recipe resolve through the verified copied runtime directory first; the
-remaining PATH is `/usr/bin:/bin`. The sanitized environment is retained in
-the receipt evidence. The helper runs offline without npm
-lifecycle scripts, a header downloader, or a prebuild fallback.
+remaining PATH is `/usr/bin:/bin`. Before configure, the same shell resolves
+`node` and reports its executable and version; that file is checked against the
+selected runtime identity. The sanitized environment and resolved binding are
+retained in the receipt evidence. Controlled CI cases put an absent or different
+Node after the copied runtime and verify actual shell resolution. The helper
+runs offline without npm lifecycle scripts, a header downloader, or a prebuild
+fallback.
 
 ## Build-only API
 
@@ -28,7 +32,8 @@ these keys:
 | toolchainRoot | `/usr` on the existing trusted Linux CI baseline              |
 | stagingRoot   | Separate existing directory for this attempt's build evidence |
 
-Paths must be canonical absolute paths without whitespace. Missing tools,
+Paths must be canonical absolute paths without whitespace or the POSIX PATH
+delimiter `:`; those checks run before any tool spawn. Missing tools,
 changed inputs, competing native loader candidates, malformed receipts, and
 failed commands refuse the build. Staging evidence remains available on
 failure. A partially written disposable copy must be discarded; failure never

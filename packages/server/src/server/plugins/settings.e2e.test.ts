@@ -210,7 +210,8 @@ test("an expired initialization ALS read reenters through the actual original pl
     const initializationContext = new AsyncResource("settings-expired-context");
     export default function(context) {
       const settings = context.registerSettings(defineSettings({ id: "display", scope: "host",
-        version: 1, schema: z.object({ enabled: z.boolean().default(true) }) }));
+        version: 1, schema: z.object({ enabled: z.boolean().default(true), parseCount: z.number().default(0) })
+          .transform(values => ({ ...values, parseCount: values.parseCount + 1 })) }));
       const unsubscribe = settings.subscribe(async () => { await settings.read(); });
       context.handle(defineRpc({ name: "self.read", input: z.object({}), output: z.json() }),
         () => initializationContext.runInAsyncScope(() => settings.read()));
@@ -231,7 +232,7 @@ test("an expired initialization ALS read reenters through the actual original pl
   });
   await client.connect();
   const initial = await client.invokePluginRpc("settings-self", "self.read", {});
-  expect(initial).toMatchObject({ status: "ready", values: { enabled: true } });
+  expect(initial).toMatchObject({ status: "ready", values: { enabled: true, parseCount: 1 } });
   const rpc = settingsRpc("display");
   expect(
     await client.invokePluginRpc("settings-self", rpc.write.name, {
@@ -241,6 +242,6 @@ test("an expired initialization ALS read reenters through the actual original pl
   ).toMatchObject({ status: "saved" });
   expect(await client.invokePluginRpc("settings-self", "self.read", {})).toMatchObject({
     status: "ready",
-    values: { enabled: false },
+    values: { enabled: false, parseCount: 2 },
   });
 }, 60_000);

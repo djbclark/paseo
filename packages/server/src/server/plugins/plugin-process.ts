@@ -28,6 +28,7 @@ import type {
   PluginHandlerContext,
   PluginServerContext,
   PluginServerContribution,
+  PluginSettingsState,
 } from "@getpaseo/plugin/server";
 import { assertPluginWireValue } from "@getpaseo/protocol/binary-frames/index";
 import {
@@ -115,9 +116,12 @@ export function createPluginWorker(
         const operation = activity.retainCurrentIfLive();
         if (!operation) {
           if (!ownPluginId || !ownClient) throw new Error("Plugin settings session unavailable");
-          return handlers.read.contract.output.parse(
+          const state = handlers.read.contract.output.parse(
             await ownClient.invokePluginRpc(ownPluginId, handlers.read.contract.name, {}),
           );
+          // The exact own handler already parsed values with definition.schema. The wire
+          // erases that generic type; parsing again could apply a transform twice.
+          return state as PluginSettingsState<Schema>;
         }
         try {
           return await operation.run(handlers.settings.read);

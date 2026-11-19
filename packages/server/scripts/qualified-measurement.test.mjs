@@ -249,3 +249,98 @@ test("retained system metadata refuses old missing-payload manifests and unknown
     false,
   );
 });
+
+// These are data-only ELF validation checks. No native addon is imported/executed.
+test("exact copied Sherpa recipe preserves code/relocation/init semantics and rejects changed input", async () => {
+  const { createRequire } = await import("node:module");
+  const { readFile } = await import("node:fs/promises");
+  const require = createRequire(import.meta.url);
+  const { assertExactSherpaInput } = await import("./adapt-qualified-sherpa.mjs");
+  const { auditSherpaElf, assertSherpaAdaptationSemantics } =
+    await import("./sherpa-elf-audit.mjs");
+  const original = await readFile(require.resolve("sherpa-onnx-linux-x64/sherpa-onnx.node"));
+  const before = assertExactSherpaInput(original);
+  const changed = Buffer.from(original);
+  changed[changed.length - 1] ^= 1;
+  assert.throws(() => assertExactSherpaInput(changed));
+  const old = "$ORIGIN:/home/runner/work/sherpa-onnx/sherpa-onnx/build/install/lib:";
+  const strings = before.sections.find((row) => row.name === ".dynstr");
+  assert.ok(strings);
+  const offset = original.indexOf(Buffer.from(old), strings.offset);
+  assert.ok(offset >= strings.offset && offset + old.length < strings.offset + strings.size);
+  const rewritten = Buffer.from(original);
+  rewritten.fill(0, offset, offset + old.length);
+  rewritten.write("$ORIGIN", offset);
+  const after = auditSherpaElf(rewritten);
+  assertSherpaAdaptationSemantics(before, after);
+  const text = after.sections.find((row) => row.name === ".text");
+  assert.ok(text?.size);
+  const corruptCode = Buffer.from(rewritten);
+  corruptCode[text.offset] ^= 1;
+  assert.throws(() => assertSherpaAdaptationSemantics(before, auditSherpaElf(corruptCode)));
+  const reloc = after.sections.find((row) => row.name === ".rela.dyn");
+  assert.ok(reloc?.size);
+  const corruptReloc = Buffer.from(rewritten);
+  corruptReloc[reloc.offset] ^= 1;
+  assert.throws(() => assertSherpaAdaptationSemantics(before, auditSherpaElf(corruptReloc)));
+  assert.throws(() => assertSherpaAdaptationSemantics(after, before));
+});
+
+test("finite Git startup projects only the declared original closed environment", async () => {
+  const { declaredFiniteGitEnvironment } =
+    await import("../dist/server/server/execution/finite-git-environment.js");
+  const { userInfo } = await import("node:os");
+  const base = {
+    PATH: "/usr/bin:/bin",
+    HOME: userInfo().homedir,
+    PASEO_MANAGED_PLUGIN_POLICY: "/protected/native-policy.json",
+  };
+  const home = "/protected/paseo-home";
+  const declared = {
+    ...base,
+    PASEO_HOME: home,
+    GIT_CONFIG_SYSTEM: "/protected/system",
+    GIT_CONFIG_GLOBAL: "/protected/global",
+    LC_ALL: "C",
+  };
+  const profile = {
+    recipe: {
+      environment: declared,
+      configRoots: { system: declared.GIT_CONFIG_SYSTEM, global: declared.GIT_CONFIG_GLOBAL },
+    },
+  };
+  assert.deepEqual(declaredFiniteGitEnvironment(profile, base, home), declared);
+  for (const changed of [
+    { ...declared, EXTRA: "ambient" },
+    { ...declared, GIT_CONFIG_SYSTEM: "/ambient/system" },
+    { ...declared, HOME: "/ambient/home" },
+    { ...declared, PASEO_HOME: "/other" },
+    { ...declared, LC_ALL: "unreviewed" },
+  ])
+    assert.throws(() =>
+      declaredFiniteGitEnvironment(
+        { recipe: { ...profile.recipe, environment: changed } },
+        base,
+        home,
+      ),
+    );
+});
+test("counterfeit continuation data and SDK roots never mint an owner continuation", async () => {
+  const {
+    captureQualifiedBuiltinContinuation,
+    activateQualifiedBuiltinContinuation,
+    assertQualifiedBuiltinContinuationIdentity,
+    readQualifiedBuiltinContinuation,
+    finishQualifiedBuiltinContinuation,
+    isQualifiedDaemonOwner,
+  } = await import("../dist/server/server/execution/daemon-owner.js");
+  const token = { settled: Promise.resolve() };
+  await assert.rejects(() => activateQualifiedBuiltinContinuation(token));
+  assert.throws(() => assertQualifiedBuiltinContinuationIdentity(token));
+  assert.throws(() => readQualifiedBuiltinContinuation(token));
+  await assert.rejects(() => finishQualifiedBuiltinContinuation(token));
+  assert.throws(() =>
+    captureQualifiedBuiltinContinuation({}, {}, { root: {}, activityOwner: {}, operation: {} }),
+  );
+  assert.equal(isQualifiedDaemonOwner(token), false);
+});

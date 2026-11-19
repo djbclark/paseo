@@ -58,7 +58,12 @@ async function probeDaemonStatus(
   let live: Record<string, unknown> = {};
   let client: Awaited<ReturnType<typeof connectToDaemon>> | undefined;
   try {
-    client = await connectToDaemon({ target, instance: instance ?? undefined, timeout: 1_500 });
+    client = await connectToDaemon({
+      target,
+      instance: instance ?? undefined,
+      timeout: 1_500,
+      persistClientId: false,
+    });
   } catch (error) {
     const failure = buildDaemonConnectionCommandError({ target, error });
     if (target.kind === "endpoint") throw failure;

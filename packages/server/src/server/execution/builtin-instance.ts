@@ -142,6 +142,42 @@ export function readQualifiedBuiltinHelperContext(instance: unknown, owner: unkn
     profile: enrolledProfile(record),
   };
 }
+/** Original live-root witness only; the producer separately activates a fresh scope. */
+export function captureBuiltinContinuationWitness(
+  instance: object,
+  owner: QualifiedDaemonOwner,
+  activityOwner: PluginHelperAdmissionRequest["activityOwner"],
+  root: object,
+) {
+  const record = instances.get(instance);
+  if (!record || record.owner !== owner || record.closed)
+    throw new Error("Builtin continuation original instance unavailable");
+  if (!activityOwner || record.execution.activityOwner !== activityOwner)
+    throw new Error("Builtin continuation activity substitution");
+  activityOwner.assertLiveRoot(root);
+  const assertOriginal = () => {
+    if (instances.get(instance) !== record || record.closed || record.owner !== owner)
+      throw new Error("Builtin continuation instance unavailable");
+    const actual = readInternalPluginExecution(instance);
+    if (
+      !actual ||
+      actual.workerIdentity !== record.execution.workerIdentity ||
+      actual.activityOwner !== activityOwner
+    )
+      throw new Error("Builtin continuation worker substitution");
+    assertBuiltinBindings();
+    activityOwner.assertLiveRoot(root);
+    if (activityOwner.state() === "unknown") throw new Error("Builtin continuation uncertain");
+  };
+  return {
+    assertOriginal,
+    async refreshCurrent() {
+      assertOriginal();
+      await refreshPreparedQualifiedBuiltinGit(record.child, record.owner);
+      assertOriginal();
+    },
+  };
+}
 /** Only this fixed factory constructs and records the ORIGINAL internal worker. */
 export async function createQualifiedBuiltinInstance(owner: QualifiedDaemonOwner, id: string) {
   if (!isQualifiedDaemonOwner(owner) || !builtinPlugins.includes(id))
@@ -343,13 +379,18 @@ export async function refreshBuiltinInstances(owner: object): Promise<void> {
   for (const record of records) {
     await refreshPreparedQualifiedBuiltinGit(record.child, record.owner);
     for (const [child, helper] of record.helpers) {
-      await helper.observed;
+      // Pending observations own an actual SDK activity reference. They cannot
+      // be quiet; waiting here would make fresh admission/observation await itself.
+      // Lifetime settlement remains the descriptor's real close/descendant proof.
       if (helper.leaderClosed || !child.pid || !helper.observation) continue;
       const actual = await observeLinuxProcess(child.pid).catch(() => null);
       if (
-        !actual ||
-        actual.birth !== helper.observation.birth ||
-        actual.image !== helper.observation.image
+        !helper.leaderClosed &&
+        child.exitCode === null &&
+        child.signalCode === null &&
+        (!actual ||
+          actual.birth !== helper.observation.birth ||
+          actual.image !== helper.observation.image)
       )
         record.unprovenHelper = true;
     }

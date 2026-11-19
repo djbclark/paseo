@@ -223,7 +223,7 @@ class Caller:
     def check_alive(self):
         ready, _, _ = select.select([self.pidfd, *self.ancestor_fds], [], [], 0)
         require(not ready and process_record(self.record[0]) == self.record, "caller-changed")
-        require(ancestor_chain(self.record[0]) == self.chain, "caller-ancestry-changed")
+        require(ancestor_chain(self.record[0], self.record) == self.chain, "caller-ancestry-changed")
         # No NSS operation after binds: its backend could load another administrative DSO.
         self.passwd.check()
         require(str(pathlib.Path(self.home).resolve(strict=True)) == self.home and
@@ -231,8 +231,13 @@ class Caller:
                 "caller-home-changed")
 
 
-def ancestor_chain(caller_pid):
+def ancestor_chain(caller_pid, original_record=None):
     own = process_record(os.getpid())
+    observed = process_record(caller_pid)
+    original = observed if original_record is None else original_record
+    require(observed == original, "caller-changed")
+    require(original[3][0] != 0 and len(set(original[3])) == len(set(original[4])) == 1 and
+            original[4][0] != 0 and original[6] == own[6], "invalid-original-account")
     current = own[2]
     chain = []
     sudo = os.stat("/usr/bin/sudo", follow_symlinks=False)
@@ -242,7 +247,10 @@ def ancestor_chain(caller_pid):
         require(current > 1 and len(chain) < 8 and
                 current not in (row[0] for row in chain), "invalid-caller-ancestry")
         row = process_record(current)
-        require(row[3] == (0, 0, 0, 0) and row[4] == (0, 0, 0, 0) and
+        # Actual sudo outer monitor retains the invoking user's real UID. Only
+        # its direct parent may be that SAME verified caller; inner monitors stay root.
+        direct_outer = row[2] == caller_pid and row[3] == (original[3][0], 0, 0, 0)
+        require((row[3] == (0, 0, 0, 0) or direct_outer) and row[4] == (0, 0, 0, 0) and
                 row[6] == own[6], "untrusted-sudo-ancestor")
         executable = os.stat(f"/proc/{current}/exe")
         require((executable.st_dev, executable.st_ino) == (sudo.st_dev, sudo.st_ino) and
@@ -250,6 +258,7 @@ def ancestor_chain(caller_pid):
         chain.append(row)
         current = row[2]
     require(chain, "missing-sudo-monitor")
+    require(process_record(caller_pid) == original, "caller-changed")
     return tuple(chain)
 
 
@@ -273,7 +282,7 @@ def capture_caller(pid):
                 matches[0][5] == home, "nonlocal-or-ambiguous-caller-account")
         home_stat = os.stat(home)
         require(stat.S_ISDIR(home_stat.st_mode) and home_stat.st_uid == row[3][0], "invalid-home-owner")
-        chain = ancestor_chain(pid)
+        chain = ancestor_chain(pid, row)
         for ancestor in chain:
             ancestor_fds.append(os.pidfd_open(ancestor[0], 0))
         result = Caller(row, chain, fd, account.pw_name, home, passwd,

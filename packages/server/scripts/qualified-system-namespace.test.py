@@ -634,35 +634,166 @@ class AdministrativeOrderingTests(unittest.TestCase):
 
 
 class CallerAncestryTests(unittest.TestCase):
-    def test_only_bounded_actual_root_sudo_ancestors_are_accepted(self):
-        sudo_file = types.SimpleNamespace(st_dev=11, st_ino=22,
+    """Kernel-record doubles only; actual sudo topology requires disposable CI."""
+
+    def setUp(self):
+        self.sudo = types.SimpleNamespace(st_dev=11, st_ino=22,
                                          st_mode=stat.S_IFREG | 0o4755, st_uid=0)
-        original = (777, 1, 888, (0,) * 4, (0,) * 4, (0,), (10, 20))
-        monitor = (888, 2, 42, (0,) * 4, (0,) * 4, (0,), (10, 20))
-        for failure in (None, "cycle", "uid", "namespace", "executable", "depth"):
-            with self.subTest(failure=failure), contextlib.ExitStack() as stack:
-                records = {777: original, 888: monitor}
-                if failure == "cycle":
-                    records[888] = (888, 2, 888, *monitor[3:])
-                if failure == "uid":
-                    records[888] = (888, 2, 42, (1001, 0, 0, 0), *monitor[4:])
-                if failure == "namespace":
-                    records[888] = (*monitor[:6], (10, 99))
-                if failure == "depth":
-                    records[777] = (777, 1, 900, *original[3:])
-                    for pid in range(900, 909):
-                        records[pid] = (pid, pid, pid + 1 if pid < 908 else 42, *monitor[3:])
-                stack.enter_context(mock.patch.object(ns.os, "getpid", return_value=777))
-                stack.enter_context(mock.patch.object(ns, "process_record", side_effect=records.__getitem__))
-                changed_file = types.SimpleNamespace(st_dev=11, st_ino=99)
-                stack.enter_context(mock.patch.object(ns.os, "stat", side_effect=lambda path, **_kwargs:
-                    changed_file if failure == "executable" and path.startswith("/proc/") else sudo_file))
-                stack.enter_context(mock.patch.object(ns.os, "readlink", return_value="/usr/bin/sudo"))
-                if failure:
-                    with self.assertRaises(ns.Hold):
-                        ns.ancestor_chain(42)
-                else:
-                    self.assertEqual(ns.ancestor_chain(42), (monitor,))
+        self.helper = (777, 30, 888, (0,) * 4, (0,) * 4, (0,), (10, 20))
+        self.caller = (42, 10, 1, (1001,) * 4, (1002,) * 4, (1002, 1003), (10, 20))
+        self.outer = (888, 20, 42, (1001, 0, 0, 0), (0,) * 4, (0,), (10, 20))
+        self.records = {777: self.helper, 42: self.caller, 888: self.outer}
+        self.executable = self.sudo
+        self.exe_path = "/usr/bin/sudo"
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(ns.os, "getpid", return_value=777))
+        stack.enter_context(mock.patch.object(ns, "process_record", side_effect=self.records.__getitem__))
+        stack.enter_context(mock.patch.object(ns.os, "stat", side_effect=lambda path, **_kwargs:
+            self.executable if path.startswith("/proc/") else self.sudo))
+        stack.enter_context(mock.patch.object(ns.os, "readlink", side_effect=lambda _path: self.exe_path))
+
+    def test_actual_direct_outer_shape_and_legacy_diagnostic_signature(self):
+        self.assertEqual(ns.ancestor_chain(42, self.caller), (self.outer,))
+        self.assertEqual(ns.ancestor_chain(42), (self.outer,))
+
+    def test_real_caller_uid_is_derived_not_hardcoded_to_ci_account(self):
+        caller = (*self.caller[:3], (2001,) * 4, *self.caller[4:])
+        outer = (*self.outer[:3], (2001, 0, 0, 0), *self.outer[4:])
+        self.records.update({42: caller, 888: outer})
+        self.assertEqual(ns.ancestor_chain(42, caller), (outer,))
+
+    def test_existing_all_root_monitor_and_inner_monitors_remain_supported(self):
+        root_outer = (*self.outer[:3], (0,) * 4, *self.outer[4:])
+        self.records[888] = root_outer
+        self.assertEqual(ns.ancestor_chain(42, self.caller), (root_outer,))
+        inner = (999, 25, 888, (0,) * 4, (0,) * 4, (0,), (10, 20))
+        self.records.update({777: (777, 30, 999, *self.helper[3:]), 999: inner, 888: self.outer})
+        self.assertEqual(ns.ancestor_chain(42, self.caller), (inner, self.outer))
+
+    def test_every_mixed_uid_component_and_gid_component_mismatch_refuses(self):
+        for index in range(4):
+            uids = list(self.outer[3])
+            uids[index] = 1009
+            self.records[888] = (*self.outer[:3], tuple(uids), *self.outer[4:])
+            with self.subTest(field="uid", index=index), self.assertRaisesRegex(ns.Hold, "untrusted-sudo-ancestor"):
+                ns.ancestor_chain(42, self.caller)
+            gids = list(self.outer[4])
+            gids[index] = 1002
+            self.records[888] = (*self.outer[:4], tuple(gids), *self.outer[5:])
+            with self.subTest(field="gid", index=index), self.assertRaisesRegex(ns.Hold, "untrusted-sudo-ancestor"):
+                ns.ancestor_chain(42, self.caller)
+
+    def test_mixed_real_uid_is_forbidden_on_inner_or_other_parent(self):
+        self.records[888] = (888, 20, 999, *self.outer[3:])
+        self.records[999] = (999, 15, 42, (0,) * 4, (0,) * 4, (0,), (10, 20))
+        with self.assertRaisesRegex(ns.Hold, "untrusted-sudo-ancestor"):
+            ns.ancestor_chain(42, self.caller)
+
+    def test_each_namespace_mismatch_refuses_even_for_direct_outer(self):
+        for namespaces in ((99, 20), (10, 99)):
+            self.records[888] = (*self.outer[:6], namespaces)
+            with self.subTest(namespaces=namespaces), self.assertRaisesRegex(ns.Hold, "untrusted-sudo-ancestor"):
+                ns.ancestor_chain(42, self.caller)
+
+    def test_canonical_executable_path_inode_and_protected_sudo_remain_required(self):
+        self.exe_path = "/other/sudo"
+        with self.assertRaisesRegex(ns.Hold, "unknown-ancestor-executable"):
+            ns.ancestor_chain(42, self.caller)
+        self.exe_path = "/usr/bin/sudo"
+        for dev, inode in ((12, 22), (11, 23)):
+            self.executable = types.SimpleNamespace(st_dev=dev, st_ino=inode)
+            with self.subTest(dev=dev, inode=inode), self.assertRaisesRegex(ns.Hold, "unknown-ancestor-executable"):
+                ns.ancestor_chain(42, self.caller)
+        self.executable = self.sudo
+        for mode, uid in ((stat.S_IFLNK | 0o777, 0), (stat.S_IFREG | 0o4775, 0),
+                          (stat.S_IFREG | 0o4757, 0), (stat.S_IFREG | 0o4755, 1001)):
+            self.sudo = types.SimpleNamespace(st_dev=11, st_ino=22, st_mode=mode, st_uid=uid)
+            with self.subTest(mode=mode, uid=uid), self.assertRaisesRegex(ns.Hold, "unprotected-sudo"):
+                ns.ancestor_chain(42, self.caller)
+
+    def test_uniform_nonroot_original_account_and_namespaces_are_rechecked(self):
+        variants = [(*self.caller[:3], (0,) * 4, *self.caller[4:]),
+                    (*self.caller[:3], (1001, 0, 1001, 1001), *self.caller[4:]),
+                    (*self.caller[:4], (0,) * 4, *self.caller[5:]),
+                    (*self.caller[:4], (1002, 0, 1002, 1002), *self.caller[5:]),
+                    (*self.caller[:6], (99, 20)), (*self.caller[:6], (10, 99))]
+        for caller in variants:
+            self.records[42] = caller
+            with self.subTest(caller=caller), self.assertRaisesRegex(ns.Hold, "invalid-original-account"):
+                ns.ancestor_chain(42, caller)
+
+    def test_retained_caller_identity_cannot_be_substituted_before_walk(self):
+        self.records[42] = (*self.caller[:3], (2001,) * 4, *self.caller[4:])
+        with self.assertRaisesRegex(ns.Hold, "caller-changed"):
+            ns.ancestor_chain(42, self.caller)
+
+    def test_caller_birth_parent_credentials_groups_and_namespaces_cannot_change_during_walk(self):
+        variants = [(42, 11, *self.caller[2:]), (42, 10, 2, *self.caller[3:]),
+                    (*self.caller[:3], (2001,) * 4, *self.caller[4:]),
+                    (*self.caller[:4], (2002,) * 4, *self.caller[5:]),
+                    (*self.caller[:5], (1002,), self.caller[6]),
+                    (*self.caller[:6], (99, 20)), (*self.caller[:6], (10, 99))]
+        for changed in variants:
+            count = 0
+            def observe(pid):
+                nonlocal count
+                if pid == 42:
+                    count += 1
+                    return self.caller if count == 1 else changed
+                return self.records[pid]
+            with self.subTest(changed=changed), mock.patch.object(ns, "process_record", side_effect=observe):
+                with self.assertRaisesRegex(ns.Hold, "caller-changed"):
+                    ns.ancestor_chain(42, self.caller)
+
+    def test_eight_monitors_bound_cycle_and_missing_monitor_are_unchanged(self):
+        self.records[777] = (777, 30, 900, *self.helper[3:])
+        for pid in range(900, 908):
+            self.records[pid] = (pid, pid, pid + 1 if pid < 907 else 42, (0,) * 4, (0,) * 4, (0,), (10, 20))
+        self.assertEqual(len(ns.ancestor_chain(42, self.caller)), 8)
+        self.records[907] = (907, 907, 908, *self.records[907][3:])
+        self.records[908] = (908, 908, 42, *self.records[907][3:])
+        with self.assertRaisesRegex(ns.Hold, "invalid-caller-ancestry"):
+            ns.ancestor_chain(42, self.caller)
+        self.records[900] = (900, 900, 900, *self.records[900][3:])
+        with self.assertRaisesRegex(ns.Hold, "invalid-caller-ancestry"):
+            ns.ancestor_chain(42, self.caller)
+        self.records[777] = (777, 30, 42, *self.helper[3:])
+        with self.assertRaisesRegex(ns.Hold, "missing-sudo-monitor"):
+            ns.ancestor_chain(42, self.caller)
+
+    def test_check_alive_retains_original_groups_across_its_ancestry_recheck(self):
+        caller = ns.Caller(self.caller, (self.outer,), 7, "fixture", "/home/fixture",
+                           mock.Mock(), (11, 22), (8,))
+        changed = (*self.caller[:5], (1002,), self.caller[6])
+        count = 0
+        def observe(pid):
+            nonlocal count
+            if pid == 42:
+                count += 1
+                return self.caller if count == 1 else changed
+            return self.records[pid]
+        with mock.patch.object(ns.select, "select", return_value=([], [], [])), \
+                mock.patch.object(ns, "process_record", side_effect=observe), \
+                mock.patch.object(ns.pathlib.Path, "resolve", return_value=pathlib.Path("/home/fixture")):
+            with self.assertRaisesRegex(ns.Hold, "caller-changed"):
+                caller.check_alive()
+
+    def test_caller_pidfd_exit_or_changed_group_record_refuses_before_ancestry(self):
+        caller = ns.Caller(self.caller, (self.outer,), 7, "fixture", "/home/fixture",
+                           mock.Mock(), (11, 22), (8,))
+        with mock.patch.object(ns.select, "select", return_value=([7], [], [])), \
+                mock.patch.object(ns, "ancestor_chain") as walk:
+            with self.assertRaisesRegex(ns.Hold, "caller-changed"):
+                caller.check_alive()
+            walk.assert_not_called()
+        changed = (*self.caller[:5], (1002,), self.caller[6])
+        with mock.patch.object(ns.select, "select", return_value=([], [], [])), \
+                mock.patch.object(ns, "process_record", return_value=changed), \
+                mock.patch.object(ns, "ancestor_chain") as walk:
+            with self.assertRaisesRegex(ns.Hold, "caller-changed"):
+                caller.check_alive()
+            walk.assert_not_called()
 
 
 if __name__ == "__main__":

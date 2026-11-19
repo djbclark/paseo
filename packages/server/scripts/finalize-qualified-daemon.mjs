@@ -78,9 +78,11 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     ...files.filter(
       (file) =>
         file.path.startsWith("system-closure/") ||
+        file.path.startsWith("native-provenance/") ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||
+        /\.so(?:\.[0-9]+)*$/.test(file.path) ||
         file.path.endsWith("spawn-helper") ||
         file.path.startsWith("node_modules/esbuild/") ||
         file.path === "node_modules/typescript/lib/typescript.js",
@@ -91,9 +93,17 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     if (a.path > b.path) return 1;
     return 0;
   });
+  const adaptation = files.find(
+    (file) => file.path === "native-provenance/sherpa-addon-adaptation.json",
+  );
+  if (!adaptation || adaptation.sha256 !== inputs.copiedSherpa?.record.sha256)
+    throw new Error("Copied Sherpa provenance identity mismatch");
   const builtinModuleTable = {
     schemaVersion: 1,
-    recipe: builtinBindingsRecipe,
+    recipe: {
+      ...builtinBindingsRecipe,
+      copiedSherpaAddonRecipeSha256: inputs.copiedSherpa.record.sha256,
+    },
     runtimeSha256: files.find((file) => file.path === "runtime/node").sha256,
     daemonSha256: files.find((file) => file.path === "daemon.mjs").sha256,
     externalLibraries,

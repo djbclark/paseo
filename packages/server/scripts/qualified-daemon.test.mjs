@@ -43,6 +43,9 @@ function probe(root, race, ambient = {}) {
     Object.assign(process.env,${JSON.stringify(ambient)});
     const {createQualifiedDaemonInvocation}=await import(${JSON.stringify(`${root}/daemon-launcher.mjs`)});
     const result=await createQualifiedDaemonInvocation(${JSON.stringify(root)},"/disposable/home"); console.log(JSON.stringify(result));`;
+  return namespaceProbe(root, source, ambient);
+}
+function namespaceProbe(root, source, ambient = {}, timeout = 20000) {
   // Host remains the original unprivileged caller. Root-owned preparation and
   // cleanup stay OUTSIDE the namespace; the child probe has caps cleared/NNP.
   const manifestPath = `${root}.manifest.json`;
@@ -54,10 +57,10 @@ function probe(root, race, ambient = {}) {
   assert.ok(bootstrap, "Actual packaged namespace helper missing");
   assert.equal(
     bootstrap.sha256,
-    "605fe0f54cd43ed9614d7c4517919c9867e48a6da719bc33dac55b95ded6a8d7",
+    "4f9164025314df755116ed09330a9d2c5d7b0d7ad3bc18c9abd28345b99001cf",
     "Administrative helper must match independently reviewed tracked source",
   );
-  assert.equal(bootstrap.size, 52756);
+  assert.equal(bootstrap.size, 53480);
   const script = `${root}.probe.mjs`,
     recipe = `${root}.launch-recipe.json`;
   const temporary = mkdtempSync(path.join(tmpdir(), "paseo-system-probe-"));
@@ -108,7 +111,7 @@ function probe(root, race, ambient = {}) {
         "--caller-pid",
         String(process.pid),
       ],
-      { encoding: "utf8", timeout: 20000, env: { PATH: "/usr/bin:/bin", ...ambient } },
+      { encoding: "utf8", timeout, env: { PATH: "/usr/bin:/bin", ...ambient } },
     );
     return result;
   } finally {
@@ -125,6 +128,172 @@ async function exists(file) {
     return false;
   }
 }
+test(
+  "actual owner refresh overlaps SAME SDK root and original worktree Git hook",
+  { skip: !enabled || !process.env.QUALIFIED_OWNER_FIXTURE_ROOT },
+  async () => {
+    const staged = process.env.QUALIFIED_OWNER_FIXTURE_ROOT;
+    assert.ok(staged && path.isAbsolute(staged));
+    const root = `/paseo-owner-composition-${randomUUID()}`;
+    const account = userInfo().homedir;
+    const paseoHome = mkdtempSync(path.join(account, ".paseo-owner-composition-"));
+    const policyPath = path.join(
+      account,
+      ".local/state/djbclark-ade/forks/paseo-qualified-host-policy.json",
+    );
+    const managedPath = path.join(path.dirname(policyPath), "paseo-managed-plugins.json");
+    const prior = (await exists(policyPath)) ? await readFile(policyPath) : null;
+    const priorManaged = (await exists(managedPath)) ? await readFile(managedPath) : null;
+    const temporary = mkdtempSync(path.join(tmpdir(), "paseo-owner-inputs-"));
+    const source = `${root}-inputs/repository`,
+      config = `${root}-inputs/config`;
+    const names = {
+      system: `${config}/system`,
+      global: `${config}/global`,
+      include: `${config}/included`,
+      excludes: `${config}/excludes`,
+      hooks: `${config}/hooks`,
+    };
+    const files = {
+      "repository/.git/config": "[core]\nrepositoryformatversion = 0\nbare = false\n",
+      "repository/.git/HEAD": "ref: refs/heads/main\n",
+      "repository/.worktreeinclude": "*.txt\n",
+      "repository/.gitignore": "local.txt\n",
+      "repository/external.txt": "external.txt",
+      "repository/local.txt": "local.txt",
+      "repository/keep.txt": "keep.txt",
+      "config/system": `[safe]\ndirectory = ${source}\n[core]\nfsmonitor = false\nhooksPath = ${names.hooks}\n`,
+      "config/global": `[include]\npath = ${names.include}\n`,
+      "config/included": `[core]\nexcludesFile = ${names.excludes}\n`,
+      "config/excludes": "external.txt\n",
+    };
+    for (const [name, bytes] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(temporary, name)), { recursive: true });
+      await writeFile(path.join(temporary, name), bytes, { mode: 0o444 });
+    }
+    for (const name of [
+      "config/hooks",
+      "repository/.git/objects/info",
+      "repository/.git/refs/heads",
+    ])
+      await mkdir(path.join(temporary, name), { recursive: true });
+    try {
+      sudo(["cp", "-a", staged, root]);
+      sudo(["cp", `${staged}.manifest.json`, `${root}.manifest.json`]);
+      sudo(["cp", "-a", temporary, `${root}-inputs`]);
+      sudo(["chown", "-R", "root:root", root, `${root}.manifest.json`, `${root}-inputs`]);
+      sudo(["chmod", "-R", "a-w", `${root}-inputs`]);
+      sudo(["chmod", "0444", `${root}.manifest.json`]);
+      await mkdir(path.dirname(policyPath), { recursive: true, mode: 0o700 });
+      await writeFile(managedPath, JSON.stringify({ version: 1, plugins: {} }), { mode: 0o600 });
+      await chmod(managedPath, 0o600);
+      const raw = await readFile(`${root}.manifest.json`),
+        manifest = JSON.parse(raw);
+      const artifact = manifest.builtinArtifacts.find((row) => row.id === "worktree-include");
+      assert.ok(artifact);
+      const manifestSha256 = createHash("sha256").update(raw).digest("hex");
+      const recipe = {
+        contract: "worktree-include-git-config-v1",
+        distributionManifestSha256: manifestSha256,
+        systemClosureSha256: manifest.systemClosureSha256,
+        tools: {
+          git: "runtime/git",
+          observer: "runtime/git-observer",
+          gate: "runtime/git-gate.so",
+        },
+        argv: {
+          lsFiles: ["ls-files", "--others", "--ignored", "--exclude-from=.worktreeinclude", "-z"],
+          checkIgnore: ["check-ignore", "--stdin", "-z"],
+        },
+        repository: { cwd: source, gitDirectory: `${source}/.git`, layout: "direct-dotgit-v1" },
+        environment: {
+          PATH: "/usr/bin:/bin",
+          HOME: account,
+          PASEO_HOME: paseoHome,
+          PASEO_MANAGED_PLUGIN_POLICY: managedPath,
+          GIT_CONFIG_SYSTEM: names.system,
+          GIT_CONFIG_GLOBAL: names.global,
+          LC_ALL: "C",
+        },
+        configRoots: { system: names.system, global: names.global, local: `${source}/.git/config` },
+        includes: [{ from: names.global, to: names.include }],
+        files: Object.entries(files)
+          .filter(
+            ([name]) =>
+              name.startsWith("config/") ||
+              name === "repository/.git/config" ||
+              name === "repository/.git/HEAD",
+          )
+          .map(([name, bytes]) => ({
+            path: `${root}-inputs/${name}`,
+            mode: 292,
+            size: Buffer.byteLength(bytes),
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          }))
+          .sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path))),
+        protectedAbsent: [
+          "commondir",
+          "config.worktree",
+          "index",
+          "objects/info/alternates",
+          "shallow",
+        ]
+          .map((name) => `${source}/.git/${name}`)
+          .sort(),
+      };
+      const finiteGit = {
+        schemaVersion: 1,
+        recipeSha256: createHash("sha256").update(canonicalBuiltinJson(recipe)).digest("hex"),
+        recipe,
+      };
+      const enrollment = {
+        immutableRoot: root,
+        immutabilityAdapter: "linux-root-owned-retained-v1",
+        distributionBuildId: manifest.distributionBuildId,
+        manifestSha256,
+        qualificationSha256: "a".repeat(64),
+        builtinProfiles: [
+          {
+            id: "worktree-include",
+            sourceSha256: artifact.sourceSha256,
+            serverBundleSha256: artifact.serverBundleSha256,
+            moduleTableSha256: artifact.moduleTableSha256,
+            activityContract: "builtin-in-process-v1",
+            profileSha256: createHash("sha256").update("component-owner-sdk-race-v1").digest("hex"),
+            finiteGit,
+          },
+        ],
+      };
+      const inside = await readFile(
+        new URL("./qualified-owner-composition-inside.mjs", import.meta.url),
+        "utf8",
+      );
+      const script =
+        inside.replace(
+          "export async function runOwnerComposition",
+          "async function runOwnerComposition",
+        ) +
+        `\nawait runOwnerComposition(${JSON.stringify({ root, policyPath, enrollment, paseoHome, source })});\n`;
+      // No timer kills a carrier/Git/helper to manufacture component settlement.
+      const result = namespaceProbe(root, script, {}, 0);
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        component: "actual-owner-sdk-worktree-hook",
+        cases: 6,
+        qualification: false,
+      });
+    } finally {
+      if (prior) await writeFile(policyPath, prior, { mode: 0o600 });
+      else await rm(policyPath, { force: true });
+      if (priorManaged) await writeFile(managedPath, priorManaged, { mode: 0o600 });
+      else await rm(managedPath, { force: true });
+      // The negative cases intentionally leave logical UNKNOWN, not proved
+      // settlement. Retain their immutable backing/home until disposable runner
+      // teardown; never delete them merely because a component process exited.
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  },
+);
 test(
   "v2 exact retained inventory and policy gates reject changed bytes and FIFOs",
   { skip: !enabled, timeout: 120000 },
@@ -227,6 +396,7 @@ test(
       assert.equal(invocation.closure.qualificationSha256, enrollment.qualificationSha256);
       assert.deepEqual(invocation.args, [`${root}/role.cjs`]);
       assert.deepEqual(invocation.env, {
+        HOME: userInfo().homedir,
         PATH: "/usr/bin:/bin",
         PASEO_HOME: "/disposable/home",
         PASEO_MANAGED_PLUGIN_POLICY: managedPath,

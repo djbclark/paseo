@@ -4,6 +4,7 @@ import { isBuiltin, createRequire } from "node:module";
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { adaptQualifiedSherpa } from "./adapt-qualified-sherpa.mjs";
 import { buildQualifiedGit } from "./build-qualified-git.mjs";
 import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
 import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
@@ -17,7 +18,7 @@ function inputName(file) {
     throw new Error("Input outside finite source tree");
   return relative.split(path.sep).join("/");
 }
-function inputMetafile(meta, output) {
+export function inputMetafile(meta, output) {
   const inputs = Object.fromEntries(
     Object.entries(meta.inputs).map(([name, value]) => [
       inputName(name),
@@ -45,9 +46,22 @@ function inputMetafile(meta, output) {
   return { inputs, outputs };
 }
 const require = createRequire(import.meta.url);
-const externals = ["node-pty", "sherpa-onnx-node", "esbuild", "typescript"];
-const banner =
+export const externals = ["node-pty", "sherpa-onnx-node", "esbuild", "typescript"];
+export const banner =
   'import {createRequire as __qualifiedRequire} from "node:module"; import {fileURLToPath as __qualifiedFile} from "node:url"; import {dirname as __qualifiedDirname} from "node:path"; const require=__qualifiedRequire(import.meta.url); const __filename=__qualifiedFile(import.meta.url); const __dirname=__qualifiedDirname(__filename);';
+export const qualifiedOptionalNativePlugin = {
+  name: "qualified-no-optional-native-accelerators",
+  setup(builder) {
+    builder.onResolve({ filter: /^(bufferutil|utf-8-validate)$/ }, (args) => ({
+      path: args.path,
+      namespace: "qualified-disabled",
+    }));
+    builder.onLoad({ filter: /.*/, namespace: "qualified-disabled" }, () => ({
+      contents: 'throw new Error("Optional native accelerator disabled");',
+      loader: "js",
+    }));
+  },
+};
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   if (
     !distributionBuildId ||
@@ -62,6 +76,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     ["daemon-launcher", "daemon-launcher.mjs", {}],
     ["cli-entry", "cli-entry.mjs", {}],
     [path.join(packageRoot, "../cli/src/index.ts"), "cli-code.mjs", {}],
+    [path.join(packageRoot, "scripts/qualified-public-client.mjs"), "client-code.mjs", {}],
     ["daemon-runtime", "daemon.mjs", { __QUALIFIED_DAEMON_ENTRY__: "true" }],
     ["plugin-child-entry", "plugin-child-entry.mjs", {}],
     [
@@ -95,21 +110,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
         ...define,
       },
-      plugins: [
-        {
-          name: "qualified-no-optional-native-accelerators",
-          setup(builder) {
-            builder.onResolve({ filter: /^(bufferutil|utf-8-validate)$/ }, (args) => ({
-              path: args.path,
-              namespace: "qualified-disabled",
-            }));
-            builder.onLoad({ filter: /.*/, namespace: "qualified-disabled" }, () => ({
-              contents: 'throw new Error("Optional native accelerator disabled");',
-              loader: "js",
-            }));
-          },
-        },
-      ],
+      plugins: [qualifiedOptionalNativePlugin],
       logLevel: "warning",
     });
     for (const emitted of Object.values(result.metafile.outputs))
@@ -179,6 +180,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     `sherpa-onnx-linux-${process.arch}`,
   ])
     await copyPackage(name, require);
+  const copiedSherpa = await adaptQualifiedSherpa(outDir);
   await cp(
     path.join(packageRoot, "src/terminal/shell-integration"),
     path.join(outDir, "shell-integration"),
@@ -198,6 +200,11 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     ...compiledBuiltins.sourceInputs,
     ...finiteGit.sourceInputs,
   ];
+  for (const name of ["adapt-qualified-sherpa.mjs", "sherpa-elf-audit.mjs"]) {
+    const file = path.join(packageRoot, "scripts", name);
+    const raw = await readFile(file);
+    sourceInputs.push({ path: inputName(file), bytes: raw.length, sha256: digest(raw) });
+  }
   const inputNames = [
     ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
   ].sort();
@@ -227,6 +234,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
       ].sort(),
       packageLockSha256: digest(await readFile(path.join(repositoryRoot, "package-lock.json"))),
       finiteGit,
+      copiedSherpa,
       toolchain: {
         node: process.version,
         versions: process.versions,

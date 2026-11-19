@@ -116,7 +116,9 @@ async function closeInterpreter(handle, primary = noPrimaryError) {
     await handle.close();
   } catch (closeError) {
     if (primary !== noPrimaryError)
-      throw new AggregateError([primary, closeError], "Interpreter operation and close failed");
+      throw new AggregateError([primary, closeError], "Interpreter operation and close failed", {
+        cause: closeError,
+      });
     throw closeError;
   }
 }
@@ -684,7 +686,8 @@ test(
         (error) =>
           error instanceof AggregateError &&
           error.errors[0] === primary &&
-          error.errors[1] === closeError,
+          error.errors[1] === closeError &&
+          error.cause === closeError,
       );
     });
     await t.test(

@@ -107,7 +107,7 @@ async function bytes(file, limit, source = false) {
     require(used === Number(before.size) &&
       stamp(before) === stamp(await fd.stat({ bigint: true })) &&
       stamp(before) === stamp(await lstat(file, { bigint: true })), "input changed");
-    return { raw: raw.subarray(0, used), mode: Number(before.mode & 0o777n) };
+    return { raw: raw.subarray(0, used), mode: Number(before.mode & 0o777n), identity:stamp(before) };
   } finally {
     await fd.close();
   }
@@ -176,7 +176,7 @@ function budget(files, directories, reserveRecord = false) {
 function environment() {
   return { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", HOME: os.userInfo().homedir };
 }
-async function probe(executable, script) {
+async function probe(executable, script, receiveDiagnostic = () => {}) {
   const result = await execute(executable, [...flags, script], {
     env: environment(),
     timeout: 15000,
@@ -189,6 +189,7 @@ async function probe(executable, script) {
     [diagnostic.LIBPL, diagnostic.LIBDIR].every(
       (v) => typeof v === "string" && v.length <= 4096 && path.isAbsolute(v),
     ), "probe diagnostic");
+  receiveDiagnostic(diagnostic);
   console.log(JSON.stringify(diagnostic));
   require(Buffer.byteLength(result.stdout) <= 65536, "probe output");
   const value = JSON.parse(result.stdout);
@@ -532,8 +533,10 @@ function sourceMappings(record, files, abi) {
       "size",
       "sha256",
       ...(Object.hasOwn(row, "sourceLink") ? ["sourceLink"] : []),
+      ...(Object.hasOwn(row,"sourceMaterialization")?["sourceMaterialization"]:[]),
     ]);
     sourceAlias(record, row);
+    materializationRow(record,row);
     require(typeof row.sourcePath === "string" &&
       path.isAbsolute(row.sourcePath) &&
       Number.isInteger(row.sourceMode) &&
@@ -622,6 +625,7 @@ function validateRecord(record) {
   const abi = sourceRecord(record.source);
   const files = retainedInventory(record, abi);
   recordObservations(record, files);
+  materializationPair(record);
   exact(record.budgets, [
     "fileCount",
     "directoryCount",
@@ -726,6 +730,7 @@ async function externalPythonTarget(source, member) {
           sha256: digest(captured.raw),
         },
         raw: captured.raw,
+        sourceIdentity:captured.identity,
       };
     }
     require(info.uid === 0n && info.nlink === 1n, "diagnostic link owner/linkcount");
@@ -746,7 +751,7 @@ async function externalPythonTarget(source, member) {
 }
 async function recheckExternalTarget(source, captured) {
   const fresh = await externalPythonTarget(source, captured.member);
-  require(JSON.stringify(fresh.ancestors) === JSON.stringify(captured.ancestors) &&
+  require(fresh.sourceIdentity===captured.sourceIdentity && JSON.stringify(fresh.ancestors) === JSON.stringify(captured.ancestors) &&
     JSON.stringify(fresh.hops) === JSON.stringify(captured.hops) &&
     JSON.stringify(fresh.endpoint) ===
       JSON.stringify(captured.endpoint), "diagnostic chain/endpoint changed");
@@ -824,6 +829,232 @@ async function externalPythonDiagnostic(source, selected) {
   const raw = JSON.stringify(record);
   require(Buffer.byteLength(raw) <= 600000, "diagnostic aggregate bound");
   console.log(raw);
+  return {record,library,site};
+}
+
+// Initial qualified-source cases only; these are not global update pins.
+const materializationCases = [
+  {kind:"config-libpython",member:"config-3.12-x86_64-linux-gnu/libpython3.12.so",endpoint:"/usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0",size:9061000,sha256:"1021f236227334ded6d1bbbc4bb6f5d933f793d8397c969896cfbdf03ce96223",texts:["../../x86_64-linux-gnu/libpython3.12.so.1","libpython3.12.so.1.0"]},
+  {kind:"sitecustomize",member:"sitecustomize.py",endpoint:"/etc/python3.12/sitecustomize.py",size:155,sha256:"43d81125d92376b1a69d53a71126a041cc9a18d8080e92dea0a2ae23be138b1e",texts:["/etc/python3.12/sitecustomize.py"]},
+];
+const fixedStdlib="/usr/lib/python3.12";
+const fixedReadelf="/usr/bin/x86_64-linux-gnu-readelf";
+function fixedSourcePaths(selected) {
+  return [selected,fixedReadelf,fixedStdlib+"/site.py",fixedStdlib+"/sysconfig.py",fixedStdlib+"/ctypes/__init__.py",fixedStdlib+"/"+aliasTarget,fixedStdlib+"/config-3.12-x86_64-linux-gnu/Makefile",...materializationCases.map((c)=>c.endpoint)].sort();
+}
+function fixedHopPaths(recipe) {
+  return recipe.kind==="config-libpython"?[fixedStdlib+"/"+recipe.member,"/usr/lib/x86_64-linux-gnu/libpython3.12.so.1"]:[fixedStdlib+"/sitecustomize.py"];
+}
+function ancestorPaths(recipe) {
+  const result=new Set();
+  for(const file of [...fixedHopPaths(recipe),recipe.endpoint]) {
+    for(let current=path.dirname(file);;current=path.dirname(current)) {
+      result.add(current);
+      if(current==="/") break;
+    }
+  }
+  return Array.from(result);
+}
+function boundedText(value,limit=1024) {
+  require(typeof value==="string" && value.length>0 && Buffer.byteLength(value)<=limit && !/[\0\r\n]/.test(value),"materialization text");
+}
+function originalIdentity(value) {
+  exact(value,["path","mode","size","sha256"]);
+  require(typeof value.path==="string" && value.path.length<=4096 && !value.path.includes("\0") && path.isAbsolute(value.path) && path.normalize(value.path)===value.path,"materialization source path");
+  require(Number.isInteger(value.mode) && value.mode>=0 && value.mode<=0o777 && !(value.mode&0o022),"materialization source mode");
+  require(Number.isSafeInteger(value.size) && value.size>=0 && value.size<=leafLimit && typeof value.sha256==="string" && /^[a-f0-9]{64}$/.test(value.sha256),"materialization source bytes");
+}
+function statIdentity(value,mode,kind) {
+  boundedText(value,512);
+  const fields=value.split(":");
+  require(fields.length===9 && fields.every((v)=>/^[0-9]+$/.test(v)),"materialization stat identity");
+  const bits=BigInt(fields[2]);
+  require((bits&0o7777n)===BigInt(mode) && fields[3]==="0" && (bits&0o170000n)===BigInt(kind),"materialization stat owner/type/mode");
+  return fields;
+}
+function materializationChain(recipe,hops,ancestors) {
+  require(Array.isArray(hops) && hops.length===recipe.texts.length && Array.isArray(ancestors),"materialization chain bounds");
+  const paths=fixedHopPaths(recipe);
+  hops.forEach((row,i)=>{
+    exact(row,["path","target","mode","uid","identity"]);
+    require(row.path===paths[i] && row.target===recipe.texts[i] && row.mode===0o777 && row.uid===0,"fixed materialization hop");
+    const fields=statIdentity(row.identity,row.mode,0o120000);
+    require(fields[5]==="1" && Number(fields[6])===Buffer.byteLength(row.target),"materialization link identity");
+  });
+  const expected=ancestorPaths(recipe);
+  require(ancestors.length===expected.length && ancestors.length<=16,"materialization ancestor coverage");
+  ancestors.forEach((row,i)=>{
+    exact(row,["path","mode","uid","identity"]);
+    require(row.path===expected[i] && row.uid===0 && Number.isInteger(row.mode) && row.mode>=0 && row.mode<=0o777 && !(row.mode&0o022),"materialization ancestor path/mode");
+    statIdentity(row.identity,row.mode,0o040000);
+  });
+}
+function materializationTarget(recipe,target) {
+  exact(target,["path","mode","uid","nlink","size","sha256"]);
+  require(target.path===recipe.endpoint && target.mode===0o644 && target.uid===0 && target.nlink===1 && target.size===recipe.size && target.sha256===recipe.sha256,"fixed materialization endpoint");
+}
+function materializationAbi(record,abi) {
+  exact(abi,["version","cacheTag","abiFlags","platlibdir","build","LIBPL","LIBDIR"]);
+  const expected=Object.fromEntries(["version","cacheTag","abiFlags","platlibdir","build"].map((k)=>[k,record.observed.source[k]]));
+  const actual=Object.fromEntries(Object.keys(expected).map((k)=>[k,abi[k]]));
+  require(JSON.stringify(actual)===JSON.stringify(expected) && JSON.stringify(abi.version)==="[3,12,3]" && abi.build.MULTIARCH==="x86_64-linux-gnu" && abi.LIBPL===fixedStdlib+"/config-3.12-x86_64-linux-gnu" && abi.LIBDIR==="/usr/lib/x86_64-linux-gnu","materialization measured ABI");
+}
+function evidenceSourceFiles(record,rows) {
+  require(Array.isArray(rows) && rows.length===9,"materialization source evidence count");
+  const expected=fixedSourcePaths(record.source.resolvedExecutable);
+  rows.forEach((row,i)=>{
+    exact(row,["path","mode","size","sha256","identity"]);
+    const {identity:descriptor,...file}=row;
+    originalIdentity(file);
+    require(row.path===expected[i],"materialization source evidence coverage");
+    const fields=statIdentity(descriptor,row.mode,0o100000);
+    require(fields[5]==="1" && Number(fields[6])===row.size,"materialization source descriptor binding");
+  });
+}
+function materializationElf(record,row,index,sourceFiles) {
+  exact(row,["path","mode","size","sha256","argv","metadata"]);
+  const expectedPath=index===0?record.source.resolvedExecutable:materializationCases[0].endpoint;
+  const expected=sourceFiles.find((file)=>file.path===expectedPath);
+  require(row.path===expectedPath && row.mode===expected.mode && row.size===expected.size && row.sha256===expected.sha256,"materialization ELF byte binding");
+  require(JSON.stringify(row.argv)===JSON.stringify(["-h","-l","-d","-V","-A","-W",expectedPath]),"materialization ELF argv");
+  require(typeof row.metadata==="string" && Buffer.byteLength(row.metadata)<=262144 && row.metadata.startsWith("ELF Header:") && !row.metadata.includes("\0"),"materialization raw ELF bounds");
+  const needed=Array.from(row.metadata.matchAll(/\(NEEDED\)\s+Shared library: \[([^\]]+)\]/g),(match)=>match[1]);
+  const expectedNeeded=["libm.so.6","libz.so.1","libexpat.so.1","libc.so.6",...(index===1?["ld-linux-x86-64.so.2"]:[])];
+  require(JSON.stringify(needed)===JSON.stringify(expectedNeeded) && /Class:\s+ELF64/.test(row.metadata) && /Machine:\s+Advanced Micro Devices X86-64/.test(row.metadata),"materialization measured ELF ABI/dependencies");
+  require(!/\((?:RPATH|RUNPATH)\)/.test(row.metadata),"materialization unexpected loader search metadata");
+  if(index===1) require(/\(SONAME\)\s+Library soname: \[libpython3\.12\.so\.1\.0\]/.test(row.metadata),"materialization SONAME");
+}
+function materializationEvidence(record,evidence) {
+  exact(evidence,["siteSource","readelf","elfs","sourceFiles"]);
+  require(typeof evidence.siteSource==="string" && Buffer.byteLength(evidence.siteSource)===155 && digest(Buffer.from(evidence.siteSource))===materializationCases[1].sha256,"materialization exact site source");
+  originalIdentity(evidence.readelf);
+  require(evidence.readelf.path===fixedReadelf && evidence.readelf.mode===0o755,"materialization fixed readelf");
+  evidenceSourceFiles(record,evidence.sourceFiles);
+  require(Array.isArray(evidence.elfs) && evidence.elfs.length===2,"materialization ELF pair");
+  evidence.elfs.forEach((row,i)=>materializationElf(record,row,i,evidence.sourceFiles));
+  const tool=evidence.sourceFiles.find((row)=>row.path===fixedReadelf);
+  require(tool.mode===evidence.readelf.mode && tool.size===evidence.readelf.size && tool.sha256===evidence.readelf.sha256,"materialization tool evidence binding");
+  for(const recipe of materializationCases) {
+    const file=evidence.sourceFiles.find((row)=>row.path===recipe.endpoint);
+    require(file.mode===0o644 && file.size===recipe.size && file.sha256===recipe.sha256,"materialization endpoint source evidence");
+  }
+}
+function provenancePaths(evidence) {
+  return Array.from(new Set([...evidence.sourceFiles.map((f)=>f.path),...materializationCases.flatMap(fixedHopPaths)])).sort();
+}
+function provenanceOwner(row) {
+  exact(row,["package","version","sourcePackage","sourceVersion","conffile"]);
+  for(const key of ["package","version","sourcePackage","sourceVersion"]) boundedText(row[key]);
+  if(row.conffile!==null) {
+    exact(row.conffile,["md5","status"]);
+    require(/^[a-f0-9]{32}$/.test(row.conffile.md5) && ["current","obsolete"].includes(row.conffile.status),"materialization conffile evidence");
+  }
+}
+function materializationProvenance(rows,evidence) {
+  const expected=provenancePaths(evidence);
+  require(Array.isArray(rows) && rows.length===expected.length && rows.length<=20,"materialization per-file provenance count");
+  rows.forEach((row,i)=>{
+    exact(row,["path","owners"]);
+    require(row.path===expected[i] && Array.isArray(row.owners) && row.owners.length>0 && row.owners.length<=4,"materialization file owner coverage");
+    let previous="";
+    for(const owner of row.owners) {
+      provenanceOwner(owner);
+      require(owner.package>previous,"materialization owner order");
+      previous=owner.package;
+    }
+  });
+}
+function materializationRow(record,row) {
+  const recipe=materializationCases.find((c)=>row.path===record.layout.stdlib+"/"+c.member);
+  if(!Object.hasOwn(row,"sourceMaterialization")) {
+    require(!recipe,"materialization evidence missing");
+    return;
+  }
+  require(recipe && !Object.hasOwn(row,"sourceLink"),"materialization only exact two rows");
+  const value=row.sourceMaterialization;
+  exact(value,["kind","sourcePath","hops","ancestors","target","provenance","abi","retained","evidence"]);
+  require(value.kind===recipe.kind && value.sourcePath===fixedStdlib+"/"+recipe.member && value.sourcePath===row.sourcePath && record.source.stdlib===fixedStdlib,"materialization role/source path");
+  materializationChain(recipe,value.hops,value.ancestors);
+  materializationTarget(recipe,value.target);
+  identity(value.retained);
+  const retained={path:row.path,mode:row.mode,size:row.size,sha256:row.sha256};
+  require(JSON.stringify(value.retained)===JSON.stringify(retained) && row.mode===0o444 && row.sourceMode===value.target.mode && row.size===value.target.size && row.sha256===value.target.sha256,"materialization source/retained equality");
+  materializationAbi(record,value.abi);
+  materializationEvidence(record,value.evidence);
+  materializationProvenance(value.provenance,value.evidence);
+}
+function materializationPair(record) {
+  const rows=record.sourceFiles.filter((row)=>Object.hasOwn(row,"sourceMaterialization"));
+  require(rows.length===2,"materialization pair required");
+  const [first,second]=rows.map((row)=>row.sourceMaterialization);
+  for(const key of ["provenance","abi","evidence"]) require(JSON.stringify(first[key])===JSON.stringify(second[key]),"materialization shared evidence equality");
+  for(const file of first.evidence.sourceFiles) {
+    const copied=record.sourceFiles.find((row)=>row.sourcePath===file.path && !row.sourceMaterialization && !row.sourceLink);
+    if(copied) require(copied.sourceMode===file.mode && copied.size===file.size && copied.sha256===file.sha256,"materialization source graph binding");
+  }
+}
+async function packageConffiles(owner,file) {
+  const result=await execute("/usr/bin/dpkg-query",["-W","-f","${Conffiles}\n",owner],{env:environment(),timeout:15000,maxBuffer:65536});
+  require(result.stderr==="","materialization conffile stderr");
+  let matched=null;
+  for(const line of result.stdout.split("\n").filter((item)=>item.trim())) {
+    const match=/^ (\/\S+) ([a-f0-9]{32})( obsolete)?$/.exec(line);
+    require(match,"materialization conffile format");
+    if(match[1]===file) {require(matched===null,"duplicate conffile");matched={md5:match[2],status:match[3]?"obsolete":"current"};}
+  }
+  return matched;
+}
+async function perFileProvenance(paths) {
+  const rows=[];
+  for(const file of paths) {
+    const result=await execute("/usr/bin/dpkg-query",["-S",file],{env:environment(),timeout:15000,maxBuffer:65536});
+    require(result.stderr==="","materialization ownership stderr");
+    const ownerNames=new Set();
+    for(const line of result.stdout.trim().split("\n")) {
+      const at=line.indexOf(": ");
+      require(at>0 && line.slice(at+2)===file,"materialization exact file ownership");
+      for(const name of line.slice(0,at).split(", ")) ownerNames.add(name);
+    }
+    require(ownerNames.size>0 && ownerNames.size<=4,"materialization owner count");
+    const packages=await sourcePackages([file]);
+    const owners=[];
+    for(const row of packages.sort((a,b)=>a.package<b.package?-1:Number(a.package>b.package))) owners.push({...row,conffile:await packageConffiles(row.package,file)});
+    rows.push({path:file,owners});
+  }
+  return rows;
+}
+async function captureMaterializations(source,sysconfig,external) {
+  require(source.stdlib===fixedStdlib && JSON.stringify(source.version)==="[3,12,3]" && external.record.readelf.path===fixedReadelf,"fixed materialization source layout");
+  const evidence={siteSource:external.record.siteSource,readelf:external.record.readelf,elfs:external.record.elfs,sourceFiles:[]};
+  for(const file of fixedSourcePaths(source.executable)) {
+    const data=await bytes(file,leafLimit,true);
+    evidence.sourceFiles.push({path:file,mode:data.mode,size:data.raw.length,sha256:digest(data.raw),identity:data.identity});
+  }
+  const provenance=await perFileProvenance(provenancePaths(evidence));
+  const abi={...Object.fromEntries(["version","cacheTag","abiFlags","platlibdir","build"].map((key)=>[key,source[key]])),LIBPL:sysconfig.LIBPL,LIBDIR:sysconfig.LIBDIR};
+  const captures=[external.library,external.site];
+  const rows=materializationCases.map((recipe,index)=>{
+    const captured=captures[index];
+    materializationChain(recipe,captured.hops,captured.ancestors);
+    materializationTarget(recipe,captured.endpoint);
+    require(evidence.sourceFiles.find((file)=>file.path===recipe.endpoint).identity===captured.sourceIdentity,"materialization initial target identity");
+    const retained={path:"python/lib/python3.12/"+recipe.member,mode:0o444,size:recipe.size,sha256:recipe.sha256};
+    return {member:recipe.member,captured,record:{kind:recipe.kind,sourcePath:fixedStdlib+"/"+recipe.member,hops:captured.hops,ancestors:captured.ancestors,target:captured.endpoint,provenance,abi,retained,evidence}};
+  });
+  const result={rows,evidence,provenance};
+  await recheckMaterializations(source,result);
+  const output=JSON.stringify({kind:"retained-python-materialization-source-data",qualification:false,rows:rows.map((row)=>row.record)});
+  require(Buffer.byteLength(output)<=recordLimit,"materialization diagnostic bound");
+  console.log(output);
+  return result;
+}
+async function recheckMaterializations(source,value) {
+  for(const row of value.rows) await recheckExternalTarget(source,row.captured);
+  for(const expected of value.evidence.sourceFiles) {
+    const fresh=await bytes(expected.path,leafLimit,true);
+    require(fresh.identity===expected.identity && fresh.mode===expected.mode && fresh.raw.length===expected.size && digest(fresh.raw)===expected.sha256,"materialization source evidence changed");
+  }
+  require(JSON.stringify(await perFileProvenance(provenancePaths(value.evidence)))===JSON.stringify(value.provenance),"materialization package evidence changed");
 }
 
 // Complete SOURCE layout DATA before copying; never follow a link or open specials.
@@ -898,7 +1129,8 @@ export async function retainQualifiedPython(root) {
     .equals(Buffer.from([127, 69, 76, 70])), "native interpreter ELF");
   const fixedProbe = path.join(here, "probe-qualified-python.py");
   const probeSource = await bytes(fixedProbe, 65536);
-  const source = await probe(selected, fixedProbe);
+  let sourceSysconfig;
+  const source = await probe(selected, fixedProbe, (value)=>{sourceSysconfig=value;});
   observation(source, false);
   const abi = source.version.slice(0, 2).join(".");
   require(source.executable === selected &&
@@ -907,7 +1139,8 @@ export async function retainQualifiedPython(root) {
     source.extensionDirectory ===
       source.stdlib + "/lib-dynload", "unsupported source stdlib layout");
   await sourceLayoutDiagnostic(source);
-  await externalPythonDiagnostic(source, selected);
+  const external=await externalPythonDiagnostic(source, selected);
+  const materializations=await captureMaterializations(source,sourceSysconfig,external);
   const parent = await mkdtemp(path.join(path.dirname(root), ".python-retention-"));
   const stage = path.join(parent, "python");
   const sourceFiles = [],
@@ -917,7 +1150,7 @@ export async function retainQualifiedPython(root) {
       "python/bin/pyvenv.cfg",
     ]);
   const aliasStamps = new Map();
-  async function retain(sourcePath, member, rawData, sourceLink) {
+  async function retain(sourcePath, member, rawData, sourceLink, sourceMaterialization) {
     const data = rawData ?? (await bytes(sourcePath, leafLimit, true));
     const mode = member === "python/bin/python3" ? 0o555 : 0o444;
     const destination = path.join(parent, member);
@@ -931,6 +1164,7 @@ export async function retainQualifiedPython(root) {
       size: data.raw.length,
       sha256: digest(data.raw),
       ...(sourceLink ? { sourceLink } : {}),
+      ...(sourceMaterialization ? { sourceMaterialization } : {}),
     });
     require(sourceFiles.length < memberLimit &&
       sourceFiles.reduce((n, r) => n + r.size, 0) <= tarLimit, "copy bounds");
@@ -952,6 +1186,13 @@ export async function retainQualifiedPython(root) {
         info = await lstat(file);
       if (info.isDirectory() && !info.isSymbolicLink()) await copyDirectory(file, rel);
       else {
+        const materialized=materializations.rows.find((item)=>item.member===rel);
+        if(materialized) {
+          require(info.isSymbolicLink(),"materialization source link missing");
+          await recheckExternalTarget(source,materialized.captured);
+          await retain(file,`python/lib/python${abi}/`+rel,{raw:materialized.captured.raw,mode:materialized.captured.endpoint.mode},undefined,materialized.record);
+          continue;
+        }
         if (info.isSymbolicLink() && rel === aliasName) {
           const alias = await readSourceAlias(file, source);
           aliasStamps.set(file, alias.linkStamp);
@@ -967,7 +1208,9 @@ export async function retainQualifiedPython(root) {
     }
   }
   async function recheckSources() {
+    await recheckMaterializations(source,materializations);
     for (const row of sourceFiles) {
+      if(row.sourceMaterialization) continue;
       const captured = row.sourceLink
         ? await readSourceAlias(row.sourcePath, source)
         : { data: await bytes(row.sourcePath, leafLimit, true) };

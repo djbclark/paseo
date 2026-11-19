@@ -8,7 +8,7 @@ import { access, chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/pr
 import { userInfo } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL as phaseFileURL } from "node:url";
 import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 
 // Disposable Linux CI only. This fixture checks the real v2 acquisition gate;
@@ -89,7 +89,7 @@ test(
     assert.throws(() =>
       assertDaemonHelperInventory({
         ...manifest,
-        helperInventory: [...manifest.helperInventory].reverse(),
+        helperInventory: manifest.helperInventory.toReversed(),
       }),
     );
     const extra = [
@@ -106,7 +106,7 @@ test(
     positive();
 
     const directory = mkdtempSync(path.join(tmpdir(), "startup-phase-data-"));
-    const moduleUrl = pathToFileURL(path.join(root, "startup-phase.mjs")).href;
+    const moduleUrl = phaseFileURL(path.join(root, "startup-phase.mjs")).href;
     function writeProbe(mode, entry, forward = null) {
       const script = `import {createRequire} from "node:module";
       const require=createRequire(import.meta.url);

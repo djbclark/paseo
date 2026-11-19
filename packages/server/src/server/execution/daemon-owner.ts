@@ -81,17 +81,19 @@ function drainTerminalPhaseStderr(child: ChildProcess): void {
   let used = 0;
   let discard = false;
   const incomplete = () => forwardTerminalStartupPhase(new Uint8Array(), pid);
+  function finishLine(): void {
+    if (discard || used < prefix.length) return;
+    if (used >= line.length) incomplete();
+    else {
+      line[used++] = 10;
+      forwardTerminalStartupPhase(line.subarray(0, used), pid);
+    }
+  }
   stream.on("data", (chunk: Buffer | string) => {
     try {
       for (const byte of Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) {
         if (byte === 10) {
-          if (!discard && used >= prefix.length) {
-            if (used >= line.length) incomplete();
-            else {
-              line[used++] = byte;
-              forwardTerminalStartupPhase(line.subarray(0, used), pid);
-            }
-          }
+          finishLine();
           used = 0;
           discard = false;
           continue;

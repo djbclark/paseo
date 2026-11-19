@@ -98,14 +98,13 @@ const roles: Record<string, string> = {
   "plugin-child-entry.mjs": "plugin-child",
 };
 const role = isMainThread ? roles[basename(process.argv[1] ?? "")] : undefined;
-const limit =
-  role === "daemon"
-    ? { records: 2048, bytes: 524288 }
-    : role === "terminal"
-      ? { records: 256, bytes: 65536 }
-      : role === "plugin-child"
-        ? { records: 64, bytes: 16384 }
-        : { records: 1, bytes: 256 };
+const limits: Record<string, { records: number; bytes: number }> = {
+  daemon: { records: 2048, bytes: 524288 },
+  terminal: { records: 256, bytes: 65536 },
+  "plugin-child": { records: 64, bytes: 16384 },
+  cli: { records: 1, bytes: 256 },
+};
+const limit = limits[role ?? "cli"];
 const originalWrite = write;
 const clock = performance.now.bind(performance);
 const actualPid = process.pid;

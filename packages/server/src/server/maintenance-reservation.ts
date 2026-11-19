@@ -536,15 +536,17 @@ export class MaintenanceReservation {
   }
 
   private async refreshSuccessAuthority(): Promise<void> {
+    this.assertNoUnknownWork();
     const transport = this.transport;
     if (!transport) return; // Isolated mechanism reservations have no production owner.
     try {
       await transport.authority.refresh();
+      this.assertNoUnknownWork();
       if (this.transport !== transport) throw new Error("Maintenance enclosing owner changed");
       transport.authority.assertQualified();
     } catch (error) {
       // Recording uncertainty must never depend on the qualification that just failed.
-      this.holdForUnknownWork();
+      if (!this.record?.uncertain) this.holdForUnknownWork();
       throw error;
     }
   }

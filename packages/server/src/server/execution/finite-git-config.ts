@@ -1,4 +1,4 @@
-import { constants, lstatSync } from "node:fs";
+import { constants } from "node:fs";
 import { open, lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -89,9 +89,13 @@ export async function observeFiniteGitConfig(
         observed.set(current, null);
         return current;
       }
-      if (info.uid !== 0n || info.mode & 0o022n || info.isSymbolicLink()) return refuse();
+      if (info.uid !== 0n || info.mode & 0o022n || info.isSymbolicLink())
+        throw new Error(
+          `Unprotected Git route ${current} uid=${info.uid} mode=${(info.mode & 0o7777n).toString(8)} symlink=${info.isSymbolicLink()}`,
+        );
       const old = observed.get(current);
-      if (observed.has(current) && old !== stamp(info)) return refuse();
+      if (observed.has(current) && old !== stamp(info))
+        throw new Error(`Changing Git route ${current}`);
       observed.set(current, stamp(info));
     }
     return current;
@@ -123,11 +127,7 @@ export async function observeFiniteGitConfig(
   await tree(recipe.repository.cwd);
   const git = recipe.repository.gitDirectory;
   if (!(await lstat(git)).isDirectory()) return refuse();
-  for (const name of ["config.worktree", "commondir", "objects/info/alternates", "shallow"])
-    if (!recipe.protectedAbsent.includes(`${git}/${name}`)) return refuse();
-  for (const name of ["HEAD", "index"])
-    if (!contents.has(`${git}/${name}`) && !recipe.protectedAbsent.includes(`${git}/${name}`))
-      return refuse();
+  checkRepositoryInputs(recipe, contents);
   const includeEdges: { from: string; to: string }[] = [];
   const values = new Map<string, string>();
   const stack = new Set<string>();
@@ -179,8 +179,19 @@ export async function observeFiniteGitConfig(
   if (!(await lstat(hooks)).isDirectory() || (await readdir(hooks)).length) return refuse();
   const proof = Object.freeze({ contract: "protected-git-config-v1" as const });
   proofs.set(proof, observed);
-  assertFiniteGitConfigUnchanged(proof);
+  await assertFiniteGitConfigUnchanged(proof);
   return proof;
+}
+function checkRepositoryInputs(recipe: FiniteGitRecipe, contents: Map<string, Buffer>): void {
+  for (const name of ["config.worktree", "commondir", "objects/info/alternates", "shallow"])
+    if (!recipe.protectedAbsent.includes(`${recipe.repository.gitDirectory}/${name}`))
+      return refuse();
+  for (const name of ["HEAD", "index"])
+    if (
+      !contents.has(`${recipe.repository.gitDirectory}/${name}`) &&
+      !recipe.protectedAbsent.includes(`${recipe.repository.gitDirectory}/${name}`)
+    )
+      return refuse();
 }
 function configLine(
   raw: string,
@@ -220,12 +231,12 @@ function checkSetting(key: string, value: string, recipe: FiniteGitRecipe): void
   return refuse();
 }
 /** Private proof identity and immutable routes, not before/after hashes of writable inputs. */
-export function assertFiniteGitConfigUnchanged(proof: FiniteGitConfigProof): void {
+export async function assertFiniteGitConfigUnchanged(proof: FiniteGitConfigProof): Promise<void> {
   const observed = proofs.get(proof);
   if (!observed) return refuse();
   for (const [file, expected] of observed) {
     try {
-      const actual = lstatSync(file, { bigint: true });
+      const actual = await lstat(file, { bigint: true });
       if (expected === null || stamp(actual) !== expected) return refuse();
     } catch (error) {
       if (expected !== null || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

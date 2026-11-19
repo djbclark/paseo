@@ -84,9 +84,38 @@ int main(void) {
         faultOutput,
         path.join(retained, "descendant-fault"),
       ]);
+      const exitSource = path.join(temporary, "exit126.c");
+      await writeFile(exitSource, "int main(void) { return 126; }\n");
+      const exitOutput = path.join(temporary, "exit126");
+      execFileSync("/usr/bin/cc", [exitSource, "-o", exitOutput]);
+      execFileSync("sudo", [
+        "-k",
+        "-n",
+        "/usr/bin/install",
+        "-m",
+        "0555",
+        exitOutput,
+        path.join(retained, "exit126"),
+      ]);
+      const invalid = path.join(temporary, "invalid-elf");
+      await writeFile(invalid, Buffer.from([127, 69, 76, 70, 0, 0, 0, 0]));
+      execFileSync("sudo", [
+        "-k",
+        "-n",
+        "/usr/bin/install",
+        "-m",
+        "0555",
+        invalid,
+        path.join(retained, "invalid-elf"),
+      ]);
       async function run(operation, stdin = "", behavior = "resume", fault = false) {
         const nonce = randomBytes(32).toString("hex");
-        const git = await open(path.join(retained, fault ? "descendant-fault" : "git")),
+        const git = await open(
+            path.join(
+              retained,
+              typeof fault === "string" ? fault : fault ? "descendant-fault" : "git",
+            ),
+          ),
           gate = await open(path.join(retained, "git-gate.so"));
         let child;
         try {
@@ -143,7 +172,16 @@ int main(void) {
             const fields = line.split(" ");
             assert.equal(fields[1], nonce);
             observations.push(line);
-            if (fields[0] === "leader" && fault) {
+            if (fields[0] === "preflight") {
+              assert.equal(Number(fields[2]), child.pid);
+              if (behavior === "preflight-timeout") {
+                /* Carrier alone owns the bounded deadline. */
+              } else if (behavior === "preflight-loss") child.stdio[4].end();
+              else if (behavior === "preflight-stale")
+                child.stdio[4].write(`launch ${"0".repeat(64)}\n`);
+              else child.stdio[4].write(`launch ${nonce}\n`);
+            }
+            if (fields[0] === "leader" && fault === true) {
               assert.ok(!observations.some((row) => row.startsWith("complete ")));
               child.stdio[9].end("x");
             }
@@ -153,7 +191,13 @@ int main(void) {
                 realpath(`/proc/${fields[2]}/exe`),
                 readFile(`/proc/${fields[2]}/stat`, "utf8"),
               ]).then(([image, birth]) => {
-                assert.equal(image, path.join(retained, fault ? "descendant-fault" : "git"));
+                assert.equal(
+                  image,
+                  path.join(
+                    retained,
+                    typeof fault === "string" ? fault : fault ? "descendant-fault" : "git",
+                  ),
+                );
                 assert.equal(birth.slice(0, birth.indexOf(" ")), fields[2]);
                 const startToken = birth.slice(birth.lastIndexOf(")") + 2).split(" ")[19];
                 assert.match(startToken, /^[1-9][0-9]*$/);
@@ -185,8 +229,11 @@ int main(void) {
           );
         } else assert.deepEqual(streamErrors, []);
         assert.equal(signal, behavior === "observer-loss" ? "SIGKILL" : null);
-        assert.equal(error, fault ? "descendant-complete\n" : "");
-        assert.equal(observed, true);
+        assert.equal(error, fault === true ? "descendant-complete\n" : "");
+        assert.equal(observed, !behavior.startsWith("preflight-") && fault !== "invalid-elf");
+        const execErrors = observations.filter((row) => row.startsWith("exec-error "));
+        if (fault === "invalid-elf") assert.match(execErrors[0], / execveat 8$/);
+        else assert.deepEqual(execErrors, []);
         if (behavior === "observer-loss") {
           assert.ok(!observations.some((row) => row.startsWith("complete ")));
         } else {
@@ -206,6 +253,23 @@ int main(void) {
       assert.deepEqual(await run("check-ignore", "kept.txt\0"), { code: 1, output: "" });
       assert.deepEqual(await run("ls-files", "", "stale"), { code: 0, output: "kept.txt\0" });
       assert.deepEqual(await run("ls-files", "", "lost"), { code: 0, output: "kept.txt\0" });
+      assert.deepEqual(await run("ls-files", "", "preflight-loss"), {
+        code: 0,
+        output: "kept.txt\0",
+      });
+      assert.deepEqual(await run("ls-files", "", "preflight-stale"), {
+        code: 0,
+        output: "kept.txt\0",
+      });
+      assert.deepEqual(await run("ls-files", "", "preflight-timeout"), {
+        code: 0,
+        output: "kept.txt\0",
+      });
+      assert.deepEqual(await run("ls-files", "", "resume", "invalid-elf"), {
+        code: 126,
+        output: "",
+      });
+      assert.deepEqual(await run("ls-files", "", "resume", "exit126"), { code: 126, output: "" });
       assert.deepEqual(await run("ls-files", "", "resume", true), { code: 0, output: "" });
       assert.deepEqual(await run("ls-files", "", "observer-loss"), {
         code: null,
@@ -313,8 +377,10 @@ test(
           .sort(),
       };
       const proof = await observeFiniteGitConfig(recipe);
-      assertFiniteGitConfigUnchanged(proof);
-      assert.throws(() => assertFiniteGitConfigUnchanged({ contract: "protected-git-config-v1" }));
+      await assertFiniteGitConfigUnchanged(proof);
+      await assert.rejects(() =>
+        assertFiniteGitConfigUnchanged({ contract: "protected-git-config-v1" }),
+      );
       const matches = execFileSync("/usr/bin/git", recipe.argv.lsFiles, {
         cwd: recipe.repository.cwd,
         env: environment,
@@ -353,7 +419,7 @@ test(
       await assert.rejects(async () =>
         observeFiniteGitConfig({ ...recipe, files: await records() }),
       );
-      assert.throws(() => assertFiniteGitConfigUnchanged(proof));
+      await assert.rejects(() => assertFiniteGitConfigUnchanged(proof));
     } finally {
       sudo("/usr/bin/rm", ["-rf", root]);
       await rm(stage, { recursive: true, force: true });
@@ -362,7 +428,7 @@ test(
 );
 
 test(
-  "synchronous prelaunch policy CAS refuses a real FIFO in a bounded subprocess",
+  "asynchronous prelaunch policy CAS refuses a real FIFO in a bounded subprocess",
   { timeout: 10000 },
   async () => {
     const home = await realpath(userInfo().homedir);
@@ -376,9 +442,9 @@ test(
     const original = await lstat(authority);
     try {
       const module = new URL("../dist/server/server/execution/daemon-verifier.js", import.meta.url);
-      const program = `import {assertEnclosingAuthorityUnchangedSync} from ${JSON.stringify(module.href)};
+      const program = `import {assertEnclosingAuthorityUnchanged} from ${JSON.stringify(module.href)};
       let refused=false;
-      try { assertEnclosingAuthorityUnchangedSync({root:"/not-enrolled",authorityIdentity:"not-a-grant"}); }
+      try { await assertEnclosingAuthorityUnchanged({root:"/not-enrolled",authorityIdentity:"not-a-grant"}); }
       catch(error) { if(error.message!=="Enclosing daemon execution unsupported") throw error; refused=true; }
       if(!refused) throw new Error("FIFO was accepted");`;
       execFileSync(process.execPath, ["--input-type=module", "-e", program], {

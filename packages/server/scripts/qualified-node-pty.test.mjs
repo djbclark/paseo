@@ -63,6 +63,12 @@ test("builds the selected source offline and reports the actual new artifact", a
   assert.equal(record.coverage.hermetic, false);
   assert.equal(record.coverage.reproducibleOldPrebuild, false);
   assert.equal(record.inputs.node.runtime.sha256, NODE_PTY_INPUTS.runtime);
+  const environmentFile = record.evidence.find((file) => file.path.endsWith("build-environment.json"));
+  const environment = JSON.parse(await readFile(path.join(root, environmentFile.path), "utf8"));
+  assert.equal(environment.PATH, `${path.join(root, "runtime")}:/usr/bin:/bin`);
+  assert.equal(environment.SYSROOT_PATH, "");
+  assert.equal(environment.PYTHON, "/usr/bin/python3");
+  assert.equal(environment.NODE_OPTIONS, undefined);
 });
 
 test("strict nested receipt rejects invented authority, inputs, and unknown coverage", () => {

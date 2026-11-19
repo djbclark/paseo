@@ -314,9 +314,9 @@ async function roots(root, options) {
   for (const name of ["Release", "Debug"])
     await missing(path.join(root, "node_modules/node-pty/build", name, "pty.node"));
 }
-function buildEnvironment(home) {
+function buildEnvironment(home, runtime) {
   return {
-    PATH: "/usr/bin:/bin",
+    PATH: `${path.dirname(runtime)}:/usr/bin:/bin`,
     HOME: home,
     LANG: "C",
     LC_ALL: "C",
@@ -482,7 +482,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
   const original = await identity(path.join(root, ADDON), ADDON);
   if (original.sha256 !== NODE_PTY_INPUTS.original) refuse("original addon");
   const stage = await mkdtemp(path.join(options.stagingRoot, "nodepty-"));
-  const env = buildEnvironment(stage);
+  const env = buildEnvironment(stage, options.runtime);
   const commands = [];
   const tools = [];
   for (const [role, file] of [
@@ -594,6 +594,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     refuse("addon exports");
   const preprocessed = path.join(work, "build/Release/obj.target/pty/src/unix/pty.ii");
   const entries = [
+    ["build-environment.json", json(env)],
     ["configure.txt", configured],
     ["build.txt", built],
     ["compiler-specs.txt", specs],

@@ -8,7 +8,10 @@ The fixed Linux-x64 recipe uses the original node-pty binding.gyp, the official
 Node executable and matching headers/configuration, and the selected
 node-addon-api exception configuration. The same official archive supplies
 node-gyp and its surrounding npm dependencies. CI downloads and verifies the
-public inputs before the helper runs. The helper runs offline without npm
+public inputs before the helper runs. Bare `node` calls inside the original
+GYP recipe resolve through the verified copied runtime directory first; the
+remaining PATH is `/usr/bin:/bin`. The sanitized environment is retained in
+the receipt evidence. The helper runs offline without npm
 lifecycle scripts, a header downloader, or a prebuild fallback.
 
 ## Build-only API

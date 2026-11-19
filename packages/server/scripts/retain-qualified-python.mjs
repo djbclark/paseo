@@ -680,34 +680,53 @@ async function removeEmptyStageParent(parent) {
 
 // Complete SOURCE layout DATA before copying; never follow a link or open specials.
 async function sourceLayoutDiagnostic(source) {
-  const rows=[];
-  let entries=0;
-  async function visit(directory,prefix) {
+  const rows = [];
+  let entries = 0;
+  async function visit(directory, prefix) {
     await protectedSource(directory);
-    const before=await lstat(directory,{bigint:true});
-    require(before.isDirectory() && before.uid===0n && !(before.mode&0o022n),"diagnostic source directory");
+    const before = await lstat(directory, { bigint: true });
+    require(before.isDirectory() &&
+      before.uid === 0n &&
+      !(before.mode & 0o022n), "diagnostic source directory");
     for (const name of (await readdir(directory)).sort()) {
-      require(++entries<=memberLimit,"diagnostic source entry bound");
-      const member=relative(prefix?prefix+"/"+name:name);
-      const file=path.join(directory,name);
-      const info=await lstat(file,{bigint:true});
-      if(info.isDirectory()) await visit(file,member);
-      else if(!info.isFile()) {
-        require(rows.length<64,"diagnostic link/special row bound");
-        const target=info.isSymbolicLink()?await readlink(file):null;
-        require(target===null || Buffer.byteLength(target)<=4096,"diagnostic link text bound");
-        require(stamp(info)===stamp(await lstat(file,{bigint:true})),"diagnostic entry changed");
-        if(target!==null) require(await readlink(file)===target,"diagnostic link changed");
-        rows.push({path:member,kind:info.isSymbolicLink()?"symlink":"special",target,mode:Number(info.mode&0o7777n),uid:Number(info.uid)});
+      require(++entries <= memberLimit, "diagnostic source entry bound");
+      const member = relative(prefix ? prefix + "/" + name : name);
+      const file = path.join(directory, name);
+      const info = await lstat(file, { bigint: true });
+      if (info.isDirectory()) await visit(file, member);
+      else if (!info.isFile()) {
+        require(rows.length < 64, "diagnostic link/special row bound");
+        const target = info.isSymbolicLink() ? await readlink(file) : null;
+        require(target === null || Buffer.byteLength(target) <= 4096, "diagnostic link text bound");
+        require(stamp(info) ===
+          stamp(await lstat(file, { bigint: true })), "diagnostic entry changed");
+        if (target !== null) require((await readlink(file)) === target, "diagnostic link changed");
+        rows.push({
+          path: member,
+          kind: info.isSymbolicLink() ? "symlink" : "special",
+          target,
+          mode: Number(info.mode & 0o7777n),
+          uid: Number(info.uid),
+        });
       }
     }
-    require(stamp(before)===stamp(await lstat(directory,{bigint:true})),"diagnostic source directory changed");
+    require(stamp(before) ===
+      stamp(await lstat(directory, { bigint: true })), "diagnostic source directory changed");
   }
-  await visit(source.stdlib,"");
-  rows.sort((a,b)=>a.path<b.path?-1:Number(a.path>b.path));
-  const record={kind:"retained-python-source-layout",qualification:false,stdlib:source.stdlib,multiarch:source.build.MULTIARCH,platform:process.platform,arch:process.arch,entryCount:entries,rows};
-  const raw=JSON.stringify(record);
-  require(Buffer.byteLength(raw)<=65536,"diagnostic output bound");
+  await visit(source.stdlib, "");
+  rows.sort((a, b) => (a.path < b.path ? -1 : Number(a.path > b.path)));
+  const record = {
+    kind: "retained-python-source-layout",
+    qualification: false,
+    stdlib: source.stdlib,
+    multiarch: source.build.MULTIARCH,
+    platform: process.platform,
+    arch: process.arch,
+    entryCount: entries,
+    rows,
+  };
+  const raw = JSON.stringify(record);
+  require(Buffer.byteLength(raw) <= 65536, "diagnostic output bound");
   console.log(raw);
 }
 

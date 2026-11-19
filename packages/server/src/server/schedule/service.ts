@@ -293,6 +293,7 @@ export class ScheduleService {
   private stopped = false;
   private lifecycleRevision = 0;
   private stopPromise: Promise<void> | null = null;
+  private startupFailure: { error: unknown } | null = null;
   private readonly pendingActivity = new Set<Promise<unknown>>();
 
   constructor(options: ScheduleServiceOptions) {
@@ -310,14 +311,21 @@ export class ScheduleService {
   }
 
   async start(): Promise<void> {
+    if (this.startupFailure) throw this.startupFailure.error;
     const revision = ++this.lifecycleRevision;
     if (this.stopPromise) await this.stopPromise;
     if (revision !== this.lifecycleRevision) return;
     this.stopPromise = null;
     this.stopped = false;
     await this.trackActivity(async () => {
-      await this.recoverInterruptedRuns();
-      await this.sweepOrphanedSchedules();
+      try {
+        await this.recoverInterruptedRuns();
+        await this.sweepOrphanedSchedules();
+      } catch (error) {
+        this.stopped = true;
+        this.startupFailure = { error };
+        throw error;
+      }
       if (this.stopped || revision !== this.lifecycleRevision || this.tickTimer) return;
       const timer = setInterval(() => {
         void this.tick().catch((error) => {
@@ -356,6 +364,9 @@ export class ScheduleService {
     while (this.pendingActivity.size > 0) {
       const results = await Promise.allSettled([...this.pendingActivity]);
       for (const result of results) if (result.status === "rejected") failures.push(result.reason);
+    }
+    if (this.startupFailure && !failures.includes(this.startupFailure.error)) {
+      failures.push(this.startupFailure.error);
     }
     if (failures.length > 0)
       throw new AggregateError(failures, "Schedule activity did not drain cleanly");
@@ -661,7 +672,7 @@ export class ScheduleService {
   private async recoverInterruptedRuns(): Promise<void> {
     const schedules = await this.store.list();
     const now = this.now();
-    await Promise.all(
+    await settleStartupSchedules(
       schedules.map((schedule) => this.recoverInterruptedSchedule(schedule.id, now)),
     );
   }
@@ -751,7 +762,7 @@ export class ScheduleService {
   private async sweepOrphanedSchedules(): Promise<void> {
     const now = this.now();
     const schedules = await this.store.list();
-    await Promise.all(schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)));
+    await settleStartupSchedules(schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)));
   }
 
   private async sweepOrphanedSchedule(scheduleId: string, now: Date): Promise<void> {
@@ -1185,4 +1196,14 @@ function formatScheduleProviderModel(
   config: Extract<ScheduleTarget, { type: "new-agent" }>["config"],
 ): string {
   return formatProviderModel(config.provider, config.model);
+}
+
+async function settleStartupSchedules(schedules: Promise<void>[]): Promise<void> {
+  const outcomes = await Promise.allSettled(schedules);
+  const failures: unknown[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") failures.push(outcome.reason);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Schedule startup work failed");
 }

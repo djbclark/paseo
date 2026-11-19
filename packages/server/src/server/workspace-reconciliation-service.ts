@@ -800,9 +800,10 @@ async function settleOperations<T extends readonly unknown[] | []>(
   operations: T,
 ): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }> {
   const outcomes = await Promise.allSettled(operations);
-  const failures = outcomes
-    .filter((outcome) => outcome.status === "rejected")
-    .map((outcome) => outcome.reason);
+  const failures: unknown[] = [];
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") failures.push(outcome.reason);
+  }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1)
     throw new AggregateError(failures, "Workspace reconciliation work failed");

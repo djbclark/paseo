@@ -2,6 +2,7 @@ import { MaintenanceReservation } from "../maintenance-reservation.js";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { setImmediate as yieldStartupDrainTurn } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
@@ -350,6 +351,81 @@ async function createDrainSchedule(
   return { service, schedule };
 }
 
+type StartupFanoutPhase = "recovery" | "orphan sweep";
+
+async function createStartupFanoutSchedules(
+  home: string,
+  agentStorage: AgentStorage,
+  now: () => Date,
+  phase: StartupFanoutPhase,
+) {
+  const service = createScheduleService({
+    paseoHome: home,
+    logger: createTestLogger(),
+    agentManager: new AgentManager({ logger: createTestLogger() }),
+    agentStorage,
+    providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+    now,
+    runner: async () => ({ agentId: null, output: "unused" }),
+  });
+  const agentIds = ["startup-first", "startup-second"];
+  for (const id of agentIds) {
+    await agentStorage.upsert(buildAgentRecord({ id, cwd: home, iso: now().toISOString() }));
+  }
+  const schedules = [];
+  for (const agentId of agentIds) {
+    schedules.push(await service.create({
+      prompt: "original startup fanout",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: phase === "orphan sweep"
+        ? { type: "agent", agentId }
+        : { type: "new-agent", config: { provider: "claude", cwd: home } },
+    }));
+  }
+  return { service, schedules, agentIds };
+}
+
+function gateStartupFanout(
+  phase: StartupFanoutPhase,
+  agentStorage: AgentStorage,
+  ids: string[],
+) {
+  const firstStarted = scheduleDrainGate();
+  const secondStarted = scheduleDrainGate();
+  const firstFailed = scheduleDrainGate();
+  const allowFailure = scheduleDrainGate();
+  const allowSibling = scheduleDrainGate();
+  const failure = new Error(`original ${phase} child failed`);
+  const hold = async <T>(id: string, operation: () => Promise<T>): Promise<T> => {
+    if (id === ids[0]) {
+      firstStarted.resolve();
+      await allowFailure.promise;
+      throw failure;
+    }
+    if (id === ids[1]) {
+      secondStarted.resolve();
+      await allowSibling.promise;
+    }
+    return operation();
+  };
+  const observed = <T>(id: string, pending: Promise<T>): Promise<T> => {
+    if (id === ids[0]) void pending.catch(() => { firstFailed.resolve(); });
+    return pending;
+  };
+  if (phase === "recovery") {
+    const update = ScheduleStore.prototype.update;
+    const spy = vi.spyOn(ScheduleStore.prototype, "update").mockImplementation(function (this: ScheduleStore, id, updater) {
+      return observed(id, update.call(this, id, (current) => hold(id, async () => updater(current))));
+    });
+    return { firstStarted, secondStarted, firstFailed, allowFailure, allowSibling, failure,
+      restore: () => spy.mockRestore() };
+  }
+  const get = agentStorage.get.bind(agentStorage);
+  const spy = vi.spyOn(agentStorage, "get").mockImplementation((id) => observed(id, hold(id, () => get(id))));
+  return { firstStarted, secondStarted, firstFailed, allowFailure, allowSibling, failure,
+    restore: () => spy.mockRestore() };
+}
+
 describe("ScheduleService", () => {
   let tempDir: string;
   let agentStorage: AgentStorage;
@@ -492,6 +568,85 @@ describe("ScheduleService", () => {
       await originalFailure;
     }
   });
+
+  for (const phase of ["recovery", "orphan sweep"] as const) {
+    for (const stopBeforeFailure of [true, false]) {
+      test(`${phase} retains both original IDs when stop is requested ${stopBeforeFailure ? "before" : "after"} a child fails`, async () => {
+        const fixture = await createStartupFanoutSchedules(tempDir, agentStorage, () => now, phase);
+        const ids = phase === "recovery" ? fixture.schedules.map((schedule) => schedule.id) : fixture.agentIds;
+        const gate = gateStartupFanout(phase, agentStorage, ids);
+        let startSettled = false;
+        let stopSettled = false;
+        const starting = fixture.service.start();
+        void starting.then(() => { startSettled = true; }, () => { startSettled = true; });
+        const originalFailure = expect(starting).rejects.toBe(gate.failure);
+        let stopping: Promise<void> | undefined;
+        try {
+          await gate.firstStarted.promise;
+          await gate.secondStarted.promise;
+          if (stopBeforeFailure) {
+            stopping = fixture.service.stop();
+            void stopping.catch(() => undefined);
+          }
+          gate.allowFailure.resolve();
+          await gate.firstFailed.promise;
+          await yieldStartupDrainTurn();
+          stopping ??= fixture.service.stop();
+          void stopping.then(() => { stopSettled = true; }, () => { stopSettled = true; });
+          const drainFailure = expect(stopping).rejects.toMatchObject({
+            errors: expect.arrayContaining([gate.failure]),
+          });
+          await yieldStartupDrainTurn();
+          expect(startSettled).toBe(false);
+          expect(stopSettled).toBe(false);
+          await expect(fixture.service.runOnce(fixture.schedules[0]!.id)).rejects.toThrow("stopped");
+          gate.allowSibling.resolve();
+          await originalFailure;
+          await drainFailure;
+          // A stop after the failed enclosing start settled still retains that failure.
+          await expect(fixture.service.stop()).rejects.toMatchObject({
+            errors: expect.arrayContaining([gate.failure]),
+          });
+          await expect(fixture.service.start()).rejects.toBe(gate.failure);
+        } finally {
+          gate.allowFailure.resolve();
+          gate.allowSibling.resolve();
+          await originalFailure;
+          await stopping?.catch(() => undefined);
+          gate.restore();
+        }
+      });
+    }
+  }
+
+  for (const phase of ["recovery", "orphan sweep"] as const) {
+    test(`${phase} retains startup failure when the first stop follows enclosing promise removal`, async () => {
+      const fixture = await createStartupFanoutSchedules(tempDir, agentStorage, () => now, phase);
+      const ids = phase === "recovery" ? fixture.schedules.map((schedule) => schedule.id) : fixture.agentIds;
+      const gate = gateStartupFanout(phase, agentStorage, ids);
+      const starting = fixture.service.start();
+      const originalFailure = expect(starting).rejects.toBe(gate.failure);
+      try {
+        await gate.firstStarted.promise;
+        await gate.secondStarted.promise;
+        gate.allowFailure.resolve();
+        await gate.firstFailed.promise;
+        gate.allowSibling.resolve();
+        await originalFailure;
+        await yieldStartupDrainTurn();
+        await expect(fixture.service.stop()).rejects.toMatchObject({
+          errors: expect.arrayContaining([gate.failure]),
+        });
+        await expect(fixture.service.start()).rejects.toBe(gate.failure);
+        await expect(fixture.service.runOnce(fixture.schedules[0]!.id)).rejects.toThrow("stopped");
+      } finally {
+        gate.allowFailure.resolve();
+        gate.allowSibling.resolve();
+        await originalFailure;
+        gate.restore();
+      }
+    });
+  }
 
   test("manual and timed schedule execution share admission across runner and persistence", async () => {
     const reservation = await MaintenanceReservation.create(tempDir, async () => true);

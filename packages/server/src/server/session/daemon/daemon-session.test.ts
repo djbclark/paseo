@@ -1346,19 +1346,34 @@ describe("native maintenance participant serialization", () => {
       bindTerminalManager() {},
     };
   }
-  function bindMechanismAuthority(reservation: MaintenanceReservation, refresh: () => Promise<void>) {
+  function bindMechanismAuthority(
+    reservation: MaintenanceReservation,
+    refresh: () => Promise<void>,
+  ) {
     reservation.setReady(false);
     reservation.bindTransport("mechanism-only-server", mechanismAuthority(refresh));
     reservation.setReady(true);
   }
   async function composedEndFixture(mode: "pre" | "post" | "persistent" | "overlap" | "raw") {
-    const state: { phase: "normal" | "pre" | "post" | "final"; lost: boolean; pending: boolean; finalSucceeded: boolean } = {
-      phase: "normal", lost: false, pending: false, finalSucceeded: false,
+    const state: {
+      phase: "normal" | "pre" | "post" | "final";
+      lost: boolean;
+      pending: boolean;
+      finalSucceeded: boolean;
+    } = {
+      phase: "normal",
+      lost: false,
+      pending: false,
+      finalSucceeded: false,
     };
     let finish!: () => void;
     let entered!: () => void;
-    const gate = new Promise<void>((resolve) => { finish = resolve; });
-    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const entering = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     const rawFailure = new Error("ordinary raw END response lost");
     const rawEnd = vi.fn(async () => {
       state.phase = "post";
@@ -1366,8 +1381,10 @@ describe("native maintenance participant serialization", () => {
     });
     const refresh = vi.fn(async () => {
       if (mode === "persistent" && state.lost) throw new Error("persistent proof loss");
-      if ((mode === "pre" && state.phase === "pre") ||
-          ((mode === "post" || mode === "persistent") && state.phase === "post")) {
+      if (
+        (mode === "pre" && state.phase === "pre") ||
+        ((mode === "post" || mode === "persistent") && state.phase === "post")
+      ) {
         if (!state.lost) {
           state.lost = true;
           throw new Error("one-shot qualification loss");
@@ -1388,19 +1405,32 @@ describe("native maintenance participant serialization", () => {
       if (state.pending) throw new Error("overlapping qualification refresh pending");
     };
     const wrapped = qualifiedMaintenanceParticipant(
-      { supportsV1: () => true, begin: async () => "held", end: rawEnd }, authority,
+      { supportsV1: () => true, begin: async () => "held", end: rawEnd },
+      authority,
     );
     const originalEnd = wrapped.end;
     wrapped.end = async (identity) => {
       state.phase = "pre";
-      try { await originalEnd(identity); } finally { state.phase = "final"; }
+      try {
+        await originalEnd(identity);
+      } finally {
+        state.phase = "final";
+      }
     };
     const f = await fixture(wrapped);
     f.reservation.setReady(false);
     f.reservation.bindTransport("composed-mechanism-only", authority);
     f.reservation.setReady(true);
-    return { ...f, state, rawFailure, rawEnd, refresh, finish, entering,
-      path: maintenanceJoin(f.home, "maintenance-reservation.json") };
+    return {
+      ...f,
+      state,
+      rawFailure,
+      rawEnd,
+      refresh,
+      finish,
+      entering,
+      path: maintenanceJoin(f.home, "maintenance-reservation.json"),
+    };
   }
   test("preflight typed busy acquires no barrier or counter and cannot classify stale or unsupported", async () => {
     let supported = true;
@@ -1999,7 +2029,9 @@ describe("native maintenance participant serialization", () => {
   );
   test("raw held response cannot survive failed post-await authority refresh", async () => {
     const refresh = vi.fn(async () => {});
-    refresh.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("authority lost after barrier"));
+    refresh
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("authority lost after barrier"));
     const wrapped = qualifiedMaintenanceParticipant(
       { supportsV1: () => true, begin: async () => "held", end: async () => {} },
       mechanismAuthority(refresh),
@@ -2013,8 +2045,12 @@ describe("native maintenance participant serialization", () => {
     async (failAt) => {
       let entered!: () => void;
       let finish!: () => void;
-      const entering = new Promise<void>((resolve) => { entered = resolve; });
-      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      const entering = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
       let calls = 0;
       const refresh = vi.fn(async () => {
         if (++calls === failAt) {
@@ -2023,7 +2059,11 @@ describe("native maintenance participant serialization", () => {
           throw new Error("protected authority lost");
         }
       });
-      const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+      const f = await fixture({
+        supportsV1: () => true,
+        begin: async () => "held",
+        end: async () => {},
+      });
       bindMechanismAuthority(f.reservation, refresh);
       const path = maintenanceJoin(f.home, "maintenance-reservation.json");
       try {
@@ -2035,7 +2075,11 @@ describe("native maintenance participant serialization", () => {
         await expect(pending).rejects.toThrow("protected authority lost");
         expect(refresh).toHaveBeenCalledTimes(failAt);
         const record = JSON.parse(readMaintenanceFile(path, "utf8"));
-        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-begin", uncertain: true });
+        expect(record).toMatchObject({
+          generation: 1,
+          transactionId: "refresh-begin",
+          uncertain: true,
+        });
         expect(Boolean(record.tokenDigest)).toBe(failAt === 2);
         expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
@@ -2061,11 +2105,19 @@ describe("native maintenance participant serialization", () => {
         refresh.mockImplementation(async () => {
           if (++calls === failAt) throw new Error("protected authority lost");
         });
-        await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("protected authority lost");
+        await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow(
+          "protected authority lost",
+        );
         expect(end).toHaveBeenCalledTimes(failAt === 3 ? 1 : 0);
         expect(refresh).toHaveBeenCalledTimes(failAt);
-        const record = JSON.parse(readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"));
-        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-end", uncertain: true });
+        const record = JSON.parse(
+          readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"),
+        );
+        expect(record).toMatchObject({
+          generation: 1,
+          transactionId: "refresh-end",
+          uncertain: true,
+        });
         expect(Boolean(record.tokenDigest)).toBe(failAt === 1);
         expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
@@ -2082,16 +2134,27 @@ describe("native maintenance participant serialization", () => {
       const f = await composedEndFixture(phase);
       try {
         const held = await f.reservation.begin(1, "composed-one-shot");
-        const error: unknown = await f.reservation.end(1, held.ownerToken).catch((failure: unknown) => failure);
+        const error: unknown = await f.reservation
+          .end(1, held.ownerToken)
+          .catch((failure: unknown) => failure);
         expect(isParticipantQualificationFailure(error)).toBe(true);
         expect(isParticipantQualificationFailure(JSON.parse(JSON.stringify(error)))).toBe(false);
-        expect(isParticipantQualificationFailure(new Error("Maintenance participant qualification failed"))).toBe(false);
+        expect(
+          isParticipantQualificationFailure(
+            new Error("Maintenance participant qualification failed"),
+          ),
+        ).toBe(false);
         expect(f.state.finalSucceeded).toBe(true);
         expect(f.rawEnd).toHaveBeenCalledTimes(phase === "pre" ? 0 : 1);
         expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({
-          generation: 1, transactionId: "composed-one-shot", tokenDigest: null, uncertain: true,
+          generation: 1,
+          transactionId: "composed-one-shot",
+          tokenDigest: null,
+          uncertain: true,
         });
-        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+          "recovery-required",
+        );
       } finally {
         f.finish();
         await f.reservation.flushStorage();
@@ -2103,7 +2166,9 @@ describe("native maintenance participant serialization", () => {
     const f = await composedEndFixture("raw");
     try {
       const held = await f.reservation.begin(1, "composed-ordinary");
-      const error: unknown = await f.reservation.end(1, held.ownerToken).catch((failure: unknown) => failure);
+      const error: unknown = await f.reservation
+        .end(1, held.ownerToken)
+        .catch((failure: unknown) => failure);
       expect(error).toBe(f.rawFailure);
       expect(isParticipantQualificationFailure(error)).toBe(false);
       expect(f.state.finalSucceeded).toBe(true);
@@ -2112,7 +2177,9 @@ describe("native maintenance participant serialization", () => {
       expect(record.tokenDigest).toBeNull();
       expect(record.uncertain).toBeUndefined();
       expect(f.reservation.status().state).toBe("recovery-required");
-      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("idle");
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+        "idle",
+      );
     } finally {
       f.finish();
       await f.reservation.flushStorage();
@@ -2126,8 +2193,13 @@ describe("native maintenance participant serialization", () => {
       await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("persistent proof loss");
       expect(f.rawEnd).toHaveBeenCalledTimes(1);
       expect(f.state.finalSucceeded).toBe(false);
-      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({ tokenDigest: null, uncertain: true });
-      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({
+        tokenDigest: null,
+        uncertain: true,
+      });
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+        "recovery-required",
+      );
     } finally {
       f.finish();
       await f.reservation.flushStorage();
@@ -2148,8 +2220,13 @@ describe("native maintenance participant serialization", () => {
       expect(f.state.pending).toBe(false);
       expect(f.state.finalSucceeded).toBe(true);
       expect(f.rawEnd).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({ tokenDigest: null, uncertain: true });
-      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({
+        tokenDigest: null,
+        uncertain: true,
+      });
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+        "recovery-required",
+      );
     } finally {
       f.finish();
       await f.reservation.flushStorage();
@@ -2157,12 +2234,23 @@ describe("native maintenance participant serialization", () => {
     }
   });
   test("held operation final refresh retains its original lease and rejects interleaved cleanup", async () => {
-    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "held",
+      end: async () => {},
+    });
     const refresh = vi.fn(async () => {});
     bindMechanismAuthority(f.reservation, refresh);
     const claim: HeldPluginOperationClaim = {
-      generation: 1, transactionId: "refresh-held", operation: "replace", pluginId: "unit", path: "/B",
-      expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64),
+      generation: 1,
+      transactionId: "refresh-held",
+      operation: "replace",
+      pluginId: "unit",
+      path: "/B",
+      expectedPath: "/A",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
     };
     try {
       const held = await f.reservation.begin(1, claim.transactionId);
@@ -2173,9 +2261,9 @@ describe("native maintenance participant serialization", () => {
       refresh.mockImplementation(async () => {
         await f.reservation.runCleanup(cleanup);
       });
-      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined)).rejects.toThrow(
-        "work or readiness changed",
-      );
+      await expect(
+        f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined),
+      ).rejects.toThrow("work or readiness changed");
       expect(f.reservation.status().state).toBe("recovery-required");
     } finally {
       await f.reservation.flushStorage();

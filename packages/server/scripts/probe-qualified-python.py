@@ -86,6 +86,10 @@ def main():
             for key in ("SOABI", "EXT_SUFFIX", "CONFIG_ARGS", "MULTIARCH", "LDLIBRARY")
         },
     }
+    diagnostic = {"kind": "retained-python-sysconfig-source-diagnostic", "qualification": False,
+                  "LIBPL": str(sysconfig.get_config_var("LIBPL")),
+                  "LIBDIR": str(sysconfig.get_config_var("LIBDIR"))}
+    sys.stderr.write(json.dumps(diagnostic, separators=(",", ":")) + "\n")
     raw = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     assert len(raw.encode("ascii")) + 1 <= 65536
     sys.stdout.write(raw + "\n")

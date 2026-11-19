@@ -1,6 +1,6 @@
 import {
   acquirePidLock,
-  getPidLockInfo,
+  getStrictPidLockInfo,
   isPidLockOwnerRunning,
   PidLockError,
   refreshPidLock,
@@ -22,11 +22,11 @@ export async function acquireQualifiedDaemonReadiness(home: string) {
     throw new PidLockError("Daemon metadata already owned in this process");
   activeHomes.add(home);
   try {
-    const existing = await getPidLockInfo(home);
+    const existing = await getStrictPidLockInfo(home);
     if (existing && isPidLockOwnerRunning(existing))
       throw new PidLockError("Another live daemon metadata incarnation exists", existing);
-    await acquirePidLock(home, null, { ownerPid: process.pid });
-    const original = await getPidLockInfo(home);
+    await acquirePidLock(home, null, { ownerPid: process.pid, strict: true });
+    const original = await getStrictPidLockInfo(home);
     if (!original || original.pid !== process.pid || original.listen !== null)
       throw new PidLockError("Daemon metadata acquisition identity changed");
     const expected = Object.freeze({ ownerPid: original.pid, startedAt: original.startedAt });
@@ -43,7 +43,7 @@ export async function acquireQualifiedDaemonReadiness(home: string) {
     });
 
     async function assertOriginal(): Promise<void> {
-      const current = await getPidLockInfo(home);
+      const current = await getStrictPidLockInfo(home);
       if (
         !current ||
         current.pid !== expected.ownerPid ||

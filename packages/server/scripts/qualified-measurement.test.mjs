@@ -36,11 +36,34 @@ test(
     }
     async function wrappedOpen(file, ...args) {
       const handle = await originalOpen.call(io, file, ...args);
-      if (!String(file).startsWith(`${parent}/`) || args[0] !== "r+") return handle;
+      if (
+        !String(file).startsWith(`${parent}/`) ||
+        (args[0] !== "r+" && typeof args[0] !== "number")
+      )
+        return handle;
+      const access = args[0] === "r+" || (args[0] & fs.constants.O_RDWR) !== 0 ? "write" : "read";
       descriptors.add(handle);
       const utimes = handle.utimes.bind(handle);
       const close = handle.close.bind(handle);
       const write = handle.writeFile.bind(handle);
+      const read = handle.read.bind(handle);
+      const stat = handle.stat.bind(handle);
+      function readFault(kind) {
+        if (behavior.readFault?.kind !== kind || behavior.readFault?.access !== access) return;
+        const error = behavior.readFault.error;
+        behavior.readFault = undefined;
+        throw error;
+      }
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        readFault("read");
+        return result;
+      };
+      handle.stat = async (...statArgs) => {
+        const result = await stat(...statArgs);
+        readFault("stat");
+        return result;
+      };
       handle.utimes = async (...times) => {
         behavior.entered?.resolve();
         await behavior.gate?.promise;
@@ -50,7 +73,7 @@ test(
       handle.close = async () => {
         await close();
         descriptors.delete(handle);
-        if (behavior.closeError) throw behavior.closeError;
+        if (behavior.closeError && access === "write") throw behavior.closeError;
       };
       handle.writeFile = async (...writeArgs) => {
         behavior.writeEntered?.resolve();
@@ -245,6 +268,131 @@ test(
           assert.deepEqual(await getPidLockInfo(home), original);
           assert.throws(() => owner.assertHealthy());
           await assert.rejects(owner.releaseAfterStop());
+        },
+      );
+      await t.test(
+        "one-shot actual strict read and stat failures stay latched across later success",
+        async () => {
+          for (const operation of ["heartbeat", "publication"]) {
+            for (const access of ["read", "write"]) {
+              for (const kind of ["read", "stat"]) {
+                const home = path.join(parent, `read-fault-${operation}-${access}-${kind}`);
+                const owner = await acquireQualifiedDaemonReadiness(home);
+                owners.push(owner);
+                const error = Object.assign(new Error("one-shot actual PID descriptor failure"), {
+                  code: "EIO",
+                });
+                behavior = { readFault: { access, kind, error } };
+                if (operation === "heartbeat") pulse();
+                else
+                  await assert.rejects(
+                    owner.publish("/read-fault.sock", "read-fault-server"),
+                    (failure) => failure === error,
+                  );
+                assert.equal(await owner.failed, error);
+                assert.equal(
+                  behavior.readFault,
+                  undefined,
+                  "the actual one-shot descriptor operation ran",
+                );
+                behavior = {};
+                await assert.rejects(owner.clearAndDrain(), (failure) => failure === error);
+                assert.equal((await getPidLockInfo(home)).listen, null);
+                assert.throws(
+                  () => owner.assertHealthy(),
+                  (failure) => failure === error,
+                );
+                await assert.rejects(owner.releaseAfterStop(), (failure) => failure === error);
+                assert.equal(descriptors.size, 0);
+              }
+            }
+          }
+        },
+      );
+      await t.test(
+        "strict release refuses invalid or failed pre-unlink and post-unlink observations",
+        async () => {
+          for (const phase of [1, 2]) {
+            for (const kind of [
+              "empty",
+              "malformed",
+              "read",
+              "stat",
+              "close",
+              "read-close",
+              "opened-enoent",
+            ]) {
+              const home = path.join(parent, `strict-release-${phase}-${kind}`);
+              const file = path.join(home, "paseo.pid");
+              await acquirePidLock(home, null, { ownerPid: process.pid, strict: true });
+              const original = await getPidLockInfo(home);
+              const expected = {
+                ownerPid: original.pid,
+                startedAt: original.startedAt,
+                strict: true,
+              };
+              const error = Object.assign(new Error("actual strict record IO failure"), {
+                code: kind === "opened-enoent" ? "ENOENT" : "EIO",
+              });
+              const closeError = new Error("actual strict record close failure");
+              let reads = 0;
+              let exercised = false;
+              io.open = async (target, ...args) => {
+                const selected =
+                  target === file && typeof args[0] === "number" && reads++ === phase;
+                if (selected) {
+                  exercised = true;
+                  let contents = JSON.stringify(original);
+                  if (kind === "empty") contents = "";
+                  else if (kind === "malformed") contents = "{";
+                  await io.writeFile(file, contents);
+                }
+                const handle = await wrappedOpen(target, ...args);
+                if (!selected) return handle;
+                const read = handle.read.bind(handle);
+                const stat = handle.stat.bind(handle);
+                const close = handle.close.bind(handle);
+                if (["read", "read-close", "opened-enoent"].includes(kind)) {
+                  handle.read = async (...readArgs) => {
+                    await read(...readArgs);
+                    throw error;
+                  };
+                }
+                if (kind === "stat") {
+                  handle.stat = async (...statArgs) => {
+                    await stat(...statArgs);
+                    throw error;
+                  };
+                }
+                if (kind === "close" || kind === "read-close") {
+                  handle.close = async () => {
+                    await close();
+                    throw closeError;
+                  };
+                }
+                return handle;
+              };
+              syncBuiltinESMExports();
+              try {
+                await assert.rejects(releasePidLock(home, expected), (failure) => {
+                  if (kind === "read-close") {
+                    assert.ok(failure instanceof AggregateError);
+                    assert.deepEqual(failure.errors, [error, closeError]);
+                    assert.equal(failure.cause, error);
+                  } else if (["read", "stat", "opened-enoent"].includes(kind))
+                    assert.equal(failure, error);
+                  else if (kind === "close") assert.equal(failure, closeError);
+                  return true;
+                });
+                assert.equal(exercised, true);
+                assert.equal((await io.lstat(file)).isFile(), true);
+                assert.equal(descriptors.size, 0);
+              } finally {
+                io.open = wrappedOpen;
+                syncBuiltinESMExports();
+              }
+            }
+          }
         },
       );
       await t.test(

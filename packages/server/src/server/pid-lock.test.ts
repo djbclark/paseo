@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   acquirePidLock,
   getPidLockInfo,
+  getStrictPidLockInfo,
   isLocked,
   PidLockError,
   refreshPidLock,
@@ -14,6 +15,30 @@ import {
 } from "./pid-lock.js";
 
 describe("pid-lock ownership", () => {
+  test("strict reads and acquisition never treat opened empty or malformed records as absence", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-strict-record-"));
+    const file = join(home, "paseo.pid");
+    try {
+      expect(await getStrictPidLockInfo(home)).toBeNull();
+      for (const contents of ["", "{", "{}", JSON.stringify({ pid: "bad" })]) {
+        await writeFile(file, contents);
+        await expect(getStrictPidLockInfo(home)).rejects.toThrow();
+        await expect(
+          acquirePidLock(home, null, { ownerPid: process.pid, strict: true }),
+        ).rejects.toThrow();
+        expect(await readFile(file, "utf8")).toBe(contents);
+      }
+      await writeFile(file, "");
+      expect(await getPidLockInfo(home)).toBeNull();
+      // The existing ordinary acquisition still reclaims an abandoned empty file.
+      await acquirePidLock(home, null, { ownerPid: process.pid });
+      const record = await getStrictPidLockInfo(home);
+      expect(record?.pid).toBe(process.pid);
+      expect(record?.listen).toBeNull();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
   test("guarded refresh and publication preserve a same-PID replacement incarnation", async () => {
     const home = await mkdtemp(join(tmpdir(), "paseo-pid-incarnation-"));
     const file = join(home, "paseo.pid");

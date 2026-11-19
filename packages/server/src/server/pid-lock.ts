@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { open, readFile, stat, unlink, utimes } from "node:fs/promises";
+import { constants, readFileSync, type BigIntStats } from "node:fs";
+import { lstat, open, readFile, stat, unlink, utimes } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { ensurePrivateDirectory } from "./private-files.js";
 import { join } from "node:path";
@@ -155,6 +155,7 @@ function resolveOwnerPid(ownerPid?: number): number {
 
 interface AcquirePidLockOptions {
   ownerPid?: number;
+  strict?: true;
 }
 
 export function isSamePidLock(left: PidLockInfo, right: PidLockInfo): boolean {
@@ -172,6 +173,7 @@ async function clearExistingPidLock(
   pidPath: string,
   existingLock: PidLockInfo,
   lockOwnerPid: number,
+  strict = false,
 ): Promise<"already_owned" | "cleared"> {
   const lockOwnerRunning = isPidLockOwnerRunning(existingLock);
   if (existingLock.pid === lockOwnerPid && lockOwnerRunning) {
@@ -180,7 +182,7 @@ async function clearExistingPidLock(
   }
 
   if (lockOwnerRunning) throw createLockHeldError(existingLock);
-  const confirmedLock = await readPidLock(pidPath);
+  const confirmedLock = strict ? await readStrictPidLock(pidPath) : await readPidLock(pidPath);
   if (
     !confirmedLock ||
     !isSamePidLock(existingLock, confirmedLock) ||
@@ -189,7 +191,8 @@ async function clearExistingPidLock(
     throw new PidLockError("PID lock changed while checking whether it was abandoned");
   }
 
-  await unlink(pidPath).catch(() => {});
+  if (strict) await unlink(pidPath);
+  else await unlink(pidPath).catch(() => {});
   return "cleared";
 }
 
@@ -201,7 +204,12 @@ async function removeEmptyPidLock(pidPath: string): Promise<void> {
   }
 }
 
-async function writeNewPidLock(pidPath: string, lockInfo: PidLockInfo): Promise<void> {
+async function writeNewPidLock(
+  pidPath: string,
+  lockInfo: PidLockInfo,
+  strict = false,
+): Promise<void> {
+  if (strict) return writeStrictNewPidLock(pidPath, lockInfo);
   let fd;
   try {
     fd = await open(pidPath, "wx");
@@ -234,16 +242,18 @@ export async function acquirePidLock(
   ensurePrivateDirectory(paseoHome);
 
   // Try to read existing lock
-  const existingLock = await readPidLock(pidPath);
+  const existingLock = options?.strict
+    ? await readStrictPidLock(pidPath)
+    : await readPidLock(pidPath);
 
   // Check if existing lock is stale
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
   if (existingLock) {
-    const result = await clearExistingPidLock(pidPath, existingLock, lockOwnerPid);
+    const result = await clearExistingPidLock(pidPath, existingLock, lockOwnerPid, options?.strict);
     if (result === "already_owned") {
       return;
     }
-  } else {
+  } else if (!options?.strict) {
     await removeEmptyPidLock(pidPath);
   }
 
@@ -260,7 +270,7 @@ export async function acquirePidLock(
     ...(process.env.PASEO_DESKTOP_MANAGED === "1" ? { desktopManaged: true } : {}),
   };
 
-  await writeNewPidLock(pidPath, lockInfo);
+  await writeNewPidLock(pidPath, lockInfo, options?.strict);
 }
 
 export async function refreshPidLock(
@@ -272,7 +282,12 @@ export async function refreshPidLock(
   let fd;
   let failed: { error: unknown } | null = null;
   try {
-    fd = await open(pidPath, "r+");
+    fd = await open(
+      pidPath,
+      options?.startedAt !== undefined
+        ? constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK
+        : "r+",
+    );
   } catch (error) {
     if (isErrnoException(error) && error.code === "ENOENT") {
       throw new PidLockError("Cannot refresh PID lock: lock file is missing");
@@ -281,7 +296,10 @@ export async function refreshPidLock(
   }
 
   try {
-    const lock = await readPidLockFromHandleWithRetry(fd);
+    const lock =
+      options?.startedAt !== undefined
+        ? (await strictPidRecord(fd)).lock
+        : await readPidLockFromHandleWithRetry(fd);
     if (!lock) {
       throw new PidLockError("Cannot refresh PID lock: invalid lock file");
     }
@@ -320,6 +338,97 @@ async function closePidLockHandle(
     throw closeFailed.error;
   }
   if (failed) throw failed.error;
+}
+
+function strictPidIdentity(record: BigIntStats): string {
+  return [
+    record.dev,
+    record.ino,
+    record.mode,
+    record.uid,
+    record.gid,
+    record.nlink,
+    record.size,
+    record.mtimeNs,
+    record.ctimeNs,
+  ]
+    .map(String)
+    .join(":");
+}
+
+async function strictPidRecord(fd: FileHandle): Promise<{ lock: PidLockInfo; identity: string }> {
+  const before = await fd.stat({ bigint: true });
+  if (!before.isFile() || before.size <= 0n || before.size > 65536n)
+    throw new PidLockError("Strict PID record must be a bounded nonempty regular file");
+  const buffer = Buffer.alloc(Number(before.size) + 1);
+  let total = 0;
+  for (;;) {
+    const { bytesRead } = await fd.read(buffer, total, buffer.length - total, total);
+    if (!bytesRead) break;
+    total += bytesRead;
+    if (BigInt(total) > before.size) throw new PidLockError("Strict PID record grew during read");
+  }
+  const after = await fd.stat({ bigint: true });
+  const identity = strictPidIdentity(before);
+  if (BigInt(total) !== before.size || identity !== strictPidIdentity(after))
+    throw new PidLockError("Strict PID record changed during read");
+  const lock = parsePidLockInfo(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, total))),
+  );
+  if (!lock) throw new PidLockError("Cannot read invalid PID lock");
+  return { lock, identity };
+}
+
+async function readStrictPidLock(pidPath: string): Promise<PidLockInfo | null> {
+  let fd: FileHandle;
+  try {
+    fd = await open(pidPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") return null;
+    throw error;
+  }
+  let result: PidLockInfo | undefined;
+  let failed: { error: unknown } | null = null;
+  try {
+    const observed = await strictPidRecord(fd);
+    const current = await lstat(pidPath, { bigint: true });
+    if (!current.isFile() || strictPidIdentity(current) !== observed.identity)
+      throw new PidLockError("Strict PID path changed during read");
+    result = observed.lock;
+  } catch (error) {
+    failed = { error };
+  }
+  await closePidLockHandle(fd, failed, true);
+  if (!result) throw new PidLockError("Strict PID read produced no record");
+  return result;
+}
+
+/** No retries: only ENOENT at open is absence, never an empty/failed opened record. */
+export async function getStrictPidLockInfo(paseoHome: string): Promise<PidLockInfo | null> {
+  return readStrictPidLock(getPidFilePath(paseoHome));
+}
+
+async function writeStrictNewPidLock(pidPath: string, lock: PidLockInfo): Promise<void> {
+  let fd: FileHandle;
+  try {
+    fd = await open(pidPath, "wx");
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "EEXIST") throw error;
+    const raced = await readStrictPidLock(pidPath);
+    const conflict = new PidLockError(
+      "Failed to acquire strict PID lock due to race condition",
+      raced ?? undefined,
+    );
+    Object.defineProperty(conflict, "cause", { value: error });
+    throw conflict;
+  }
+  let failed: { error: unknown } | null = null;
+  try {
+    await fd.write(JSON.stringify(lock));
+  } catch (error) {
+    failed = { error };
+  }
+  await closePidLockHandle(fd, failed, true);
 }
 
 async function readPidLockFromHandle(fd: FileHandle): Promise<PidLockInfo | null> {
@@ -390,10 +499,18 @@ export async function updatePidLock(
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
-  const fd = await open(pidPath, "r+");
+  const fd = await open(
+    pidPath,
+    options?.startedAt !== undefined
+      ? constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK
+      : "r+",
+  );
   let failed: { error: unknown } | null = null;
   try {
-    const existingLock = await readPidLockFromHandleWithRetry(fd);
+    const existingLock =
+      options?.startedAt !== undefined
+        ? (await strictPidRecord(fd)).lock
+        : await readPidLockFromHandleWithRetry(fd);
     if (!existingLock) {
       throw new PidLockError("Cannot update PID lock: invalid lock file");
     }
@@ -439,17 +556,11 @@ async function releaseStrictPidLock(
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
   assertStrictPidOwner(options);
-  let lock: PidLockInfo | null;
-  try {
-    lock = parsePidLockInfo(JSON.parse(await readFile(pidPath, "utf-8")));
-  } catch (error) {
-    if (isErrnoException(error) && error.code === "ENOENT") return;
-    throw error;
-  }
-  if (!lock) throw new PidLockError("Cannot release invalid PID lock");
+  const lock = await getStrictPidLockInfo(paseoHome);
+  if (!lock) return;
   if (lock.pid !== options.ownerPid || lock.startedAt !== options.startedAt)
     throw new PidLockError("Cannot release PID lock from another incarnation", lock);
-  const beforeUnlink = await getPidLockInfo(paseoHome);
+  const beforeUnlink = await getStrictPidLockInfo(paseoHome);
   if (!beforeUnlink) return;
   if (beforeUnlink.pid !== options.ownerPid || beforeUnlink.startedAt !== options.startedAt)
     throw new PidLockError("PID lock changed before strict release", beforeUnlink);
@@ -458,7 +569,7 @@ async function releaseStrictPidLock(
   } catch (error) {
     if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
   }
-  const current = await getPidLockInfo(paseoHome);
+  const current = await getStrictPidLockInfo(paseoHome);
   if (current?.pid === options.ownerPid && current.startedAt === options.startedAt)
     throw new PidLockError("Original PID lock remains after strict release", current);
   return;

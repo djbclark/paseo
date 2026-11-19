@@ -110,12 +110,9 @@ int main(void) {
       ]);
       async function run(operation, stdin = "", behavior = "resume", fault = false) {
         const nonce = randomBytes(32).toString("hex");
-        const git = await open(
-            path.join(
-              retained,
-              typeof fault === "string" ? fault : fault ? "descendant-fault" : "git",
-            ),
-          ),
+        const defaultGitName = fault ? "descendant-fault" : "git";
+        const actualGitName = typeof fault === "string" ? fault : defaultGitName;
+        const git = await open(path.join(retained, actualGitName)),
           gate = await open(path.join(retained, "git-gate.so"));
         let child;
         try {
@@ -191,13 +188,7 @@ int main(void) {
                 realpath(`/proc/${fields[2]}/exe`),
                 readFile(`/proc/${fields[2]}/stat`, "utf8"),
               ]).then(([image, birth]) => {
-                assert.equal(
-                  image,
-                  path.join(
-                    retained,
-                    typeof fault === "string" ? fault : fault ? "descendant-fault" : "git",
-                  ),
-                );
+                assert.equal(image, path.join(retained, actualGitName));
                 assert.equal(birth.slice(0, birth.indexOf(" ")), fields[2]);
                 const startToken = birth.slice(birth.lastIndexOf(")") + 2).split(" ")[19];
                 assert.match(startToken, /^[1-9][0-9]*$/);
@@ -240,7 +231,11 @@ int main(void) {
           assert.ok(
             observations
               .at(-1)
-              .endsWith(behavior === "resume" && !fault ? " observed" : " unknown"),
+              .endsWith(
+                behavior === "resume" && fault !== true && fault !== "invalid-elf"
+                  ? " observed"
+                  : " unknown",
+              ),
           );
         }
         return { code, output };
@@ -288,7 +283,8 @@ test(
   { timeout: 60000 },
   async () => {
     const stage = await mkdtemp(path.join(tmpdir(), "paseo-config-source-"));
-    const root = `/opt/paseo-config-source-${process.pid}`;
+    // Fresh disposable child of already-verified /; runner /opt is world-writable.
+    const root = `/paseo-qualified-config-source-${process.pid}`;
     const sudo = (command, args) => execFileSync("sudo", ["-k", "-n", command, ...args]);
     try {
       await mkdir(path.join(stage, "repository"));

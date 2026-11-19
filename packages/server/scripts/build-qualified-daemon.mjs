@@ -62,6 +62,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     ["daemon-launcher", "daemon-launcher.mjs", {}],
     ["cli-entry", "cli-entry.mjs", {}],
     [path.join(packageRoot, "../cli/src/index.ts"), "cli-code.mjs", {}],
+    [path.join(packageRoot, "scripts/qualified-public-client.mjs"), "client-code.mjs", {}],
     ["daemon-runtime", "daemon.mjs", { __QUALIFIED_DAEMON_ENTRY__: "true" }],
     ["plugin-child-entry", "plugin-child-entry.mjs", {}],
     [

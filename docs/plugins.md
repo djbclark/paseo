@@ -24,6 +24,40 @@ source as ordinary, and retained history holds restart if its policy disappears.
 Always bind resources to `sourceDirectory`; use `managedSource === true` only to
 select managed snapshot validation rules. It cannot bypass native policy gates.
 
+## Finite ADE helper SDK (fork source prerequisite)
+
+`@getpaseo/plugin/server/ade-helpers` exports `runAdeDirectoryOperation` and its
+strict request/result types. It accepts the seven finite repository/claim/naming
+operations, never an executable, argv, environment, script path or supplied Git
+facts. Business exit/status envelopes remain distinct from execution failure.
+A missing qualified producer refuses; this API has no raw-process fallback.
+
+The private adapter acquires an operation descriptor before asynchronous fact
+preparation can launch anything. Its actual-settlement promise covers prerequisite
+Git helpers and the selected Python helper and descendants, including preparation
+failure. Both the parent and worker capture the original hook event before plugin
+code can change its input; their private execution bindings remain separate.
+Initialization cannot acquire a helper root. Neither semantic JSON nor source
+metadata creates a binding or maintenance permission.
+
+The version 1 administrator policy accepts an optional `directoryHelperProfile`
+on an authorization, mutually exclusive with `passiveProfile`. Its strict fields
+are `version: 1`, `contract: "ade-directory-helpers-v1"`,
+`initialization: "registration-only"`, and SHA256 expectations
+`qualificationSha256`, `runtimeClosureSha256`, `helperClosureSha256`,
+`moduleTableSha256` and `recipeSha256`. The existing exact source, snapshot,
+compiled bundle, generation and binary-only state authorization still apply.
+The manager preserves those expectations in the activation ticket and refuses
+before ordinary compilation, bootstrap initialization or child launch while the
+new producer realm is unavailable. It cannot treat this profile as unmanaged or
+as the passive contract.
+
+The SDK source alone does not install `ade-directory-helpers-v1` execution support.
+The fixed producer must bind the actual interpreter/import closure, finite Git
+recipes, consumed namespaces and original live activity root before evaluating a
+selected bundle. Until that integration and proof exist, the selected helper
+profile stays unsupported. The existing passive evaluator stays unchanged.
+
 ## Complete cohort observation (fork)
 
 Use `plugin cohort-v2-status --json` for a host with in-process builtins. It requires
@@ -1216,6 +1250,13 @@ reload path: that path disposes the plugin and would destroy open drafts after e
 `server.registerSettings(definition)` returns a server-side handle. Use `read()` for the current
 `ready` or `invalid` state and `subscribe()` for successful saves, resets, and migrations. The
 subscription cleanup belongs in the plugin's contribution cleanup when it outlives the entry.
+Idle registration does not keep maintenance busy. Return the callback's work promise: saves can
+reply before that work finishes, but maintenance waits for its actual drain. Removing a listener
+prevents future delivery and does not cancel a callback already invoked. A callback may await
+another settings read without blocking the persistence queue. A new background `read()` goes
+through normal daemon admission and can refuse while maintenance is held; initialization reads
+retain their registration-only restrictions and must drain before the plugin reports ready.
+Detached timers or background work require their own lifetime accounting.
 
 ## Contribute a theme
 

@@ -13,6 +13,30 @@ interface ActivityLease {
   references: number;
   allowHelpers: boolean;
   onSettled: () => void;
+  readonly origin?: PluginActivityOrigin;
+}
+/** Captured by the real worker before dispatch; DATA identity never grants permission. */
+export interface PluginActivityOrigin {
+  readonly requestKey: string;
+  readonly message: unknown;
+}
+export function capturePluginActivityOrigin(
+  requestKey: string,
+  message: unknown,
+): PluginActivityOrigin {
+  return Object.freeze({ requestKey, message: snapshotPluginActivityData(message) });
+}
+/** Immutable DATA snapshot only; it cannot mint an execution root or producer binding. */
+export function snapshotPluginActivityData<T>(value: T): T {
+  const snapshot = structuredClone(value);
+  freezeOrigin(snapshot, new WeakSet());
+  return snapshot;
+}
+function freezeOrigin(value: unknown, seen: WeakSet<object>): void {
+  if (typeof value !== "object" || value === null || seen.has(value)) return;
+  seen.add(value);
+  for (const child of Object.values(value)) freezeOrigin(child, seen);
+  Object.freeze(value);
 }
 const activityScope = new AsyncLocalStorage<ActivityLease>();
 export interface PluginHelperOperation {
@@ -69,6 +93,11 @@ export class PluginActivityOwner {
   private passive = false;
   private retired = false;
   private readonly drainWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
+  private readonly settlementWaiters = new Set<{
+    lease: ActivityLease;
+    resolve(): void;
+    reject(error: Error): void;
+  }>();
   private readonly onUnknown: () => void;
   constructor(onUnknown: () => void = () => {}) {
     this.onUnknown = onUnknown;
@@ -104,11 +133,14 @@ export class PluginActivityOwner {
     for (const waiter of this.drainWaiters)
       waiter.reject(new Error("Plugin activity is uncertain"));
     this.drainWaiters.clear();
+    for (const waiter of this.settlementWaiters)
+      waiter.reject(new Error("Plugin activity is uncertain"));
+    this.settlementWaiters.clear();
   }
-  acquire(onSettled: () => void = () => {}): PluginActivityLease {
+  acquire(onSettled: () => void = () => {}, origin?: PluginActivityOrigin): PluginActivityLease {
     if (this.barrier || this.uncertain || this.retired)
       throw new Error("Plugin maintenance admission is closed");
-    return this.makeLease(true, onSettled);
+    return this.makeLease(true, onSettled, origin);
   }
   /** Lifecycle cleanup is admitted once by the actual worker, before closing new roots. */
   retirementCleanup(): PluginActivityLease {
@@ -127,10 +159,28 @@ export class PluginActivityOwner {
     if (this.uncertain) throw new Error("Plugin initialization activity is uncertain");
     return this.makeLease(false, () => {});
   }
+  /** No live root means new work must go through the parent admission path. */
+  retainCurrentIfLive(): PluginActivityLease | undefined {
+    const lease = activityScope.getStore();
+    if (lease && lease.owner !== this) throw new Error("Plugin activity owner mismatch");
+    if (lease && lease.references > 0) return this.retain(lease);
+    if (this.uncertain) throw new Error("Plugin activity is uncertain");
+    return undefined;
+  }
   retainCurrent(): PluginActivityLease {
+    const retained = this.retainCurrentIfLive();
+    if (!retained) throw new Error("Missing live plugin activity lease");
+    return retained;
+  }
+  /** Wait for this exact original root, independently of its caller's reply. */
+  waitForCurrentSettlement(): Promise<void> {
+    if (this.uncertain) return Promise.reject(new Error("Plugin activity is uncertain"));
     const lease = activityScope.getStore();
     if (!lease || lease.owner !== this || lease.references === 0)
-      throw new Error("Missing live plugin activity lease");
+      return Promise.reject(new Error("Missing live plugin activity lease"));
+    return new Promise((resolve, reject) => this.settlementWaiters.add({ lease, resolve, reject }));
+  }
+  private retain(lease: ActivityLease): PluginActivityLease {
     lease.references++;
     this.activity++;
     let released = false;
@@ -143,13 +193,18 @@ export class PluginActivityOwner {
       },
     };
   }
-  private makeLease(allowHelpers: boolean, onSettled: () => void): PluginActivityLease {
+  private makeLease(
+    allowHelpers: boolean,
+    onSettled: () => void,
+    origin?: PluginActivityOrigin,
+  ): PluginActivityLease {
     const lease: ActivityLease = {
       owner: this,
       resource: new AsyncResource("paseo.plugin.activity"),
       references: 1,
       allowHelpers,
       onSettled,
+      origin,
     };
     originalActivityRoots.add(lease);
     this.activity++;
@@ -184,6 +239,12 @@ export class PluginActivityOwner {
     if (lease.references === 0) {
       lease.resource.emitDestroy();
       lease.onSettled();
+      for (const waiter of this.settlementWaiters) {
+        if (waiter.lease !== lease) continue;
+        this.settlementWaiters.delete(waiter);
+        if (this.uncertain) waiter.reject(new Error("Plugin activity is uncertain"));
+        else waiter.resolve();
+      }
     }
     if (this.retired && this.activity === 0 && !this.uncertain) {
       for (const waiter of this.drainWaiters) waiter.resolve();
@@ -195,6 +256,20 @@ export interface PluginActivityLease {
   run<T>(task: () => T): T;
   release(): void;
 }
+/** Internal fixed-directory bridge; registration and expired roots cannot start preparation. */
+export function acquireAdeDirectoryActivity(): {
+  readonly activityOwner: PluginActivityOwner;
+  readonly root: object;
+  readonly originalEvent: PluginActivityOrigin;
+  release(): void;
+} {
+  const root = activityScope.getStore();
+  if (!root?.origin) throw new Error("Missing original directory hook activity");
+  root.owner.assertLiveRoot(root);
+  const release = root.owner.helper(root);
+  return { activityOwner: root.owner, root, originalEvent: root.origin, release };
+}
+
 export function acquirePluginHelper(operation: PluginHelperOperation): PluginHelperLease {
   const lease = activityScope.getStore();
   const admission = qualifiedHelperAdmission?.({

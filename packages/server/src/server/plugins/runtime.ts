@@ -26,6 +26,7 @@ import {
 import { realpath } from "node:fs/promises";
 import {
   ManagedPluginActivationPolicy,
+  requireAvailablePluginExecutionProfile,
   type ActivationOperation,
   type ActivationTicket,
   type PassivePluginProfile,
@@ -531,7 +532,7 @@ export class PluginRuntime {
         }
         if (
           !loaded.qualifiedChild ||
-          !loaded.activationTicket?.authorization.passiveProfile ||
+          !requireAvailablePluginExecutionProfile(loaded.activationTicket?.authorization) ||
           !loaded.loadedReceipt ||
           loaded.termination?.closed
         )
@@ -772,7 +773,10 @@ export class PluginRuntime {
       await this.startRetainedBuiltin(input.id, directory, owner, initialization);
       return;
     }
-    const ticket = await this.dependencies.activationPolicy?.authorize(input.id, directory);
+    const ticket = await this.dependencies.activationPolicy?.authorizeForExecution(
+      input.id,
+      directory,
+    );
     const bundles = await this.compileActivation(
       input.id,
       directory,
@@ -879,11 +883,11 @@ export class PluginRuntime {
     held?: PluginHeldOperation,
   ): Promise<void> {
     const policy = this.dependencies.activationPolicy;
-    const ticket = await policy?.authorize(pluginId, directory, operation);
+    const ticket = await policy?.authorizeForExecution(pluginId, directory, operation);
     const bundles = await this.compileActivation(pluginId, directory, ticket, held);
     if (ticket && !bundles.serverBundle)
       throw new Error("Managed activation requires a server bundle");
-    await policy?.authorize(
+    await policy?.authorizeForExecution(
       pluginId,
       directory,
       operation,
@@ -905,13 +909,13 @@ export class PluginRuntime {
     const native = this.dependencies.nativeMaintenance;
     if (!policy || !owner || !isQualifiedDaemonOwner(owner) || !native)
       throw new Error("Held compiler authority unavailable");
-    const ticket = await policy.authorize(pluginId, directory, operation);
-    if (!ticket?.authorization.passiveProfile)
-      throw new Error("Held candidate lacks protected passive profile");
+    const ticket = await policy.authorizeForExecution(pluginId, directory, operation);
+    const profile = requireAvailablePluginExecutionProfile(ticket?.authorization);
+    if (!ticket || !profile) throw new Error("Held candidate lacks protected passive profile");
     await owner.refresh();
     const incarnation = owner.binding.expectedIncarnation;
     if (typeof incarnation !== "string") throw new Error("Missing enclosing incarnation");
-    owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    owner.assertQualification(profile, incarnation);
     const attempt = await tryCompileQualifiedDirectoryPlugin(directory, this.daemonVersion, {
       owner,
       native,
@@ -920,7 +924,7 @@ export class PluginRuntime {
     });
     if (attempt.outcome === "compiled" && !attempt.bundles.serverBundle)
       throw new Error("Managed activation requires a server bundle");
-    await policy.authorize(
+    await policy.authorizeForExecution(
       pluginId,
       directory,
       operation,
@@ -1033,7 +1037,7 @@ export class PluginRuntime {
     const child = loaded.qualifiedChild;
     const ticket = loaded.activationTicket;
     const receipt = loaded.loadedReceipt;
-    const profile = ticket?.authorization.passiveProfile;
+    const profile = requireAvailablePluginExecutionProfile(ticket?.authorization);
     if (
       !child ||
       !ticket ||
@@ -1075,7 +1079,8 @@ export class PluginRuntime {
     initialization?: QualifiedPluginInitialization,
     builtinId?: string,
   ) {
-    if (!ticket?.authorization.passiveProfile) {
+    const profile = requireAvailablePluginExecutionProfile(ticket?.authorization);
+    if (!ticket || !profile) {
       if (held || initialization)
         throw new Error("Qualified plugin operations require protected passive qualification");
       return compileDirectoryPlugin(directory, this.daemonVersion, builtinId);
@@ -1088,7 +1093,7 @@ export class PluginRuntime {
     await owner.refresh();
     const incarnation = owner.binding.expectedIncarnation;
     if (typeof incarnation !== "string") throw new Error("Missing qualified daemon incarnation");
-    owner.assertQualification(ticket.authorization.passiveProfile, incarnation);
+    owner.assertQualification(profile, incarnation);
     if (initialization)
       return compileQualifiedInitialDirectoryPlugin(
         directory,
@@ -1603,7 +1608,7 @@ export class PluginRuntime {
   ): Promise<PluginLaunchAttempt> {
     const directory = await realpath(path.resolve(configuredPath));
     const policy = this.dependencies.activationPolicy;
-    const ticket = await policy?.authorize(pluginId, configuredPath, operation);
+    const ticket = await policy?.authorizeForExecution(pluginId, configuredPath, operation);
     const bundles = await this.compileActivation(pluginId, directory, ticket, held, initialization);
     const { manifest } = bundles;
     if (!canPublish()) throw new Error(`Plugin start cancelled: ${pluginId}`);
@@ -1630,7 +1635,7 @@ export class PluginRuntime {
     const { pluginId, configuredPath, operation, ticket, bundles } = input;
     const { manifest } = bundles;
     const policy = this.dependencies.activationPolicy;
-    const currentTicket = await policy?.authorize(
+    const currentTicket = await policy?.authorizeForExecution(
       pluginId,
       configuredPath,
       operation,
@@ -1777,7 +1782,7 @@ export class PluginRuntime {
   private async prepareOwnedChild(
     input: ServerPluginActivation,
   ): Promise<QualifiedOwnedChild | undefined> {
-    const profile = input.ticket?.authorization.passiveProfile;
+    const profile = requireAvailablePluginExecutionProfile(input.ticket?.authorization);
     if (!profile) return undefined;
     const owner = this.dependencies.qualifiedDaemonOwner;
     if ((!input.held && !input.initialization) || !owner || !isQualifiedDaemonOwner(owner))
@@ -1810,7 +1815,7 @@ export class PluginRuntime {
     message: string,
   ): Promise<void> {
     const { pluginId, configuredPath, operation, serverBundle, ticket } = input;
-    const currentTicket = await this.dependencies.activationPolicy?.authorize(
+    const currentTicket = await this.dependencies.activationPolicy?.authorizeForExecution(
       pluginId,
       configuredPath,
       operation,
@@ -1873,7 +1878,7 @@ export class PluginRuntime {
     const observed = await owned.challenge();
     if (observed.incarnation !== owned.incarnation || observed.pid !== owned.child.pid)
       throw new Error("Initialization rejection execution identity changed");
-    await this.dependencies.activationPolicy?.authorize(
+    await this.dependencies.activationPolicy?.authorizeForExecution(
       input.pluginId,
       input.pluginDirectory,
       ticket.authorization.operation,

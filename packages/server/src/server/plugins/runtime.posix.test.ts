@@ -1,4 +1,9 @@
-import { ManagedPluginActivationPolicy, hashPluginSnapshot } from "./activation-policy.js";
+import {
+  ManagedPluginPolicySchema,
+  managedPluginExecutionProfile,
+  ManagedPluginActivationPolicy,
+  hashPluginSnapshot,
+} from "./activation-policy.js";
 import { compileDirectoryPlugin } from "./compiler.js";
 import { realpath, symlink } from "node:fs/promises";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -2374,3 +2379,72 @@ it.each(["relative", "symlink", "file"])(
   },
   15_000,
 );
+
+it("propagates exact helper expectations but refuses before the ordinary compiler or child path", async () => {
+  const f = await managedRuntimeFixture("export default () => () => {}; ");
+  const profile = {
+    version: 1 as const,
+    contract: "ade-directory-helpers-v1" as const,
+    qualificationSha256: "a".repeat(64),
+    runtimeClosureSha256: "b".repeat(64),
+    helperClosureSha256: "c".repeat(64),
+    moduleTableSha256: "d".repeat(64),
+    recipeSha256: "e".repeat(64),
+    initialization: "registration-only" as const,
+  };
+  const document = ManagedPluginPolicySchema.parse(JSON.parse(await readFile(f.file, "utf8")));
+  // If the native entry falls through, the real ordinary compiler will fail here instead.
+  await writeFile(
+    path.join(f.directory, "index.server.ts"),
+    "this is deliberately invalid TypeScript !!!",
+  );
+  const authorization = document.plugins["managed-runtime"]?.authorizations[0];
+  if (!authorization) throw new Error("Missing fixture authorization");
+  authorization.snapshotSha256 = await hashPluginSnapshot(f.directory);
+  authorization.directoryHelperProfile = profile;
+  await writeFile(f.file, JSON.stringify(document));
+  const policy = new ManagedPluginActivationPolicy(f.file, path.join(f.home, "journal"));
+  const ticket = await policy.authorize("managed-runtime", f.directory);
+  expect(ticket?.authorization.directoryHelperProfile).toEqual(profile);
+  expect(ticket && managedPluginExecutionProfile(ticket.authorization)).toEqual(profile);
+  const spawnChild = vi.fn(() => {
+    throw new Error("ordinary child must not start");
+  });
+  const runtime = createTestRuntime({ activationPolicy: policy, spawnChild });
+  await expect(runtime.startPlugin("managed-runtime", f.directory)).rejects.toThrow(
+    "directory helper execution producer unavailable",
+  );
+  expect(spawnChild).not.toHaveBeenCalled();
+  expect(runtime.getLoadedReceipt("managed-runtime")).toBeUndefined();
+  expect((await policy.status("managed-runtime")).generation).toBe(0);
+  await runtime.stopAll();
+  for (const changed of [
+    { ...profile, recipeSha256: undefined },
+    { ...profile, permission: true },
+    { ...profile, contract: "native-passive-contract-1" },
+  ]) {
+    const malformed = {
+      ...document,
+      plugins: {
+        "managed-runtime": {
+          authorizations: [{ ...authorization, directoryHelperProfile: changed }],
+        },
+      },
+    };
+    expect(ManagedPluginPolicySchema.safeParse(malformed).success).toBe(false);
+  }
+  authorization.directoryHelperProfile = profile;
+  const passiveProfile = {
+    version: 1,
+    contract: "native-passive-contract-1",
+    qualificationSha256: "a".repeat(64),
+    runtimeClosureSha256: "b".repeat(64),
+    helperClosureSha256: "c".repeat(64),
+    initialization: "registration-only",
+  };
+  const ambiguous = {
+    ...document,
+    plugins: { "managed-runtime": { authorizations: [{ ...authorization, passiveProfile }] } },
+  };
+  expect(ManagedPluginPolicySchema.safeParse(ambiguous).success).toBe(false);
+});

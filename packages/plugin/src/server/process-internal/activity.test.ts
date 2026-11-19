@@ -7,7 +7,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { PluginActivityOwner } from "./activity.js";
+import { PluginActivityOwner, bindPluginActivity, acquirePluginHelper } from "./activity.js";
 import { spawnProcess, execCommand } from "../process.js";
 const roots: string[] = [];
 afterEach(async () => {
@@ -426,4 +426,260 @@ it("keeps actual carrier spawn errors distinct and invokes its callback once", a
   expect(result).toMatchObject({ code: "ENOENT", path: "/paseo-nonexistent-carrier/exec" });
   expect(reads).toBe(0);
   expect(callbacks).toBe(1);
+});
+
+it("rejects ADE semantic authority/argv fields and enforces UTF-8 request bounds", async () => {
+  const { parseAdeDirectoryRequest } = await import("../ade-directory-schema.js");
+  const input = {
+    version: 1,
+    operation: "claim-new",
+    cwd: "/worktree",
+    branch: "main",
+    claimId: "claim",
+    ttlHours: 1,
+    ownerAgent: "",
+    ownerRecord: null,
+  };
+  expect(parseAdeDirectoryRequest(input)).toEqual(input);
+  expect(() => parseAdeDirectoryRequest({ ...input, argv: ["python"] })).toThrow();
+  expect(() => parseAdeDirectoryRequest({ ...input, cwd: "/worktree/../other" })).toThrow();
+  expect(() => parseAdeDirectoryRequest({ ...input, branch: "😀".repeat(300) })).toThrow();
+  expect(() => parseAdeDirectoryRequest({ ...input, branch: "\uD800" })).toThrow();
+  expect(() => parseAdeDirectoryRequest({ ...input, ttlHours: Infinity })).toThrow();
+});
+it("keeps exact ADE business outcomes distinct from process failure and repeated keys", async () => {
+  const { parseAdeDirectoryRequest, parseAdeDirectoryResult } =
+    await import("../ade-directory-schema.js");
+  const request = parseAdeDirectoryRequest({
+    version: 1,
+    operation: "claim-install-hooks",
+    cwd: "/worktree",
+  });
+  const bytes = (value: unknown) => Buffer.from(JSON.stringify(value));
+  expect(
+    parseAdeDirectoryResult(
+      request,
+      bytes({ version: 1, status: 78, output: { notes: ["hooksPath refused"] } }),
+      78,
+    ),
+  ).toMatchObject({ status: 78 });
+  expect(
+    parseAdeDirectoryResult(
+      request,
+      bytes({
+        version: 1,
+        status: 2,
+        output: { kind: "invalid-request", diagnostic: "Invalid directory operation input." },
+      }),
+      2,
+    ),
+  ).toMatchObject({ status: 2 });
+  expect(() =>
+    parseAdeDirectoryResult(request, bytes({ version: 1, status: 0, output: { notes: [] } }), 1),
+  ).toThrow("exit/status");
+  expect(() =>
+    parseAdeDirectoryResult(
+      request,
+      Buffer.from('{"version":1,"status":0,"status":78,"output":{"notes":[]}}'),
+      78,
+    ),
+  ).toThrow("Duplicate");
+  expect(() =>
+    parseAdeDirectoryResult(
+      request,
+      Buffer.from('{"version":1,"status":0,"output":{"notes":[],"n\\u006ftes":[]}}'),
+      0,
+    ),
+  ).toThrow("Duplicate");
+  expect(() =>
+    parseAdeDirectoryResult(request, bytes({ version: 1, status: 1, output: { notes: [] } }), 1),
+  ).toThrow();
+});
+it("preserves hooks-path NUL facts while refusing NUL for other ADE facts and unknown records", async () => {
+  const { parseAdeDirectoryRequest, parseAdeDirectoryResult } =
+    await import("../ade-directory-schema.js");
+  const request = parseAdeDirectoryRequest({
+    version: 1,
+    operation: "repository-facts",
+    selection: "hooks-path",
+    cwd: "/worktree",
+  });
+  const bytes = Buffer.from(
+    JSON.stringify({ version: 1, selection: "hooks-path", status: 0, stdout: "one\0two\0" }),
+  );
+  expect(parseAdeDirectoryResult(request, bytes, 0)).toMatchObject({ stdout: "one\0two\0" });
+  const head = parseAdeDirectoryRequest({
+    version: 1,
+    operation: "repository-facts",
+    selection: "head",
+    cwd: "/worktree",
+  });
+  expect(() => parseAdeDirectoryResult(head, bytes, 0)).toThrow();
+  const list = parseAdeDirectoryRequest({ version: 1, operation: "claim-list", cwd: "/worktree" });
+  expect(() =>
+    parseAdeDirectoryResult(list, Buffer.from('{"version":1,"status":0,"output":[{"v":2}]}'), 0),
+  ).toThrow();
+});
+
+it("captures immutable original hook DATA without reviving expired or initialization roots", async () => {
+  const { capturePluginActivityOrigin, acquireAdeDirectoryActivity } =
+    await import("./activity.js");
+  const owner = new PluginActivityOwner();
+  const message = { type: "hook", name: "worktree.create.after", input: { cwd: "/original" } };
+  const origin = capturePluginActivityOrigin("actual-request", message);
+  message.input.cwd = "/candidate-forgery";
+  expect(origin.message).toMatchObject({ input: { cwd: "/original" } });
+  expect(Object.isFrozen(origin.message)).toBe(true);
+  expect(() => acquireAdeDirectoryActivity()).toThrow("Missing original");
+  const root = owner.acquire(() => {}, origin);
+  const helper = root.run(() => acquireAdeDirectoryActivity());
+  expect(helper.originalEvent).toBe(origin);
+  root.release();
+  expect(owner.begin(identity)).toBe("known-busy");
+  helper.release();
+  expect(owner.state()).toBe("held");
+  expect(() => root.run(() => acquireAdeDirectoryActivity())).toThrow("Expired");
+  const initialization = owner.initialization();
+  expect(() => initialization.run(() => acquireAdeDirectoryActivity())).toThrow("Missing original");
+  initialization.release();
+});
+
+it("refuses missing directory producer and retains unknown preparation independently of result rejection", async () => {
+  const { runAdeDirectoryOperation } = await import("../ade-helpers.js");
+  const { installQualifiedAdeDirectoryAdapter } = await import("./ade-directory.js");
+  const { capturePluginActivityOrigin } = await import("./activity.js");
+  const request = { version: 1 as const, operation: "claim-list" as const, cwd: "/worktree" };
+  await expect(runAdeDirectoryOperation(request)).rejects.toThrow("producer unavailable");
+  const owner = new PluginActivityOwner();
+  const root = owner.acquire(
+    () => {},
+    capturePluginActivityOrigin("actual-request", {
+      type: "hook",
+      name: "workspace.archive.after",
+      input: { cwd: "/worktree" },
+    }),
+  );
+  let preparing = false;
+  installQualifiedAdeDirectoryAdapter({
+    acquire(snapshot, context) {
+      expect(preparing).toBe(false);
+      expect(snapshot).toEqual(request);
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(context.activityOwner).toBe(owner);
+      owner.assertLiveRoot(context.root);
+      return {
+        // Adapter-negative unit only: unresolved proof must NEVER certify helpers settled.
+        settled: new Promise(() => {}),
+        async prepare() {
+          preparing = true;
+          throw new Error("fact preparation proof lost");
+        },
+      };
+    },
+  });
+  expect(() =>
+    installQualifiedAdeDirectoryAdapter({
+      acquire() {
+        throw new Error("replacement");
+      },
+    }),
+  ).toThrow("already installed");
+  await expect(root.run(() => runAdeDirectoryOperation(request))).rejects.toThrow("proof lost");
+  root.release();
+  expect(owner.begin(identity)).toBe("unknown");
+  await expect(owner.waitForRetirement()).rejects.toThrow("uncertain");
+});
+
+it("delivers original validated directory stdin once after postlaunch bind failure without certifying settlement", async () => {
+  const script = String.raw`
+    import assert from 'node:assert/strict';
+    import {spawn} from 'node:child_process';
+    import {mkdtemp,readFile,rm} from 'node:fs/promises';
+    import {tmpdir} from 'node:os';
+    import path from 'node:path';
+    import {PluginActivityOwner,capturePluginActivityOrigin} from '@getpaseo/plugin/internal/activity';
+    import {installQualifiedAdeDirectoryAdapter} from '@getpaseo/plugin/internal/ade-directory';
+    import {runAdeDirectoryOperation} from '@getpaseo/plugin/server/ade-helpers';
+    const home=await mkdtemp(path.join(tmpdir(),'ade-directory-bind-unit-'));
+    const marker=path.join(home,'actual-operation');
+    const owner=new PluginActivityOwner();
+    const request={version:1,operation:'claim-release',cwd:home,claimId:'claim'};
+    const root=owner.acquire(()=>{},capturePluginActivityOrigin('actual-hook',{type:'hook',name:'workspace.archive.after',input:{cwd:home}}));
+    let starts=0;
+    installQualifiedAdeDirectoryAdapter({acquire(){return {
+      // Negative SDK output/lifetime unit only; actual descendant proof remains absent.
+      settled:new Promise(()=>{}),
+      async prepare(){return {kind:'python',stdin:Buffer.from(JSON.stringify({version:1,request,facts:{}})),
+        start(){starts++;return spawn(process.execPath,['-e',"const fs=require('node:fs');let input='';process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{fs.appendFileSync(process.argv[1],'ran-once');JSON.parse(input);process.stdout.write(JSON.stringify({version:1,status:0,output:{claimId:'claim'}}))})",marker],{stdio:'pipe'});},
+        bind(){throw new Error('postlaunch proof lost')},failed(){},
+      }}
+    }}});
+    try {
+      await assert.rejects(root.run(()=>runAdeDirectoryOperation(request)),/execution failed/);
+      root.release();
+      assert.equal(starts,1);
+      assert.equal(await readFile(marker,'utf8'),'ran-once');
+      assert.equal(owner.begin({generation:1,transactionId:'unit',instanceId:'actual'}),'unknown');
+      process.stdout.write('original-once-proof-unknown');
+    } finally {await rm(home,{recursive:true,force:true})}
+  `;
+  const { stdout } = await promisify(nativeExecFile)(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    {
+      cwd: new URL("../../../", import.meta.url),
+      env: { PATH: process.env.PATH },
+    },
+  );
+  expect(stdout).toBe("original-once-proof-unknown");
+});
+
+it("distinguishes expired roots from wrong owners and never revives them for local settings reads", async () => {
+  const owner = new PluginActivityOwner();
+  const other = new PluginActivityOwner();
+  const root = owner.acquire();
+  let expiredRead!: () => ReturnType<PluginActivityOwner["retainCurrentIfLive"]>;
+  const settled = root.run(() => owner.waitForCurrentSettlement());
+  root.run(() => {
+    expiredRead = bindPluginActivity(() => owner.retainCurrentIfLive());
+    expect(() => other.retainCurrentIfLive()).toThrow("owner mismatch");
+  });
+  root.release();
+  await settled;
+  expect(expiredRead()).toBeUndefined();
+  expect(owner.state()).toBe("held");
+  expect(owner.retainCurrentIfLive()).toBeUndefined();
+  owner.markUnknown();
+  expect(expiredRead).toThrow("uncertain");
+});
+
+it("waits for the exact initialization root, preserves its no-helper restriction and rejects uncertainty", async () => {
+  const owner = new PluginActivityOwner();
+  owner.qualifyPassive();
+  const root = owner.initialization();
+  const drain = root.run(() => owner.waitForCurrentSettlement());
+  const operation = root.run(() => owner.retainCurrent());
+  let drained = false;
+  void drain.then(
+    () => {
+      drained = true;
+      return undefined;
+    },
+    () => {},
+  );
+  root.release();
+  await Promise.resolve();
+  expect(drained).toBe(false);
+  operation.run(() => {
+    expect(() =>
+      acquirePluginHelper({ kind: "execFile", command: "denied", args: [], options: {} }),
+    ).toThrow();
+  });
+  owner.markUnknown();
+  await expect(drain).rejects.toThrow("uncertain");
+  // Actual already-admitted work can drain, but a late settlement never resets UNKNOWN.
+  const continuation = operation.run(() => owner.retainCurrent());
+  continuation.release();
+  operation.release();
+  expect(owner.state()).toBe("unknown");
 });

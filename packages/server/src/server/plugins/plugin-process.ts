@@ -1,4 +1,8 @@
-import { PluginActivityOwner, type PluginActivityLease } from "@getpaseo/plugin/internal/activity";
+import {
+  capturePluginActivityOrigin,
+  PluginActivityOwner,
+  type PluginActivityLease,
+} from "@getpaseo/plugin/internal/activity";
 import {
   isPluginExecutionRoot,
   pluginExecutionKey,
@@ -24,6 +28,7 @@ import type {
   PluginHandlerContext,
   PluginServerContext,
   PluginServerContribution,
+  PluginSettingsState,
 } from "@getpaseo/plugin/server";
 import { assertPluginWireValue } from "@getpaseo/protocol/binary-frames/index";
 import {
@@ -92,6 +97,7 @@ export function createPluginWorker(
     return error;
   }
   let settingsStore: PluginSettingsStore | null = null;
+  let initializedPluginId: string | undefined;
   function registerSettings<Schema extends ZodType>(definition: SettingsDefinition<Schema>) {
     if (!settingsStore) throw new Error("Plugin settings storage is unavailable");
     const handlers = settingsStore.register(definition);
@@ -102,32 +108,45 @@ export function createPluginWorker(
     register(handlers.reset.contract, (input) =>
       handlers.reset.handle(handlers.reset.contract.input.parse(input)),
     );
+    // Keep the original initialization ID/session, never a candidate-supplied routing identity.
+    const ownPluginId = initializedPluginId;
+    const ownClient = daemonClient;
     return {
-      read: handlers.settings.read,
-      subscribe(listener: Parameters<typeof handlers.settings.subscribe>[0]) {
-        const lifetime = activity.retainCurrent();
-        try {
-          const unsubscribe = handlers.settings.subscribe((state) => {
-            const invocation = lifetime.run(() => activity.retainCurrent());
-            return invocation.run(async () => {
-              try {
-                await listener(state);
-              } finally {
-                invocation.release();
-              }
-            });
-          });
-          return () => {
-            try {
-              lifetime.run(unsubscribe);
-            } finally {
-              lifetime.release();
-            }
-          };
-        } catch (error) {
-          lifetime.release();
-          throw error;
+      async read() {
+        const operation = activity.retainCurrentIfLive();
+        if (!operation) {
+          if (!ownPluginId || !ownClient) throw new Error("Plugin settings session unavailable");
+          const state = handlers.read.contract.output.parse(
+            await ownClient.invokePluginRpc(ownPluginId, handlers.read.contract.name, {}),
+          );
+          // The exact own handler already parsed values with definition.schema. The wire
+          // erases that generic type; parsing again could apply a transform twice.
+          return state as PluginSettingsState<Schema>;
         }
+        try {
+          return await operation.run(handlers.settings.read);
+        } finally {
+          operation.release();
+        }
+      },
+      subscribe(listener: Parameters<typeof handlers.settings.subscribe>[0]) {
+        return handlers.settings.subscribe((state) => {
+          let invocation: PluginActivityLease;
+          try {
+            invocation = activity.retainCurrent();
+          } catch (error) {
+            // A persisted notification without its producer cannot be logged as quiet.
+            activity.markUnknown();
+            throw error;
+          }
+          return invocation.run(async () => {
+            try {
+              await listener(state);
+            } finally {
+              invocation.release();
+            }
+          });
+        });
       },
     };
   }
@@ -407,12 +426,18 @@ export function createPluginWorker(
     initializationStarted = true;
     const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
     hostInstanceId = message.hostInstanceId ?? "legacy-unbound";
+    initializedPluginId = message.pluginId;
     qualifiedPassive = message.passiveInitialization?.contract === "native-passive-contract-1";
     if (qualifiedPassive) activity.qualifyPassive();
     if (message.passiveInitialization?.hold) activity.begin(message.passiveInitialization.hold);
     const initializationActivity = qualifiedPassive
       ? activity.initialization()
       : activity.acquire();
+    const initializationDrained = initializationActivity.run(() =>
+      activity.waitForCurrentSettlement(),
+    );
+    // Integrity loss may reject before contribution/metadata awaits complete.
+    void initializationDrained.catch(() => {});
     try {
       daemonClient = new DaemonClient({
         url: `ipc://plugin/${encodeURIComponent(message.pluginId)}`,
@@ -476,6 +501,8 @@ export function createPluginWorker(
               : undefined,
           })),
       );
+      initializationActivity.release();
+      await initializationDrained;
       send({
         type: "ready",
         methods: [...handlers.keys()].sort(),
@@ -625,7 +652,10 @@ export function createPluginWorker(
     let lease: PluginActivityLease;
     try {
       if (stopping) throw new Error("Plugin is stopping");
-      lease = activity.acquire(settled);
+      lease = activity.acquire(
+        settled,
+        message.type === "hook" ? capturePluginActivityOrigin(requestKey, message) : undefined,
+      );
     } catch (error) {
       rejectRoot(message, error);
       settled();

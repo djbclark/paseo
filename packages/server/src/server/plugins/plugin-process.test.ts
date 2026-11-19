@@ -1,3 +1,12 @@
+import { spawnProcess } from "@getpaseo/plugin/server";
+import type { ChildProcess } from "node:child_process";
+import { MaintenanceReservation } from "../maintenance-reservation.js";
+import { PluginExecutionOwner } from "./execution-owner.js";
+import type { PluginExecutionRoot } from "./execution-roots.js";
+import type { PluginProcessMessage, PluginProcessRequest } from "./plugin-process-protocol.js";
+import type { PluginServerContribution } from "@getpaseo/plugin/server";
+import { defineRpc, defineSettings, settingsRpc } from "@getpaseo/plugin";
+import { z } from "zod";
 import { InternalPluginChild, readInternalPluginExecution } from "./internal-child.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -6,7 +15,7 @@ import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 
 it("keeps React out of the plugin host's runtime dependency graph", async () => {
   await expect(
@@ -216,4 +225,369 @@ it.each([
     if (child.connected) await child.retire();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Real worker + parent execution owner + native leases. No producer qualification is minted. */
+async function settingsExecutionFixture(contribute: PluginServerContribution, saved?: object) {
+  const root = await realpath(await mkdtemp(nodePath.join(tmpdir(), "settings-activity-")));
+  const settingsDirectory = nodePath.join(root, "settings");
+  await (await import("node:fs/promises")).mkdir(settingsDirectory);
+  if (saved)
+    await writeFile(nodePath.join(settingsDirectory, "display.json"), JSON.stringify(saved));
+  const child = new InternalPluginChild(() => contribute);
+  const execution = readInternalPluginExecution(child);
+  if (!execution) throw new Error("Missing original worker");
+  const native = await MaintenanceReservation.create(root, async () => true);
+  native.setReady(true);
+  const owner = new PluginExecutionOwner(
+    "settings-instance",
+    {
+      enterWork: () => native.enter(),
+      runAdmittedWork: (lease, operation) => native.executeAdmitted(lease, operation),
+      holdForUnknownWork: () => native.holdForUnknownWork(),
+      runQualifiedInitialization: (operation) => native.runQualifiedInitialization(operation),
+    },
+    () => native.status().state !== "idle",
+    () => {},
+  );
+  const pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const ready = deferred();
+  let sequence = 0;
+  child.on("message", (message: PluginProcessMessage) => {
+    if (message.type === "execution.settled") owner.settled(message.instanceId, message.requestKey);
+    if (message.type === "execution.unknown") owner.markUnknown();
+    if (message.type === "ready") ready.resolve();
+    if (message.type === "fatal") ready.reject(new Error(message.error));
+    if (message.type === "result" || message.type === "error") {
+      const awaitingReply = pending.get(message.requestId);
+      pending.delete(message.requestId);
+      if (message.type === "error") awaitingReply?.reject(new Error(message.error));
+      else awaitingReply?.resolve(message.output);
+    }
+    if (message.type === "paseo_frame" && typeof message.data === "string") {
+      const frame = JSON.parse(message.data);
+      if (frame.type === "hello")
+        child.send({
+          type: "paseo_frame",
+          isBinary: false,
+          data: JSON.stringify({
+            type: "session",
+            message: {
+              type: "status",
+              payload: {
+                status: "server_info",
+                serverId: "settings-test",
+                hostname: "settings-test",
+                version: "0.4.0",
+                features: {},
+              },
+            },
+          }),
+        });
+    }
+  });
+  function request(
+    message: Extract<PluginProcessRequest, { requestId: string }>,
+    rootWork = false,
+  ) {
+    const result = new Promise<unknown>((resolve, reject) =>
+      pending.set(message.requestId, { resolve, reject }),
+    );
+    if (rootWork) {
+      const rootMessage = message as PluginExecutionRoot;
+      try {
+        owner.admit(rootMessage);
+        owner.runAdmitted(rootMessage, () => child.send(message));
+      } catch (error) {
+        pending.delete(message.requestId);
+        return Promise.reject(error);
+      }
+    } else child.send(message);
+    return result;
+  }
+  const identity = { generation: 1, transactionId: "settings-barrier" };
+  const barrier = (type: "maintenance.begin" | "maintenance.end") =>
+    request({
+      type,
+      requestId: `barrier-${++sequence}`,
+      instanceId: "settings-instance",
+      ...identity,
+    });
+  onTestFinished(async () => {
+    // Cleanup is not a maintenance quiet proof; unknown workers cannot acknowledge retirement.
+    if (execution.activityOwner.state() !== "unknown") await child.retire();
+    await native.flushStorage();
+    await rm(root, { recursive: true, force: true });
+  });
+  child.send({
+    type: "initialize",
+    pluginId: "settings-test",
+    pluginDirectory: root,
+    hostInstanceId: "settings-instance",
+    settingsDirectory,
+    appVersion: "0.4.0",
+    bundle: "",
+    passiveInitialization: { contract: "native-passive-contract-1" },
+  });
+  return {
+    child,
+    execution,
+    native,
+    owner,
+    ready: ready.promise,
+    settingsDirectory,
+    barrier,
+    invoke: (method: string, input: unknown = {}) =>
+      request(
+        {
+          type: "invoke",
+          requestId: `invoke-${++sequence}`,
+          method,
+          input,
+        },
+        true,
+      ),
+    idle: async () => {
+      await expect.poll(() => owner.busy()).toBe(false);
+    },
+  };
+}
+
+const activitySettings = defineSettings({
+  id: "display",
+  scope: "host",
+  version: 1,
+  schema: z.object({ count: z.number().default(0) }),
+});
+const displayRpc = settingsRpc("display");
+const probeRpc = defineRpc({ name: "settings.probe", input: z.object({}), output: z.json() });
+
+it("idle subscriptions do not retain initialization, and producer callbacks keep real native leases past replies/unsubscribe", async () => {
+  const started = deferred();
+  const drain = deferred();
+  let unsubscribe = () => {};
+  let observations = 0;
+  const fixture = await settingsExecutionFixture((context) => {
+    const settings = context.registerSettings(activitySettings);
+    unsubscribe = settings.subscribe(async () => {
+      observations++;
+      started.resolve();
+      await drain.promise;
+      // Still the actual producing root, even after a provisional child barrier.
+      await settings.read();
+    });
+    return unsubscribe;
+  });
+  await fixture.ready;
+  expect(fixture.execution.activityOwner.state()).toBe("held");
+  expect(fixture.owner.busy()).toBe(false);
+  const saved = await fixture.invoke(displayRpc.write.name, {
+    revision: "missing",
+    values: { count: 1 },
+  });
+  expect(saved).toMatchObject({ status: "saved" });
+  await started.promise;
+  unsubscribe();
+  expect(fixture.owner.busy()).toBe(true);
+  await expect(fixture.native.begin(1, "non-target-promotion")).rejects.toThrow("refused");
+  expect(await fixture.barrier("maintenance.begin")).toMatchObject({ status: "known-busy" });
+  drain.resolve();
+  await fixture.idle();
+  expect(fixture.execution.activityOwner.state()).toBe("held");
+  expect(observations).toBe(1);
+  await fixture.barrier("maintenance.end");
+  const current = displayRpc.read.output.parse(await fixture.invoke(displayRpc.read.name));
+  await fixture.invoke(displayRpc.write.name, { revision: current.revision, values: { count: 2 } });
+  await fixture.idle();
+  expect(observations).toBe(1);
+});
+
+it("overlapping producers and nested reads/writes preserve the live listener set without serial callback deadlock", async () => {
+  const entered = deferred();
+  const firstDrain = deferred();
+  const secondDrain = deferred();
+  const counts: number[] = [];
+  let removeLater = () => {};
+  const fixture = await settingsExecutionFixture((context) => {
+    const settings = context.registerSettings(activitySettings);
+    settings.subscribe(async (state) => {
+      if (state.status !== "ready") return;
+      counts.push(state.values.count);
+      removeLater();
+      if (state.values.count === 1) {
+        // Await another queued write from an actual callback. Store queue must not await us.
+        const current = await settings.read();
+        if (current.status !== "ready") throw new Error("Missing ready state");
+        await contextReadWrite(current.revision);
+        entered.resolve();
+        await firstDrain.promise;
+      } else await secondDrain.promise;
+    });
+    removeLater = settings.subscribe(() => {
+      throw new Error("Removed before live-set visit");
+    });
+    return removeLater;
+  });
+  async function contextReadWrite(revision: string) {
+    return fixture.invoke(displayRpc.write.name, { revision, values: { count: 2 } });
+  }
+  await fixture.ready;
+  await fixture.invoke(displayRpc.write.name, { revision: "missing", values: { count: 1 } });
+  await entered.promise;
+  expect(counts).toEqual([1, 2]);
+  expect(fixture.owner.busy()).toBe(true);
+  secondDrain.resolve();
+  await expect.poll(() => fixture.execution.activityOwner.state()).toBe("known-busy");
+  expect(fixture.owner.busy()).toBe(true);
+  firstDrain.resolve();
+  await fixture.idle();
+});
+
+it("does not send ready before an actual initialization migration notification drains", async () => {
+  const started = deferred();
+  const drain = deferred();
+  let initializationRead: Promise<unknown> | undefined;
+  const fixture = await settingsExecutionFixture(
+    (context) => {
+      const settings = context.registerSettings({
+        ...activitySettings,
+        version: 2,
+        migrate: (previous) => previous,
+      });
+      settings.subscribe(async () => {
+        started.resolve();
+        await drain.promise;
+      });
+      initializationRead = settings.read();
+      return () => {};
+    },
+    { version: 1, values: { count: 3 } },
+  );
+  let ready = false;
+  void fixture.ready.then(() => {
+    ready = true;
+    return undefined;
+  });
+  await started.promise;
+  await initializationRead;
+  expect(ready).toBe(false);
+  expect(fixture.execution.activityOwner.state()).toBe("known-busy");
+  drain.resolve();
+  await fixture.ready;
+  expect(fixture.execution.activityOwner.state()).toBe("held");
+});
+
+it("preserves ordinary rejected callback semantics after actual drain, while lost execution identity latches UNKNOWN", async () => {
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  onTestFinished(() => errorLog.mockRestore());
+  const fixture = await settingsExecutionFixture((context) => {
+    const settings = context.registerSettings(activitySettings);
+    settings.subscribe(async () => {
+      throw new Error("ordinary callback failure");
+    });
+    context.handle(probeRpc, () => null);
+    return () => {};
+  });
+  await fixture.ready;
+  await fixture.invoke(displayRpc.write.name, { revision: "missing", values: { count: 1 } });
+  await fixture.idle();
+  expect(fixture.execution.activityOwner.state()).toBe("held");
+  expect(fixture.native.status().recoveryRequired).toBe(false);
+  expect(errorLog).toHaveBeenCalled();
+  fixture.owner.settled("wrong-instance", "missing-root");
+  expect(fixture.native.status().recoveryRequired).toBe(true);
+  await expect(fixture.invoke(probeRpc.name)).rejects.toThrow("admission");
+});
+
+it("retains queued producers after caller timeout and refuses new work when BEGIN wins", async () => {
+  const migrating = deferred();
+  const allowMigration = deferred();
+  const callerTimeout = deferred();
+  const notifications: number[] = [];
+  const fixture = await settingsExecutionFixture(
+    (context) => {
+      const settings = context.registerSettings({
+        ...activitySettings,
+        version: 2,
+        migrate: async (previous) => {
+          migrating.resolve();
+          await allowMigration.promise;
+          return previous;
+        },
+      });
+      settings.subscribe((state) => {
+        if (state.status === "ready") notifications.push(state.values.count);
+      });
+      return () => {};
+    },
+    { version: 1, values: { count: 4 } },
+  );
+  await fixture.ready;
+  const producerRead = fixture.invoke(displayRpc.read.name);
+  await migrating.promise;
+  const queuedRead = fixture.invoke(displayRpc.read.name);
+  const timedCaller = Promise.race([
+    queuedRead,
+    callerTimeout.promise.then(() => {
+      throw new Error("caller timeout");
+    }),
+  ]);
+  callerTimeout.resolve();
+  await expect(timedCaller).rejects.toThrow("caller timeout");
+  await expect(fixture.native.begin(1, "queued-producer")).rejects.toThrow("refused");
+  expect(fixture.owner.busy()).toBe(true);
+  allowMigration.resolve();
+  await Promise.all([producerRead, queuedRead]);
+  await fixture.idle();
+  expect(notifications).toEqual([4]);
+  const held = await fixture.native.begin(1, "held-before-settings");
+  expect(held.state).toBe("held");
+  await expect(
+    fixture.invoke(displayRpc.write.name, { revision: "missing", values: { count: 9 } }),
+  ).rejects.toThrow("admission");
+  await fixture.idle();
+  expect(notifications).toEqual([4]);
+  expect(
+    JSON.parse(
+      await (
+        await import("node:fs/promises")
+      ).readFile(nodePath.join(fixture.settingsDirectory, "display.json"), "utf8"),
+    ),
+  ).toMatchObject({ values: { count: 4 } });
+  await fixture.native.end(1, held.ownerToken);
+});
+
+it("does not release the callback's actual helper lifetime when its listener and RPC have already returned", async () => {
+  const launched = deferred();
+  let helper: ChildProcess | undefined;
+  const fixture = await settingsExecutionFixture((context) => {
+    const settings = context.registerSettings(activitySettings);
+    settings.subscribe(() => {
+      helper = spawnProcess(process.execPath, ["-e", "process.stdin.resume()"], { stdio: "pipe" });
+      launched.resolve();
+    });
+    return () => {
+      helper?.stdin?.end();
+    };
+  });
+  await fixture.ready;
+  await fixture.invoke(displayRpc.write.name, { revision: "missing", values: { count: 1 } });
+  await launched.promise;
+  expect(fixture.owner.busy()).toBe(true);
+  await expect(fixture.native.begin(1, "helper-active")).rejects.toThrow("refused");
+  const closed = new Promise<void>((resolve) => helper?.once("close", () => resolve()));
+  helper?.stdin?.end();
+  await closed;
+  await fixture.idle();
+  expect(fixture.execution.activityOwner.state()).toBe("held");
 });

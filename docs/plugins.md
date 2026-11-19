@@ -1250,6 +1250,13 @@ reload path: that path disposes the plugin and would destroy open drafts after e
 `server.registerSettings(definition)` returns a server-side handle. Use `read()` for the current
 `ready` or `invalid` state and `subscribe()` for successful saves, resets, and migrations. The
 subscription cleanup belongs in the plugin's contribution cleanup when it outlives the entry.
+Idle registration does not keep maintenance busy. Return the callback's work promise: saves can
+reply before that work finishes, but maintenance waits for its actual drain. Removing a listener
+prevents future delivery and does not cancel a callback already invoked. A callback may await
+another settings read without blocking the persistence queue. A new background `read()` goes
+through normal daemon admission and can refuse while maintenance is held; initialization reads
+retain their registration-only restrictions and must drain before the plugin reports ready.
+Detached timers or background work require their own lifetime accounting.
 
 ## Contribute a theme
 

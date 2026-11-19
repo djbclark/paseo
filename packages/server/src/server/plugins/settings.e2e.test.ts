@@ -188,3 +188,59 @@ export default function(server) {
     await rm(directory, { recursive: true, force: true });
   }
 }, 60_000);
+
+test("an expired initialization ALS read reenters through the actual original plugin session and existing own-read RPC", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "settings-self-rpc-"));
+  const directory = path.join(root, "plugin");
+  await mkdir(directory);
+  await writeFile(
+    path.join(directory, "paseo-plugin.json"),
+    JSON.stringify({
+      id: "settings-self",
+      requirements: { paseo: `>=${resolveDaemonVersion(import.meta.url)}` },
+    }),
+  );
+  await writeFile(
+    path.join(directory, "index.server.ts"),
+    `
+    import { AsyncResource } from "node:async_hooks";
+    import { defineSettings, defineRpc } from "@getpaseo/plugin";
+    import { z } from "zod";
+    // Captures the real initialization context; by the time the RPC runs it has settled.
+    const initializationContext = new AsyncResource("settings-expired-context");
+    export default function(context) {
+      const settings = context.registerSettings(defineSettings({ id: "display", scope: "host",
+        version: 1, schema: z.object({ enabled: z.boolean().default(true) }) }));
+      const unsubscribe = settings.subscribe(async () => { await settings.read(); });
+      context.handle(defineRpc({ name: "self.read", input: z.object({}), output: z.json() }),
+        () => initializationContext.runInAsyncScope(() => settings.read()));
+      return () => { unsubscribe(); initializationContext.emitDestroy(); };
+    }
+  `,
+  );
+  const daemon = await createTestPaseoDaemon({
+    paseoHomeRoot: path.join(root, "daemon"),
+    pluginsEnabled: true,
+    plugins: { "settings-self": { source: "directory", path: directory, enabled: true } },
+  });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.8.0" });
+  onTestFinished(async () => {
+    await client.close();
+    await daemon.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await client.connect();
+  const initial = await client.invokePluginRpc("settings-self", "self.read", {});
+  expect(initial).toMatchObject({ status: "ready", values: { enabled: true } });
+  const rpc = settingsRpc("display");
+  expect(
+    await client.invokePluginRpc("settings-self", rpc.write.name, {
+      revision: "missing",
+      values: { enabled: false },
+    }),
+  ).toMatchObject({ status: "saved" });
+  expect(await client.invokePluginRpc("settings-self", "self.read", {})).toMatchObject({
+    status: "ready",
+    values: { enabled: false },
+  });
+}, 60_000);

@@ -7,7 +7,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { PluginActivityOwner } from "./activity.js";
+import { PluginActivityOwner, bindPluginActivity, acquirePluginHelper } from "./activity.js";
 import { spawnProcess, execCommand } from "../process.js";
 const roots: string[] = [];
 afterEach(async () => {
@@ -632,4 +632,54 @@ it("delivers original validated directory stdin once after postlaunch bind failu
     },
   );
   expect(stdout).toBe("original-once-proof-unknown");
+});
+
+it("distinguishes expired roots from wrong owners and never revives them for local settings reads", async () => {
+  const owner = new PluginActivityOwner();
+  const other = new PluginActivityOwner();
+  const root = owner.acquire();
+  let expiredRead!: () => ReturnType<PluginActivityOwner["retainCurrentIfLive"]>;
+  const settled = root.run(() => owner.waitForCurrentSettlement());
+  root.run(() => {
+    expiredRead = bindPluginActivity(() => owner.retainCurrentIfLive());
+    expect(() => other.retainCurrentIfLive()).toThrow("owner mismatch");
+  });
+  root.release();
+  await settled;
+  expect(expiredRead()).toBeUndefined();
+  expect(owner.state()).toBe("held");
+  expect(owner.retainCurrentIfLive()).toBeUndefined();
+  owner.markUnknown();
+  expect(expiredRead).toThrow("uncertain");
+});
+
+it("waits for the exact initialization root, preserves its no-helper restriction and rejects uncertainty", async () => {
+  const owner = new PluginActivityOwner();
+  owner.qualifyPassive();
+  const root = owner.initialization();
+  const drain = root.run(() => owner.waitForCurrentSettlement());
+  const operation = root.run(() => owner.retainCurrent());
+  let drained = false;
+  void drain.then(
+    () => {
+      drained = true;
+      return undefined;
+    },
+    () => {},
+  );
+  root.release();
+  await Promise.resolve();
+  expect(drained).toBe(false);
+  operation.run(() => {
+    expect(() =>
+      acquirePluginHelper({ kind: "execFile", command: "denied", args: [], options: {} }),
+    ).toThrow();
+  });
+  owner.markUnknown();
+  await expect(drain).rejects.toThrow("uncertain");
+  // Actual already-admitted work can drain, but a late settlement never resets UNKNOWN.
+  const continuation = operation.run(() => owner.retainCurrent());
+  continuation.release();
+  operation.release();
+  expect(owner.state()).toBe("unknown");
 });

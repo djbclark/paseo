@@ -93,6 +93,11 @@ export class PluginActivityOwner {
   private passive = false;
   private retired = false;
   private readonly drainWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
+  private readonly settlementWaiters = new Set<{
+    lease: ActivityLease;
+    resolve(): void;
+    reject(error: Error): void;
+  }>();
   private readonly onUnknown: () => void;
   constructor(onUnknown: () => void = () => {}) {
     this.onUnknown = onUnknown;
@@ -128,6 +133,9 @@ export class PluginActivityOwner {
     for (const waiter of this.drainWaiters)
       waiter.reject(new Error("Plugin activity is uncertain"));
     this.drainWaiters.clear();
+    for (const waiter of this.settlementWaiters)
+      waiter.reject(new Error("Plugin activity is uncertain"));
+    this.settlementWaiters.clear();
   }
   acquire(onSettled: () => void = () => {}, origin?: PluginActivityOrigin): PluginActivityLease {
     if (this.barrier || this.uncertain || this.retired)
@@ -151,10 +159,28 @@ export class PluginActivityOwner {
     if (this.uncertain) throw new Error("Plugin initialization activity is uncertain");
     return this.makeLease(false, () => {});
   }
+  /** No live root means new work must go through the parent admission path. */
+  retainCurrentIfLive(): PluginActivityLease | undefined {
+    const lease = activityScope.getStore();
+    if (lease && lease.owner !== this) throw new Error("Plugin activity owner mismatch");
+    if (lease && lease.references > 0) return this.retain(lease);
+    if (this.uncertain) throw new Error("Plugin activity is uncertain");
+    return undefined;
+  }
   retainCurrent(): PluginActivityLease {
+    const retained = this.retainCurrentIfLive();
+    if (!retained) throw new Error("Missing live plugin activity lease");
+    return retained;
+  }
+  /** Wait for this exact original root, independently of its caller's reply. */
+  waitForCurrentSettlement(): Promise<void> {
+    if (this.uncertain) return Promise.reject(new Error("Plugin activity is uncertain"));
     const lease = activityScope.getStore();
     if (!lease || lease.owner !== this || lease.references === 0)
-      throw new Error("Missing live plugin activity lease");
+      return Promise.reject(new Error("Missing live plugin activity lease"));
+    return new Promise((resolve, reject) => this.settlementWaiters.add({ lease, resolve, reject }));
+  }
+  private retain(lease: ActivityLease): PluginActivityLease {
     lease.references++;
     this.activity++;
     let released = false;
@@ -213,6 +239,12 @@ export class PluginActivityOwner {
     if (lease.references === 0) {
       lease.resource.emitDestroy();
       lease.onSettled();
+      for (const waiter of this.settlementWaiters) {
+        if (waiter.lease !== lease) continue;
+        this.settlementWaiters.delete(waiter);
+        if (this.uncertain) waiter.reject(new Error("Plugin activity is uncertain"));
+        else waiter.resolve();
+      }
     }
     if (this.retired && this.activity === 0 && !this.uncertain) {
       for (const waiter of this.drainWaiters) waiter.resolve();

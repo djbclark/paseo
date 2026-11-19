@@ -12,7 +12,15 @@ function generateClientId(): string {
   return `cid_${randomUUID().replace(/-/g, "")}`;
 }
 
-export async function getOrCreateCliClientId(home: string): Promise<string> {
+export interface CliClientIdOptions {
+  /** Local identity persistence only; no authority or transport guarantees. */
+  persistClientId?: boolean;
+}
+
+export async function getOrCreateCliClientId(
+  home: string,
+  options: CliClientIdOptions = {},
+): Promise<string> {
   const clientSessionKeyFile = join(home, "cli-client-id");
 
   try {
@@ -28,6 +36,7 @@ export async function getOrCreateCliClientId(home: string): Promise<string> {
   }
 
   const nextValue = generateClientId();
+  if (options.persistClientId === false) return nextValue;
   ensurePrivateDirectory(home);
   await writeFile(clientSessionKeyFile, nextValue, { mode: 0o600 });
   return nextValue;

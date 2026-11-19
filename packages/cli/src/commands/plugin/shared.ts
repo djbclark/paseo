@@ -2,6 +2,7 @@ import type { DaemonTarget } from "../../utils/daemon-target.js";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { CommandError } from "../../output/index.js";
 import { connectToDaemon } from "../../utils/client.js";
+import type { CliClientIdOptions } from "../../utils/client-id.js";
 
 type PluginFeature =
   | "managedPluginPromotions"
@@ -18,8 +19,9 @@ async function withPluginClient<T>(
   feature: PluginFeature,
   updateMessage: string,
   run: (client: DaemonClient) => Promise<T>,
+  identityOptions: CliClientIdOptions = {},
 ): Promise<T> {
-  const client = await connectToDaemon({ target });
+  const client = await connectToDaemon({ target, ...identityOptions });
   if (client.getLastServerInfoMessage()?.features?.[feature] !== true) {
     await client.close().catch(() => undefined);
     throw {
@@ -47,12 +49,28 @@ export async function withPluginManagementClient<T>(
   );
 }
 
+/** List/status observation uses the same public RPC and authorization with no ID creation. */
+export async function withPluginListClient<T>(
+  target: DaemonTarget,
+  run: (client: DaemonClient) => Promise<T>,
+): Promise<T> {
+  return withPluginClient(
+    target,
+    "pluginManagement",
+    "Update the host to use plugin management.",
+    run,
+    { persistClientId: false },
+  );
+}
+
 export async function withPluginLogsClient<T>(
   target: DaemonTarget,
   run: (client: DaemonClient) => Promise<T>,
 ): Promise<T> {
   // COMPAT(pluginLogs): added in v0.4.0, remove gate after 2027-08-16.
-  return withPluginClient(target, "pluginLogs", "Update the host to view plugin logs.", run);
+  return withPluginClient(target, "pluginLogs", "Update the host to view plugin logs.", run, {
+    persistClientId: false,
+  });
 }
 
 export async function withPluginSourceClient<T>(
@@ -102,6 +120,7 @@ export async function withManagedPluginStatusClient<T>(
     "managedPluginStatus",
     "Update the host to inspect coherent managed plugin status.",
     run,
+    { persistClientId: false },
   );
 }
 
@@ -114,6 +133,7 @@ export async function withManagedPluginCohortClient<T>(
     "managedPluginCohortStatus",
     "Update the host to inspect the complete managed plugin cohort.",
     run,
+    { persistClientId: false },
   );
 }
 
@@ -126,5 +146,6 @@ export async function withManagedPluginCohortV2Client<T>(
     "managedPluginCohortV2",
     "Update the host to inspect the complete in-process managed cohort.",
     run,
+    { persistClientId: false },
   );
 }

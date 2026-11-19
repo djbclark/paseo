@@ -162,7 +162,10 @@ export function daemonMaintenanceCommand(): Command {
             throw new Error("Begin requires --json to receive the owner token once");
           const token =
             operation === "end" ? readMaintenanceOwnerToken(Number(options.ownerTokenFd)) : "";
-          const client = await connectToDaemon({ target: options.daemonTarget });
+          const client = await connectToDaemon({
+            target: options.daemonTarget,
+            ...(operation === "status" ? { persistClientId: false } : {}),
+          });
           try {
             let payload;
             if (operation === "begin")

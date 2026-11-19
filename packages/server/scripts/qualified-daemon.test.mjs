@@ -8,11 +8,246 @@ import { access, chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/pr
 import { userInfo } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import builtinPlugins from "../src/server/execution/builtin-inventory.json" with { type: "json" };
 
 // Disposable Linux CI only. This fixture checks the real v2 acquisition gate;
 // native/plugin/controller A-B-A acceptance is owned by the coupled fixture.
 const enabled = process.platform === "linux" && process.env.GITHUB_ACTIONS === "true";
+test(
+  "startup phase fixed artifact preserves singleton, helper guards and diagnostic-only output",
+  {
+    skip: !enabled || !process.env.QUALIFIED_DAEMON_ROOT,
+  },
+  async () => {
+    const root = process.env.QUALIFIED_DAEMON_ROOT;
+    const manifest = JSON.parse(await readFile(`${root}.manifest.json`, "utf8"));
+    const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));
+    const { assertDaemonHelperInventory } =
+      await import("../dist/server/server/execution/daemon-helper-inventory.js");
+    const member = manifest.files.filter((row) => row.path === "startup-phase.mjs");
+    assert.equal(member.length, 1);
+    assert.deepEqual(
+      manifest.helperInventory.filter((row) => row.path === "startup-phase.mjs"),
+      member,
+    );
+    const actual = await readFile(path.join(root, "startup-phase.mjs"));
+    assert.equal(actual.length, member[0].size);
+    assert.equal(createHash("sha256").update(actual).digest("hex"), member[0].sha256);
+    assert.equal(
+      inputs.sourceInputs.filter(
+        (row) => row.path === "packages/server/src/server/execution/startup-phase.ts",
+      ).length,
+      1,
+    );
+    assert.ok(
+      inputs.metafiles["startup-phase.mjs"].inputs[
+        "packages/server/src/server/execution/startup-phase.ts"
+      ],
+    );
+    for (const output of [
+      "daemon-entry.mjs",
+      "daemon.mjs",
+      "cli-entry.mjs",
+      "terminal-entry.mjs",
+      "plugin-child-entry.mjs",
+      "compiler-entry.mjs",
+    ]) {
+      const meta = inputs.metafiles[output];
+      assert.ok(
+        meta.outputs[output].imports.some(
+          (row) => row.path === "./startup-phase.mjs" && row.external,
+        ),
+      );
+      assert.equal(
+        Object.keys(meta.inputs).some((name) => name.endsWith("/execution/startup-phase.ts")),
+        false,
+      );
+    }
+    const positive = () =>
+      assert.equal(assertDaemonHelperInventory(manifest), manifest.helperClosureSha256);
+    positive();
+    const missing = manifest.helperInventory.filter((row) => row.path !== "startup-phase.mjs");
+    assert.throws(() => assertDaemonHelperInventory({ ...manifest, helperInventory: missing }));
+    assert.throws(() =>
+      assertDaemonHelperInventory({
+        ...manifest,
+        helperInventory: missing,
+        helperClosureSha256: createHash("sha256").update(JSON.stringify(missing)).digest("hex"),
+      }),
+    );
+    const changed = manifest.helperInventory.map((row) =>
+      row.path === "startup-phase.mjs" ? { ...row, sha256: "0".repeat(64) } : row,
+    );
+    assert.throws(() =>
+      assertDaemonHelperInventory({
+        ...manifest,
+        helperInventory: changed,
+        helperClosureSha256: createHash("sha256").update(JSON.stringify(changed)).digest("hex"),
+      }),
+    );
+    assert.throws(() =>
+      assertDaemonHelperInventory({
+        ...manifest,
+        helperInventory: [...manifest.helperInventory].reverse(),
+      }),
+    );
+    const extra = [
+      ...manifest.helperInventory,
+      { ...member[0], path: "startup-phase/unknown.mjs" },
+    ];
+    assert.throws(() =>
+      assertDaemonHelperInventory({
+        ...manifest,
+        helperInventory: extra,
+        helperClosureSha256: createHash("sha256").update(JSON.stringify(extra)).digest("hex"),
+      }),
+    );
+    positive();
+
+    const directory = mkdtempSync(path.join(tmpdir(), "startup-phase-data-"));
+    const moduleUrl = pathToFileURL(path.join(root, "startup-phase.mjs")).href;
+    function writeProbe(mode, entry, forward = null) {
+      const script = `import {createRequire} from "node:module";
+      const require=createRequire(import.meta.url);
+      const mode=${JSON.stringify(mode)}, forward=${JSON.stringify(forward)};
+      const fs=require("node:fs"),{syncBuiltinESMExports}=require("node:module");
+      const originalWrite=fs.write;let api,issued=1,injected=false;
+      if(mode==="clock") Object.defineProperty(require("node:perf_hooks").performance,"now",{value:()=>{throw Error("clock");}});
+      fs.write=(...args)=>{
+        if(mode==="sync-error")throw Error("write");
+        const callback=args.pop();
+        if(mode==="short"&&!injected){args[3]=Math.max(1,Math.floor(args[3]/2));injected=true;}
+        originalWrite(...args,(error,written,...rest)=>{
+          const fail=mode==="async-error"&&!injected;if(fail)injected=true;
+          callback(fail?Error("async write"):error,written,...rest);
+          if(mode==="cap"&&api&&issued++<2200)api.recordStartupPhase({phase:"owner.refresh",edge:"point",cycle:issued,relation:"join"});
+          if(fail||mode==="short")api.recordStartupPhase({phase:"owner.refresh",edge:"point"});
+        });
+      };syncBuiltinESMExports();
+      api=await import(${JSON.stringify(moduleUrl)});
+      if(forward)api.forwardTerminalStartupPhase(Buffer.from(forward.line,"base64"),forward.pid);
+      else if(mode==="valid"||mode==="cli"){
+        api.recordStartupPhase({phase:"cli.total",edge:"begin"});
+        api.recordStartupPhase({phase:"verify.files",edge:"begin",span:1});
+        for(const value of [4,2])api.recordStartupPhase({phase:"verify.files",edge:"add",span:1,counter:"maxWidth",value});
+        for(const value of [7,9])api.recordStartupPhase({phase:"verify.files",edge:"add",span:1,counter:"readBytes",value});
+        for(const value of [11,11])api.recordStartupPhase({phase:"verify.files",edge:"add",span:1,counter:"declaredBytes",value});
+        api.recordStartupPhase({phase:"verify.files",edge:"end",span:1,outcome:"ok"});
+        api.recordStartupPhase({phase:"cli.total",edge:"end",outcome:"ok",durationUs:1});
+      }else if(mode==="cli-overflow"){
+        api.recordStartupPhase({phase:"cli.total",edge:"begin"});
+        api.recordStartupPhase({phase:"verify.files",edge:"begin",span:1});
+        for(const counter of ["readBytes","declaredBytes","files"]){
+          api.recordStartupPhase({phase:"verify.files",edge:"add",span:1,counter,value:Number.MAX_SAFE_INTEGER});
+          api.recordStartupPhase({phase:"verify.files",edge:"add",span:1,counter,value:1});
+        }
+        api.recordStartupPhase({phase:"cli.total",edge:"end",outcome:"ok",durationUs:Number.MAX_SAFE_INTEGER});
+      }else if(mode==="queue"){
+        for(let index=0;index<2200;index++)api.recordStartupPhase({phase:"owner.refresh",edge:"point"});
+      }else if(mode==="invalid")api.recordStartupPhase({phase:"owner.refresh",edge:"point",secret:"forbidden"});
+      else api.recordStartupPhase({phase:"owner.refresh",edge:"point"});
+      process.stdout.write(JSON.stringify({sentinel:true}));`;
+      const file = path.join(directory, entry);
+      const commonJs = entry.endsWith(".cjs");
+      const body = commonJs
+        ? script.replace(
+            'import {createRequire} from "node:module";\n      const require=createRequire(import.meta.url);',
+            "",
+          )
+        : script;
+      assert.ok(!commonJs || body !== script);
+      writeFileSync(
+        file,
+        commonJs
+          ? `(async()=>{${body}})().catch(error=>{console.error(error);process.exitCode=1;});`
+          : body,
+      );
+      return file;
+    }
+    function run(mode, entry, forward = null) {
+      const file = writeProbe(mode, entry, forward);
+      const reply = spawnSync(path.join(root, "runtime/node"), [file], {
+        encoding: "utf8",
+        timeout: 15000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      assert.ifError(reply.error);
+      assert.equal(reply.signal, null);
+      assert.equal(reply.status, 0, reply.stderr);
+      assert.deepEqual(JSON.parse(reply.stdout), { sentinel: true });
+      return reply;
+    }
+    const decode = (reply) =>
+      reply.stderr
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          assert.ok(Buffer.byteLength(line + "\n") <= 256);
+          assert.ok(line.startsWith("PASEO_STARTUP_PHASE "));
+          return JSON.parse(line.slice("PASEO_STARTUP_PHASE ".length));
+        });
+    try {
+      // Sidecars exercise the actual DATA artifact only, never a daemon/owner/terminal receipt.
+      const normal = run("valid", "role.mjs");
+      assert.equal(normal.stderr, "", "unknown entry must not acquire a diagnostic role");
+      const daemon = run("valid", "role.cjs.mjs");
+      assert.equal(daemon.stderr, "");
+      // An ESM entry with the fixed CLI name tests stdout isolation and its ONE-row budget.
+      const cli = run("cli", "cli-entry.mjs");
+      const cliRows = decode(cli);
+      assert.equal(cliRows.length, 1);
+      assert.equal(cliRows[0].role, "cli");
+      assert.equal(cliRows[0].readBytes, 16);
+      assert.equal(cliRows[0].declaredBytes, 22);
+      assert.ok(Buffer.byteLength(cli.stderr) <= 256);
+      const cliOverflow = run("cli-overflow", "cli-entry.mjs");
+      assert.equal(decode(cliOverflow).length, 1);
+      assert.equal(decode(cliOverflow)[0].outcome, "incomplete");
+      const terminal = run("valid", "terminal-entry.mjs");
+      const terminalRows = decode(terminal);
+      assert.equal(terminalRows.find((row) => row.counter === "maxWidth").value, 4);
+      assert.equal(terminalRows.find((row) => row.counter === "readBytes").value, 16);
+      for (const row of terminalRows) assert.equal(row.pid, terminal.pid);
+      const mainRun = (mode, forward = null) => run(mode, "role.cjs", forward);
+      const mainRows = decode(mainRun("valid"));
+      assert.equal(mainRows.find((row) => row.counter === "maxWidth").value, 4);
+      const cap = mainRun("cap");
+      const capRows = decode(cap);
+      assert.ok(capRows.length <= 2048);
+      assert.ok(Buffer.byteLength(cap.stderr) <= 524288);
+      assert.ok(capRows.some((row) => row.outcome === "incomplete"));
+      for (const mode of ["invalid", "clock", "async-error", "queue"]) {
+        assert.ok(decode(mainRun(mode)).some((row) => row.outcome === "incomplete"));
+      }
+      mainRun("sync-error");
+      assert.ok(mainRun("short").stderr.includes("incomplete"));
+      const first = terminal.stderr.split("\n").find(Boolean) + "\n";
+      const forwarded = decode(
+        mainRun("forward", { line: Buffer.from(first).toString("base64"), pid: terminal.pid }),
+      );
+      assert.equal(forwarded[0].pid, terminal.pid);
+      assert.equal(forwarded[0].seq, terminalRows[0].seq);
+      const refused = decode(
+        mainRun("forward", { line: Buffer.from(first).toString("base64"), pid: terminal.pid + 1 }),
+      );
+      assert.equal(refused[0].role, "daemon");
+      assert.equal(refused[0].outcome, "incomplete");
+      for (const invalid of [
+        first.replace('"terminal"', '"daemon"'),
+        first.replace('"version":1', '"version":2'),
+        "PASEO_STARTUP_PHASE " + "x".repeat(256) + "\n",
+      ]) {
+        const rows = decode(
+          mainRun("forward", { line: Buffer.from(invalid).toString("base64"), pid: terminal.pid }),
+        );
+        assert.equal(rows[0].outcome, "incomplete");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 function sudo(args) {
   const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
   assert.equal(result.status, 0, result.stderr);

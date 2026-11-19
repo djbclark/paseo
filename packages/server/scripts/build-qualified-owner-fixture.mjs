@@ -11,6 +11,7 @@ import {
   externals,
   inputMetafile,
   qualifiedOptionalNativePlugin,
+  phaseSingletonPlugin,
 } from "./build-qualified-daemon.mjs";
 const repository = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const [stage, output] = process.argv.slice(2);
@@ -35,7 +36,7 @@ const result = await build({
     __QUALIFIED_DAEMON_ENTRY__: "true",
     __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(inputs.distributionBuildId),
   },
-  plugins: [qualifiedOptionalNativePlugin],
+  plugins: [qualifiedOptionalNativePlugin, phaseSingletonPlugin],
   logLevel: "warning",
 });
 for (const emitted of Object.values(result.metafile.outputs))
@@ -43,6 +44,7 @@ for (const emitted of Object.values(result.metafile.outputs))
     if (
       imported.external &&
       !isBuiltin(imported.path) &&
+      imported.path !== "./startup-phase.mjs" &&
       !externals.some((name) => imported.path === name || imported.path.startsWith(`${name}/`))
     )
       throw new Error(`Unknown fixture external: ${imported.path}`);

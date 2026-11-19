@@ -30,6 +30,95 @@ import type {
 } from "./daemon-types.js";
 import type { PluginHelperAdmissionRequest } from "@getpaseo/plugin/internal/activity";
 import type { QualifiedBuiltinProfile } from "./builtin-profile.js";
+import {
+  recordStartupPhase,
+  startupPhaseNow,
+  forwardTerminalStartupPhase,
+  STARTUP_PHASE_PREFIX,
+  type StartupPhase,
+  type StartupPhaseCounter,
+} from "./startup-phase.js";
+let diagnosticSpan = 0;
+function beginOwnerPhase(phase: StartupPhase, cycle: number) {
+  const span = ++diagnosticSpan;
+  const started = startupPhaseNow();
+  recordStartupPhase({ phase, span, cycle, edge: "begin" });
+  return { phase, span, cycle, started };
+}
+function endOwnerPhase(
+  state: ReturnType<typeof beginOwnerPhase>,
+  outcome: "ok" | "error",
+  counts: Partial<Record<StartupPhaseCounter, number>> = {},
+): void {
+  for (const [counter, value] of Object.entries(counts))
+    recordStartupPhase({
+      phase: state.phase,
+      span: state.span,
+      cycle: state.cycle,
+      edge: "add",
+      counter: counter as StartupPhaseCounter,
+      value,
+    });
+  const now = startupPhaseNow();
+  recordStartupPhase({
+    phase: state.phase,
+    span: state.span,
+    cycle: state.cycle,
+    edge: "end",
+    outcome,
+    durationUs:
+      now !== null && state.started !== null && now >= state.started
+        ? now - state.started
+        : undefined,
+  });
+}
+function drainTerminalPhaseStderr(child: ChildProcess): void {
+  const stream = child.stderr;
+  const pid = child.pid;
+  if (!stream || typeof pid !== "number") return;
+  const prefix = Buffer.from(STARTUP_PHASE_PREFIX);
+  const line = Buffer.alloc(256);
+  let used = 0;
+  let discard = false;
+  const incomplete = () => forwardTerminalStartupPhase(new Uint8Array(), pid);
+  stream.on("data", (chunk: Buffer | string) => {
+    try {
+      for (const byte of Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)) {
+        if (byte === 10) {
+          if (!discard && used >= prefix.length) {
+            if (used >= line.length) incomplete();
+            else {
+              line[used++] = byte;
+              forwardTerminalStartupPhase(line.subarray(0, used), pid);
+            }
+          }
+          used = 0;
+          discard = false;
+          continue;
+        }
+        if (discard) continue;
+        if (used < prefix.length && byte !== prefix[used]) {
+          used = 0;
+          discard = true;
+          continue;
+        }
+        if (used >= line.length) {
+          incomplete();
+          used = 0;
+          discard = true;
+          continue;
+        }
+        line[used++] = byte;
+      }
+    } catch {
+      incomplete();
+    }
+  });
+  stream.on("end", () => {
+    if (!discard && used >= prefix.length) incomplete();
+  });
+  stream.on("error", incomplete);
+}
 export type { QualifiedDaemonOwner } from "./daemon-types.js";
 declare const __QUALIFIED_DAEMON_ENTRY__: boolean;
 const owners = new WeakSet<object>();
@@ -186,6 +275,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   let failed = false;
   let pending: Promise<void> | null = null;
   let proofEpoch = 0;
+  let diagnosticCycle = 0;
   const evidence = {
     schemaVersion: 1,
     role: "daemon",
@@ -234,12 +324,30 @@ async function produce(): Promise<QualifiedDaemonOwner> {
   }
   async function refresh(): Promise<void> {
     if (failed) return unsupported();
-    if (pending) return pending;
+    if (pending) {
+      recordStartupPhase({
+        phase: "owner.refresh",
+        edge: "point",
+        cycle: diagnosticCycle,
+        relation: "join",
+      });
+      return pending;
+    }
+    diagnosticCycle += 1;
+    const cycle = diagnosticCycle;
+    const total = beginOwnerPhase("owner.refresh", cycle);
+    recordStartupPhase({ phase: "owner.refresh", edge: "point", cycle, relation: "new" });
     fresh = false;
     proofEpoch += 1;
     pending = (async () => {
+      let active: ReturnType<typeof beginOwnerPhase> | null = null;
+      let outcome: "ok" | "error" = "error";
+      const counts = { pluginObservers: 0, compilerObservers: 0, terminalObservers: 0 };
       try {
+        active = beginOwnerPhase("owner.verify", cycle);
         const current = await verifyEnclosingProcess(root);
+        endOwnerPhase(active, "ok");
+        active = beginOwnerPhase("owner.environment", cycle);
         await assertQualifiedDaemonStartupEnvironment(root, current);
         if (
           JSON.stringify(current.systemObservation) !== JSON.stringify(initial.systemObservation) ||
@@ -249,17 +357,35 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           JSON.stringify(current.closure) !== JSON.stringify(initial.closure)
         )
           return unsupported();
-        for (const observe of observers.values()) await observe();
+        endOwnerPhase(active, "ok");
+        active = beginOwnerPhase("owner.observers", cycle);
+        for (const [handle, observe] of observers) {
+          const kind = handles.get(handle)?.kind;
+          if (kind === "plugin-child") counts.pluginObservers++;
+          else if (kind === "compiler") counts.compilerObservers++;
+          else if (kind === "terminal-worker") counts.terminalObservers++;
+          await observe();
+        }
+        endOwnerPhase(active, "ok", counts);
+        active = beginOwnerPhase("owner.builtins", cycle);
         await refreshBuiltinInstances(owner);
+        endOwnerPhase(active, "ok");
+        active = beginOwnerPhase("owner.authority", cycle);
         await assertEnclosingAuthorityUnchanged(current);
+        endOwnerPhase(active, "ok");
+        active = null;
         builtinProfiles = current.builtinProfiles;
         builtinAuthorityIdentity = current.authorityIdentity;
         fresh = true;
+        outcome = "ok";
       } catch (error) {
         failed = true;
         throw error;
       } finally {
         pending = null;
+        if (active)
+          endOwnerPhase(active, "error", active.phase === "owner.observers" ? counts : {});
+        endOwnerPhase(total, outcome);
       }
     })();
     return pending;
@@ -388,7 +514,15 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         };
         observers.set(child, async () => {
           const nonce = randomUUID();
-          const result = await exchange(port, nonce, verifyReply);
+          const phase = beginOwnerPhase("owner.exchange", diagnosticCycle);
+          let outcome: "ok" | "error" = "error";
+          let result: OwnedObservation;
+          try {
+            result = await exchange(port, nonce, verifyReply);
+            outcome = "ok";
+          } finally {
+            endOwnerPhase(phase, outcome, { pluginObservers: 1 });
+          }
           const now = await observeLinuxProcess(child.pid!);
           if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
           accept(result, nonce, "plugin-child", now, record.incarnation);
@@ -459,6 +593,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
           stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"],
         },
       );
+      drainTerminalPhaseStderr(child);
       try {
         const ready = await new Promise<string>((resolve, reject) => {
           const stream = child.stdio[3];
@@ -518,7 +653,15 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         terminals.set(record, { child, incarnation: owned.incarnation });
         observers.set(child, async () => {
           const challenge = randomUUID();
-          const reply = await exchange(childPort(child), challenge);
+          const phase = beginOwnerPhase("owner.exchange", diagnosticCycle);
+          let outcome: "ok" | "error" = "error";
+          let reply: OwnedObservation;
+          try {
+            reply = await exchange(childPort(child), challenge);
+            outcome = "ok";
+          } finally {
+            endOwnerPhase(phase, outcome, { terminalObservers: 1 });
+          }
           const now = await observeLinuxProcess(child.pid!);
           if (now.birth !== actual.birth || now.image !== actual.image) return unsupported();
           accept(reply, challenge, "terminal-worker", now, owned.incarnation);
@@ -614,7 +757,15 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         handles.set(worker, record);
         observers.set(worker, async () => {
           const challenge = randomUUID();
-          const reply = await exchange(port1, challenge);
+          const phase = beginOwnerPhase("owner.exchange", diagnosticCycle);
+          let outcome: "ok" | "error" = "error";
+          let reply: OwnedObservation;
+          try {
+            reply = await exchange(port1, challenge);
+            outcome = "ok";
+          } finally {
+            endOwnerPhase(phase, outcome, { compilerObservers: 1 });
+          }
           accept(reply, challenge, "compiler", { pid: process.pid }, record.incarnation);
           if (reply.threadId !== worker.threadId) return unsupported();
         });

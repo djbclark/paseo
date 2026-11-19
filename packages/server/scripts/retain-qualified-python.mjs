@@ -197,7 +197,13 @@ async function probe(executable, script, receiveDiagnostic = () => {}) {
   console.log(JSON.stringify(diagnostic));
   require(Buffer.byteLength(result.stdout) <= 65536, "probe output");
   const value = JSON.parse(result.stdout);
-  console.log(JSON.stringify({kind:"retained-python-fixed-probe-observation",qualification:false,observation:value}));
+  console.log(
+    JSON.stringify({
+      kind: "retained-python-fixed-probe-observation",
+      qualification: false,
+      observation: value,
+    }),
+  );
   require(value.schemaVersion === 1 &&
     value.qualification === false &&
     value.implementation === "cpython" &&
@@ -216,7 +222,7 @@ function normalizeProbe(value, root) {
   const inside = (location, field = "path") => {
     const name = path.relative(root, location);
     require(location.startsWith(prefix + "/") ||
-      location === prefix, "host Python lookup fallback " + JSON.stringify({field,location}));
+      location === prefix, "host Python lookup fallback " + JSON.stringify({ field, location }));
     return relative(name);
   };
   for (const key of ["prefix", "execPrefix", "basePrefix", "baseExecPrefix"])

@@ -92,6 +92,7 @@ async function main() {
     "build-qualified-daemon.mjs",
     "build-opencode-bridge-plugin.mjs",
     "retain-qualified-opencode-bridge.mjs",
+    "retain-qualified-cli-metadata.mjs",
     "build-qualified-git.mjs",
     "qualified-git.test.mjs",
     "qualified-builtin-sources.mjs",

@@ -794,3 +794,134 @@ test(
     }
   },
 );
+
+test(
+  "retained CLI metadata preserves original bytes and relocated packaged version",
+  { skip: !enabled },
+  async () => {
+    const root = process.env.QUALIFIED_DAEMON_ROOT;
+    assert.ok(root && path.isAbsolute(root));
+    const { fileURLToPath } = await import("node:url");
+    const { assertRetainedCliMetadata } = await import("./retain-qualified-cli-metadata.mjs");
+    const { assertDaemonHelperInventory } = await import(path.join(root, "daemon-launcher.mjs"));
+    const repository = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+    const manifest = JSON.parse(await readFile(`${root}.manifest.json`, "utf8"));
+    const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));
+    const original = await readFile(path.join(repository, "packages/cli/package.json"));
+    const originalVersion = JSON.parse(original.toString("utf8")).version.trim();
+    const metadata = await readFile(path.join(root, "cli-package.json"));
+    assert.deepEqual(metadata, original);
+    await assertRetainedCliMetadata(root, inputs, manifest.files);
+    for (const name of ["cli-package.json", "cli-assets/metadata.json", "cli-assets/version.ts"]) {
+      const row = manifest.files.find((file) => file.path === name);
+      assert.ok(row);
+      assert.deepEqual(
+        manifest.helperInventory.find((file) => file.path === name),
+        row,
+      );
+      const missing = manifest.helperInventory.filter((file) => file.path !== name);
+      assert.throws(() => assertDaemonHelperInventory({ ...manifest, helperInventory: missing }));
+      assert.throws(() =>
+        assertDaemonHelperInventory({
+          ...manifest,
+          helperInventory: missing,
+          helperClosureSha256: createHash("sha256").update(JSON.stringify(missing)).digest("hex"),
+        }),
+      );
+    }
+    const temporary = await (
+      await import("node:fs/promises")
+    ).mkdtemp(path.join(tmpdir(), "retained-cli-metadata-"));
+    const names = ["cli-package.json", "cli-assets/metadata.json", "cli-assets/version.ts"];
+    const bytes = new Map(
+      await Promise.all(names.map(async (name) => [name, await readFile(path.join(root, name))])),
+    );
+    const restore = async () => {
+      await mkdir(path.join(temporary, "cli-assets"), { recursive: true });
+      for (const name of names) {
+        await rm(path.join(temporary, name), { force: true });
+        await writeFile(path.join(temporary, name), bytes.get(name), { mode: 0o444 });
+      }
+      await assertRetainedCliMetadata(temporary, inputs, manifest.files);
+    };
+    try {
+      await restore();
+      await rm(path.join(temporary, "cli-package.json"));
+      await assert.rejects(() => assertRetainedCliMetadata(temporary, inputs, manifest.files));
+      await restore();
+      await rm(path.join(temporary, "cli-package.json"));
+      await writeFile(
+        path.join(temporary, "cli-package.json"),
+        JSON.stringify({ name: "@getpaseo/cli", version: "fabricated" }),
+        { mode: 0o444 },
+      );
+      await assert.rejects(() => assertRetainedCliMetadata(temporary, inputs, manifest.files));
+      await restore();
+      const changed = JSON.parse(bytes.get("cli-assets/metadata.json").toString("utf8"));
+      changed.relocation.to = 'require("../package.json")';
+      await rm(path.join(temporary, "cli-assets/metadata.json"));
+      await writeFile(path.join(temporary, "cli-assets/metadata.json"), JSON.stringify(changed), {
+        mode: 0o444,
+      });
+      await assert.rejects(() => assertRetainedCliMetadata(temporary, inputs, manifest.files));
+      await restore();
+      const changedInputs = structuredClone(inputs);
+      changedInputs.sourceInputs.find((row) => row.path === "packages/cli/src/version.ts").sha256 =
+        "0".repeat(64);
+      await assert.rejects(() =>
+        assertRetainedCliMetadata(temporary, changedInputs, manifest.files),
+      );
+      await restore();
+      await rm(path.join(temporary, "cli-package.json"));
+      const fifo = spawnSync("/usr/bin/mkfifo", [path.join(temporary, "cli-package.json")], {
+        timeout: 5000,
+      });
+      assert.equal(fifo.status, 0);
+      const validatorUrl = new URL("./retain-qualified-cli-metadata.mjs", import.meta.url).href;
+      const fifoCheck = `
+        import fs from "node:fs";
+        const {assertRetainedCliMetadata}=await import(${JSON.stringify(validatorUrl)});
+        const inputs=JSON.parse(fs.readFileSync(${JSON.stringify(path.join(root, "inputs.json"))},"utf8"));
+        const manifest=JSON.parse(fs.readFileSync(${JSON.stringify(`${root}.manifest.json`)},"utf8"));
+        let refused=false;
+        try {await assertRetainedCliMetadata(${JSON.stringify(temporary)},inputs,manifest.files);}
+        catch(error) {if(error.message!=="Invalid CLI metadata source leaf") throw error; refused=true;}
+        if(!refused) throw new Error("FIFO unexpectedly admitted");
+      `;
+      const bounded = spawnSync(process.execPath, ["--input-type=module", "-e", fifoCheck], {
+        encoding: "utf8",
+        timeout: 5000,
+        maxBuffer: 1048576,
+      });
+      assert.equal(bounded.error, undefined);
+      assert.equal(bounded.signal, null);
+      assert.equal(bounded.status, 0, bounded.stderr);
+      await restore();
+      // Execute genuine packaged CLI code with the retained Node, from a different cwd.
+      // --version never connects to a daemon. This source regression does not mint
+      // a qualified owner or replace the real cli-entry verification/runtime proof.
+      const result = spawnSync(
+        path.join(root, "runtime/node"),
+        [path.join(root, "cli-code.mjs"), "--version"],
+        {
+          cwd: temporary,
+          env: {
+            PATH: process.env.PATH,
+            HOME: userInfo().homedir,
+            PASEO_HOME: path.join(temporary, "home"),
+            NO_COLOR: "1",
+          },
+          encoding: "utf8",
+          timeout: 30000,
+          maxBuffer: 1048576,
+        },
+      );
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), originalVersion);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);

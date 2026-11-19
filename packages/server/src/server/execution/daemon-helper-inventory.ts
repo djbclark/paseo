@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import type { FileIdentity } from "./types.js";
 import type { RetainedExternal } from "./system-closure.js";
 
-const bridgeHelpers = new Set([
+const fixedDataHelpers = new Set([
+  "cli-package.json",
+  "cli-assets/metadata.json",
+  "cli-assets/version.ts",
   "bridge-assets/identity.json",
   "bridge-assets/v1.metafile.json",
   "bridge-assets/v2.metafile.json",
@@ -25,7 +28,7 @@ export function daemonHelperInventory(manifest: HelperFiles): FileIdentity[] {
       (file) =>
         file.path.startsWith("system-closure/") ||
         file.path.startsWith("native-provenance/") ||
-        bridgeHelpers.has(file.path) ||
+        fixedDataHelpers.has(file.path) ||
         file.path.startsWith("runtime/") ||
         /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
         file.path.endsWith(".node") ||

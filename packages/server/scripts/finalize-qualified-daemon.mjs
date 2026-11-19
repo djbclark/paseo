@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { retainSystemClosure } from "./retain-system-closure.mjs";
 import { assertRetainedOpenCodeBridge } from "./retain-qualified-opencode-bridge.mjs";
+import { assertRetainedCliMetadata } from "./retain-qualified-cli-metadata.mjs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import builtinBindingsRecipe from "../src/server/execution/builtin-bindings-recipe.json" with { type: "json" };
@@ -77,6 +78,7 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     return 0;
   });
   await assertRetainedOpenCodeBridge(root, inputs, files);
+  await assertRetainedCliMetadata(root, inputs, files);
   const helperInventory = daemonHelperInventory({ files, externalLibraries });
   const adaptation = files.find(
     (file) => file.path === "native-provenance/sherpa-addon-adaptation.json",

@@ -9,6 +9,7 @@ import { buildQualifiedGit } from "./build-qualified-git.mjs";
 import { retainBuiltinPlugins } from "./qualified-builtin-sources.mjs";
 import { precompileBuiltinPlugins } from "./build-qualified-builtins.mjs";
 import { retainQualifiedOpenCodeBridge } from "./retain-qualified-opencode-bridge.mjs";
+import { retainQualifiedCliMetadata } from "./retain-qualified-cli-metadata.mjs";
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const repositoryRoot = path.resolve(packageRoot, "../..");
 const digest = (data) => createHash("sha256").update(data).digest("hex");
@@ -71,6 +72,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   )
     throw new Error("Finite Linux CI distribution identity required");
   await mkdir(outDir, { recursive: true });
+  const cli = await retainQualifiedCliMetadata(repositoryRoot, outDir);
   const allInputs = {};
   const entries = [
     ["daemon-entry", "daemon-entry.mjs", {}],
@@ -111,7 +113,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
         ...define,
       },
-      plugins: [qualifiedOptionalNativePlugin],
+      plugins: [qualifiedOptionalNativePlugin, cli.plugin],
       logLevel: "warning",
     });
     for (const emitted of Object.values(result.metafile.outputs))
@@ -201,6 +203,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   const bridge = await retainQualifiedOpenCodeBridge(repositoryRoot, outDir, inputMetafile);
   Object.assign(allInputs, bridge.metafiles);
   const sourceInputs = [
+    ...cli.sourceInputs,
     ...retainedBuiltins.sourceInputs,
     ...compiledBuiltins.sourceInputs,
     ...finiteGit.sourceInputs,

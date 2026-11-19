@@ -12,6 +12,9 @@ import { retainQualifiedPython, assertRetainedQualifiedPython } from "./retain-q
 const execute=promisify(execFile);
 const sha=(raw)=>createHash("sha256").update(raw).digest("hex");
 const limits={zip:128*1024*1024,tar:512*1024*1024,members:10000};
+async function unlinkIfPresent(file) {
+  try { await unlink(file); } catch(error) { if(error.code!=="ENOENT") throw error; }
+}
 async function overwrite(file,raw) {
   await chmod(file,0o644); await writeFile(file,raw); await chmod(file,0o444);
 }
@@ -76,7 +79,7 @@ test("fixed source retention, relocation and strict preexec DATA refusals",{time
         await assert.rejects(assertRetainedQualifiedPython(root,retained.record));
       } finally {
         await chmod(directory,0o755);
-        for(const p of [file,extra]) {try {await unlink(p);}catch(e){if(e.code!=="ENOENT")throw e;}}
+        for(const p of [file,extra]) await unlinkIfPresent(p);
         await writeFile(file,original,{mode:0o444}); await chmod(directory,0o555);
         if(kind==="absent") await changeDirectory(path.join(root,"python"),()=>unlink(path.join(root,"python/pyvenv.cfg")));
       }

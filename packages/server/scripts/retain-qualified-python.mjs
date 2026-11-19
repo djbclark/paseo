@@ -1,6 +1,6 @@
 // Fixed Linux CI retention. All returned records are DATA, never execution authority.
 import { constants } from "node:fs";
-import { open, lstat, realpath, readdir, mkdir, mkdtemp, writeFile, rename, chmod, rmdir } from "node:fs/promises";
+import { open, lstat, realpath, readdir, mkdir, mkdtemp, writeFile, rename, chmod, rmdir, readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -19,7 +19,7 @@ const leafLimit = 32 * 1024 * 1024;
 const recordLimit = 4 * 1024 * 1024;
 const flags = ["-I", "-S", "-B"];
 const excludedTests = ["test", "unittest/test", "idlelib/idle_test", "tkinter/test", "ctypes/test", "distutils/tests", "lib2to3/tests", "sqlite3/test"];
-const excludedComponents = ["site-packages", "dist-packages", "__pycache__"];
+const excludedComponents = new Set(["site-packages", "dist-packages", "__pycache__"]);
 const digest = (raw) => createHash("sha256").update(raw).digest("hex");
 const stamp = (s) => [s.dev,s.ino,s.mode,s.uid,s.gid,s.nlink,s.size,s.mtimeNs,s.ctimeNs].join(":");
 const fail = (reason) => { throw new Error(`Retained Python HOLD: ${reason}`); };
@@ -64,7 +64,7 @@ async function bytes(file, limit, source = false) {
   } finally { await fd.close(); }
 }
 function excluded(name) {
-  return name.split("/").some((p) => excludedComponents.includes(p)) || /\.(?:pyc|pyo)$/.test(name) || excludedTests.some((p) => name === p || name.startsWith(p+"/"));
+  return name.split("/").some((p) => excludedComponents.has(p)) || /\.(?:pyc|pyo)$/.test(name) || excludedTests.some((p) => name === p || name.startsWith(p+"/"));
 }
 async function inventory(root) {
   const files = [], directories = [];
@@ -112,9 +112,9 @@ async function probe(executable, script) {
 }
 function normalizeProbe(value, root) {
   const prefix = path.join(root,"python");
-  const inside = (value) => {
-    const name = path.relative(root,value);
-    require(value.startsWith(prefix+"/") || value === prefix, "host Python lookup fallback");
+  const inside = (location) => {
+    const name = path.relative(root,location);
+    require(location.startsWith(prefix+"/") || location === prefix, "host Python lookup fallback");
     return relative(name);
   };
   for (const key of ["prefix","execPrefix","basePrefix","baseExecPrefix"]) require(value[key] === prefix, "relocated prefix");
@@ -153,6 +153,9 @@ function observation(value, retained) {
   exact(value,["schemaVersion","qualification","implementation","version","cacheTag","abiFlags","platlibdir","executable","prefix","execPrefix","basePrefix","baseExecPrefix","path","flags","stdlib","platstdlib","extensionDirectory","modules","nativeMapFiles","build"]);
   const text=(s) => require(typeof s === "string" && Buffer.byteLength(s)<=8192 && !s.includes("\0"), "probe text");
   require(value.schemaVersion===1 && value.qualification===false && value.implementation==="cpython" && value.abiFlags==="" && value.platlibdir==="lib" && Array.isArray(value.version) && value.version.length===3 && value.version.every((n) => Number.isSafeInteger(n) && n>=0 && n<=65535) && value.version[0]===3, "observed CPython ABI");
+  observationLists(value,retained,text);
+}
+function observationLists(value,retained,text) {
   for(const k of ["cacheTag","abiFlags","executable","prefix","execPrefix","basePrefix","baseExecPrefix","stdlib","platstdlib","extensionDirectory"]) text(value[k]);
   exact(value.flags,["isolated","noSite","dontWriteBytecode"]);
   require(Object.values(value.flags).every((n) => n===1), "observed isolation");
@@ -169,21 +172,23 @@ function observation(value, retained) {
   exact(value.build,["SOABI","EXT_SUFFIX","CONFIG_ARGS","MULTIARCH","LDLIBRARY"]);
   for(const v of Object.values(value.build)) text(v);
 }
-function validateRecord(record) {
-  exact(record,["schemaVersion","kind","qualification","source","layout","sourceFiles","files","protectedAbsent","observed","budgets"]);
-  require(record.schemaVersion === 1 && record.kind === "retained-cpython-layout-v1" && record.qualification === false, "record kind");
+function sourceRecord(source) {
+  const record={source};
   exact(record.source,["requestedExecutable","resolvedExecutable","executableIdentity","version","implementation","cacheTag","abiFlags","platlibdir","stdlib","platstdlib","extensionDirectory","packageProvenance"]);
   require(record.source.requestedExecutable === "/usr/bin/python3" && record.source.implementation === "cpython" && record.source.platlibdir === "lib" && Array.isArray(record.source.version) && record.source.version.length === 3 && record.source.version.every((n) => Number.isSafeInteger(n) && n >= 0) && record.source.version[0] === 3, "source layout");
   const abi = record.source.version.slice(0,2).join(".");
   require(record.source.abiFlags==="" && typeof record.source.cacheTag==="string" && record.source.cacheTag.length<=128 && record.source.stdlib===`/usr/lib/python${abi}` && record.source.platstdlib===record.source.stdlib && record.source.extensionDirectory===record.source.stdlib+"/lib-dynload", "finite source ABI paths");
   const executable=record.source.executableIdentity;
   exact(executable,["path","mode","size","sha256"]);
-  require(typeof record.source.resolvedExecutable==="string" && /^\/usr\/bin\/python3\.[0-9]+$/.test(record.source.resolvedExecutable) && executable.path===record.source.resolvedExecutable && Number.isInteger(executable.mode) && executable.mode<=0o777 && !(executable.mode&0o022) && Number.isSafeInteger(executable.size) && executable.size>0 && executable.size<=leafLimit && typeof executable.sha256==="string" && /^[a-f0-9]{64}$/.test(executable.sha256), "source executable identity");
+  require(typeof record.source.resolvedExecutable==="string" && /^\/usr\/bin\/python3\.[0-9]+$/.test(record.source.resolvedExecutable) && executable.path===record.source.resolvedExecutable && Number.isInteger(executable.mode) && executable.mode>=0 && executable.mode<=0o777 && !(executable.mode&0o022) && Number.isSafeInteger(executable.size) && executable.size>0 && executable.size<=leafLimit && typeof executable.sha256==="string" && /^[a-f0-9]{64}$/.test(executable.sha256), "source executable identity");
   require(Array.isArray(record.source.packageProvenance) && record.source.packageProvenance.length>0 && record.source.packageProvenance.length<=32, "package evidence");
   for(const row of record.source.packageProvenance) {
     exact(row,["package","version","sourcePackage","sourceVersion"]);
     for(const v of Object.values(row)) require(typeof v==="string" && v.length>0 && v.length<=1024 && !/[\0\r\n]/.test(v), "package evidence text");
   }
+  return abi;
+}
+function retainedInventory(record,abi) {
   exact(record.layout,["executable","stdlib","extensionDirectory","argvFlags"]);
   require(JSON.stringify(record.layout) === JSON.stringify({executable:"python/bin/python3",stdlib:`python/lib/python${abi}`,extensionDirectory:`python/lib/python${abi}/lib-dynload`,argvFlags:flags}), "fixed retained layout");
   require(Array.isArray(record.files) && record.files.length && record.files.length < memberLimit && Array.isArray(record.sourceFiles) && record.sourceFiles.length < memberLimit, "inventory count");
@@ -192,10 +197,15 @@ function validateRecord(record) {
   for (const row of record.files) {
     identity(row);
     require(row.path.startsWith("python/") && row.path !== recordPath && row.path > previous && row.mode === (row.path === "python/bin/python3"?0o555:0o444), "closed sorted retained inventory");
+    if(row.path.startsWith(record.layout.stdlib+"/")) require(!excluded(row.path.slice(record.layout.stdlib.length+1)), "excluded source/cache input");
     previous=row.path; files.set(row.path,row);
   }
+  sourceMappings(record,files,abi);
+  return files;
+}
+function sourceMappings(record,files,abi) {
   const mapped = new Set();
-  previous="";
+  let previous="";
   for (const row of record.sourceFiles) {
     exact(row,["sourcePath","path","sourceMode","mode","size","sha256"]);
     require(typeof row.sourcePath === "string" && path.isAbsolute(row.sourcePath) && Number.isInteger(row.sourceMode) && row.sourceMode >= 0 && row.sourceMode <= 0o777 && !(row.sourceMode & 0o022) && !mapped.has(row.path), "source file mapping");
@@ -206,6 +216,10 @@ function validateRecord(record) {
     mapped.add(row.path);
   }
   require(files.has(probePath) && files.has("python/bin/python3") && files.has(`python/lib/python${abi}/os.py`) && files.has(`python/lib/python${abi}/encodings/__init__.py`) && mapped.size === files.size-1 && !mapped.has(probePath), "complete source coverage");
+  const capturedInterpreter=record.sourceFiles.find((row) => row.path==="python/bin/python3");
+  require(capturedInterpreter.sourceMode===executable.mode && capturedInterpreter.size===executable.size && capturedInterpreter.sha256===executable.sha256, "interpreter source/retained binding");
+}
+function recordObservations(record,files) {
   require(Array.isArray(record.protectedAbsent) && record.protectedAbsent.length < memberLimit && record.protectedAbsent.every((p,i,a) => relative(p) && p.startsWith("python/") && (!i || a[i-1] < p)), "absence inventory");
   exact(record.observed,["source","relocated"]);
   observation(record.observed.source,false);
@@ -217,6 +231,13 @@ function validateRecord(record) {
     const zip=`python/lib/python${record.source.version[0]}${record.source.version[1]}.zip`;
     require(JSON.stringify(value.path)===JSON.stringify([zip,record.layout.stdlib,record.layout.extensionDirectory]) && value.modules.every((row) => ["built-in","frozen"].includes(row.origin) || files.has(row.origin)), "observed retained import inventory");
   }
+}
+function validateRecord(record) {
+  exact(record,["schemaVersion","kind","qualification","source","layout","sourceFiles","files","protectedAbsent","observed","budgets"]);
+  require(record.schemaVersion === 1 && record.kind === "retained-cpython-layout-v1" && record.qualification === false, "record kind");
+  const abi=sourceRecord(record.source);
+  const files=retainedInventory(record,abi);
+  recordObservations(record,files);
   exact(record.budgets,["fileCount","directoryCount","regularBytes","tarUpperBound","zipLimit","tarLimit","memberLimit"]);
   require(record.budgets.zipLimit === zipLimit && record.budgets.tarLimit === tarLimit && record.budgets.memberLimit === memberLimit && Object.values(record.budgets).every((n) => Number.isSafeInteger(n) && n>=0) && record.budgets.tarUpperBound<=tarLimit && record.budgets.fileCount+record.budgets.directoryCount<memberLimit, "fixed budget declarations");
   return record;
@@ -242,6 +263,11 @@ export async function assertRetainedQualifiedPython(root, expectedRecordFileIden
   }
   budget(expected,actual.directories.map((p) => "python/"+p));
   return record;
+}
+
+async function removeEmptyStageParent(parent) {
+  try { await rmdir(parent); }
+  catch(error) { if(!["ENOENT","ENOTEMPTY"].includes(error.code)) throw error; }
 }
 
 /** Fixed source selection and fixed probe; no candidate evaluator or launch permission. */
@@ -281,7 +307,13 @@ export async function retainQualifiedPython(root) {
       if (excluded(rel)) { absent.add(`python/lib/python${abi}/`+rel); continue; }
       const file = path.join(directory,name), info = await lstat(file);
       if (info.isDirectory() && !info.isSymbolicLink()) await copyDirectory(file,rel);
-      else { require(info.isFile() && !info.isSymbolicLink(), "source symlink/special"); await retain(file,`python/lib/python${abi}/`+rel); }
+      else {
+        if (!info.isFile() || info.isSymbolicLink()) {
+          const target = info.isSymbolicLink() ? (await readlink(file)).slice(0,4096) : null;
+          fail("source symlink/special " + JSON.stringify({path:rel.slice(0,4096),target}));
+        }
+        await retain(file,`python/lib/python${abi}/`+rel);
+      }
     }
   }
   try {
@@ -332,7 +364,7 @@ export async function retainQualifiedPython(root) {
     return {sourceInputs,files:[...record.files,recordFile].sort((a,b) => a.path < b.path?-1:Number(a.path>b.path)),record:recordFile};
   } finally {
     // Preserve failed sealed staging for CI diagnostics; no retry by deleting it.
-    try { await rmdir(parent); } catch(error) { if(!["ENOENT","ENOTEMPTY"].includes(error.code)) throw error; }
+    await removeEmptyStageParent(parent);
   }
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

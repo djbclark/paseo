@@ -23,9 +23,9 @@ jobs:
         if: always()
         run: |
           export PATH="$RUNNER_TEMP/python-retention-tools/node_modules/.bin:$PATH"
-          npm run lint -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs
           npm run format:files -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs .github/workflows/fork-qualified-python.yml
           git diff --binary -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs .github/workflows/fork-qualified-python.yml > "$RUNNER_TEMP/python-retention-format.patch"
+          npm run lint -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs
           git diff --exit-code
       - name: Retain formatting DATA for owned source repair
         if: always()

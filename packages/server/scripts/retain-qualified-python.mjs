@@ -686,16 +686,22 @@ async function removeEmptyStageParent(parent) {
 async function externalPythonTarget(source, member) {
   let current=path.join(source.stdlib,member);
   const hops=[];
+  const ancestors=new Map();
   for(let count=0;count<8;count++) {
     const parent=path.dirname(current);
     require(await realpath(parent)===parent,"diagnostic noncanonical ancestor");
     await protectedSource(parent);
-    const ancestor=await lstat(parent);
-    require(ancestor.uid===0 && !(ancestor.mode&0o022),"diagnostic writable ancestor");
+    for(let directory=parent;;directory=path.dirname(directory)) {
+      const ancestor=await lstat(directory,{bigint:true});
+      require(ancestor.isDirectory() && ancestor.uid===0n && !(ancestor.mode&0o022n),"diagnostic writable ancestor");
+      require(!ancestors.has(directory) || ancestors.get(directory).identity===stamp(ancestor),"diagnostic ancestor changed");
+      ancestors.set(directory,{path:directory,mode:Number(ancestor.mode&0o7777n),uid:Number(ancestor.uid),identity:stamp(ancestor)});
+      if(directory==="/") break;
+    }
     const info=await lstat(current,{bigint:true});
     if(!info.isSymbolicLink()) {
       const captured=await bytes(current,leafLimit,true);
-      return {member,hops,endpoint:{path:current,mode:captured.mode,uid:0,nlink:1,size:captured.raw.length,sha256:digest(captured.raw)},raw:captured.raw};
+      return {member,hops,ancestors:Array.from(ancestors.values()),endpoint:{path:current,mode:captured.mode,uid:0,nlink:1,size:captured.raw.length,sha256:digest(captured.raw)},raw:captured.raw};
     }
     require(info.uid===0n && info.nlink===1n,"diagnostic link owner/linkcount");
     const target=await readlink(current);
@@ -708,7 +714,7 @@ async function externalPythonTarget(source, member) {
 }
 async function recheckExternalTarget(source, captured) {
   const fresh=await externalPythonTarget(source,captured.member);
-  require(JSON.stringify(fresh.hops)===JSON.stringify(captured.hops) && JSON.stringify(fresh.endpoint)===JSON.stringify(captured.endpoint),"diagnostic chain/endpoint changed");
+  require(JSON.stringify(fresh.ancestors)===JSON.stringify(captured.ancestors) && JSON.stringify(fresh.hops)===JSON.stringify(captured.hops) && JSON.stringify(fresh.endpoint)===JSON.stringify(captured.endpoint),"diagnostic chain/endpoint changed");
 }
 async function externalPythonDiagnostic(source,selected) {
   require(process.arch==="x64" && source.build.MULTIARCH==="x86_64-linux-gnu" && source.version[0]===3 && source.version[1]===12,"diagnostic finite ABI");
@@ -732,7 +738,7 @@ async function externalPythonDiagnostic(source,selected) {
   await recheckExternalTarget(source,library);
   await recheckExternalTarget(source,site);
   require(await realpath("/usr/bin/readelf")===readelfPath && digest((await bytes(readelfPath,leafLimit,true)).raw)===toolIdentity.sha256,"diagnostic readelf changed");
-  const publicTarget=({member,hops,endpoint})=>({member,hops,endpoint});
+  const publicTarget=({member,hops,ancestors,endpoint})=>({member,hops,ancestors,endpoint});
   const record={kind:"retained-python-external-source-diagnostic",qualification:false,version:source.version,multiarch:source.build.MULTIARCH,targets:[publicTarget(library),publicTarget(site)],siteSource,readelf:toolIdentity,elfs,packages};
   const raw=JSON.stringify(record);
   require(Buffer.byteLength(raw)<=600000,"diagnostic aggregate bound");

@@ -1,3 +1,4 @@
+import { directoryInitializationFromTicket } from "./directory-initialization.js";
 import {
   ManagedPluginPolicySchema,
   managedPluginExecutionProfile,
@@ -2447,4 +2448,61 @@ it("propagates exact helper expectations but refuses before the ordinary compile
     plugins: { "managed-runtime": { authorizations: [{ ...authorization, passiveProfile }] } },
   };
   expect(ManagedPluginPolicySchema.safeParse(ambiguous).success).toBe(false);
+});
+
+it("propagates exact protected F4 ticket DATA without authorizing child launch or changing the manager HOLD", async () => {
+  const fixture = await managedRuntimeFixture(
+    "throw new Error('must never evaluate'); export default () => () => {};",
+  );
+  const document = JSON.parse(await readFile(fixture.file, "utf8"));
+  const profile = {
+    version: 1,
+    contract: "ade-directory-helpers-v1",
+    initialization: "registration-only",
+    qualificationSha256: "a".repeat(64),
+    runtimeClosureSha256: "b".repeat(64),
+    helperClosureSha256: "c".repeat(64),
+    moduleTableSha256: "d".repeat(64),
+    recipeSha256: "e".repeat(64),
+  };
+  document.plugins["managed-runtime"].authorizations[0].directoryHelperProfile = profile;
+  await writeFile(fixture.file, JSON.stringify(document));
+  const policy = new ManagedPluginActivationPolicy(
+    fixture.file,
+    path.join(fixture.home, "journal"),
+  );
+  const ticket = await policy.authorize("managed-runtime", fixture.directory);
+  if (!ticket) throw new Error("Missing actual enrolled ticket");
+  const hold = {
+    generation: 42,
+    transactionId: "native-reservation",
+    instanceId: "original-child",
+  };
+  const data = directoryInitializationFromTicket(ticket, hold);
+  expect(data).toEqual({
+    contract: "ade-directory-helpers-v1",
+    activationGeneration: ticket.generation,
+    operation: ticket.authorization.operation,
+    profile,
+    snapshotRoot: ticket.authorization.snapshotRoot,
+    snapshotSha256: ticket.authorization.snapshotSha256,
+    hold,
+  });
+  expect(ticket.generation).toBe(1);
+  expect(ticket.authorization.expectedGeneration).toBe(0);
+  expect(data?.activationGeneration).toBe(1);
+  expect(data?.hold?.generation).toBe(42);
+  expect(data?.profile).not.toBe(ticket.authorization.directoryHelperProfile);
+  expect(data?.hold).not.toBe(hold);
+  const spawn = vi.fn(() => {
+    throw new Error("must not spawn an ordinary or owned child");
+  });
+  const runtime = createTestRuntime({ activationPolicy: policy, spawnChild: spawn });
+  await expect(
+    runtime.startPlugin("managed-runtime", fixture.directory, () => true),
+  ).rejects.toThrow("producer unavailable");
+  expect(spawn).not.toHaveBeenCalled();
+  expect(runtime.getLoadedReceipt("managed-runtime")).toBeUndefined();
+  expect((await policy.status("managed-runtime")).generation).toBe(0);
+  expect(directoryInitializationFromTicket(undefined)).toBeUndefined();
 });

@@ -455,8 +455,13 @@ export function createPluginWorker(
       throw new Error("Plugin initialization already started");
     }
     initializationStarted = true;
-    const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
     hostInstanceId = message.hostInstanceId ?? "legacy-unbound";
+    if (message.directoryInitialization) {
+      // A strict expectation is not a child-local producer/realm/backend qualification.
+      activity.markUnknown();
+      throw new Error("Qualified ADE directory helper initialization producer unavailable");
+    }
+    const sourceDirectory = await validateSourceDirectory(message.pluginDirectory);
     initializedPluginId = message.pluginId;
     qualifiedPassive = message.passiveInitialization?.contract === "native-passive-contract-1";
     if (qualifiedPassive) activity.qualifyPassive();

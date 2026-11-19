@@ -106,7 +106,12 @@ original initialization activity. Only that loader receives the immutable origin
 snapshot and original worker/activity references; those identify the invocation and grant no
 execution permission. Contributions still register synchronously and return cleanup immediately.
 Selected directory helper initialization remains unavailable until its genuine producer realm,
-module table and backend are integrated; loader API presence does not enable it. The build defines
+module table and backend are integrated; loader API presence does not enable it. Its separate strict
+`directoryInitialization` DATA carries the activation ordinal, operation, exact protected profile,
+snapshot root/tree digest and optional existing hold tuple. It cannot accompany `passiveInitialization`;
+its ordinal is independent of the native reservation generation. The worker currently refuses even
+valid expectations before invoking a loader. No caller flag or parsed DATA supplies missing execution
+proof. The build defines
 `__PASEO_QUALIFIED_PLUGIN_ENTRY__` to suppress legacy direct-entry auto-wiring;
 this literal supplies no execution authority. The internal SDK's one-shot
 `installQualifiedHelperAdmission` hook receives the current private activity root

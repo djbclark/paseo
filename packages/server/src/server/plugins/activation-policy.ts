@@ -1,3 +1,18 @@
+import {
+  PassivePluginProfileSchema,
+  DirectoryHelperPluginProfileSchema,
+  type PassivePluginProfile,
+  type ManagedPluginExecutionProfile,
+} from "./execution-profile.js";
+export {
+  PassivePluginProfileSchema,
+  DirectoryHelperPluginProfileSchema,
+} from "./execution-profile.js";
+export type {
+  PassivePluginProfile,
+  DirectoryHelperPluginProfile,
+  ManagedPluginExecutionProfile,
+} from "./execution-profile.js";
 import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner } from "../execution/daemon-types.js";
 import { readFixedManagedPluginPolicy } from "../execution/managed-policy-environment.js";
@@ -14,31 +29,6 @@ import path from "node:path";
 import { z } from "zod";
 
 const Digest = z.string().regex(/^[a-f0-9]{64}$/);
-export const PassivePluginProfileSchema = z
-  .object({
-    version: z.literal(1),
-    contract: z.literal("native-passive-contract-1"),
-    qualificationSha256: Digest,
-    runtimeClosureSha256: Digest,
-    helperClosureSha256: Digest,
-    initialization: z.literal("registration-only"),
-  })
-  .strict();
-export type PassivePluginProfile = z.infer<typeof PassivePluginProfileSchema>;
-export const DirectoryHelperPluginProfileSchema = z
-  .object({
-    version: z.literal(1),
-    contract: z.literal("ade-directory-helpers-v1"),
-    qualificationSha256: Digest,
-    runtimeClosureSha256: Digest,
-    helperClosureSha256: Digest,
-    moduleTableSha256: Digest,
-    recipeSha256: Digest,
-    initialization: z.literal("registration-only"),
-  })
-  .strict();
-export type DirectoryHelperPluginProfile = z.infer<typeof DirectoryHelperPluginProfileSchema>;
-export type ManagedPluginExecutionProfile = PassivePluginProfile | DirectoryHelperPluginProfile;
 
 const Authorization = z
   .object({

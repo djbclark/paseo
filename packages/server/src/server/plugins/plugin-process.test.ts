@@ -1,4 +1,8 @@
 import {
+  PluginDirectoryInitializationSchema,
+  PluginProcessRequestSchema,
+} from "./plugin-process-protocol.js";
+import {
   attachPluginWorkerChannel,
   type PluginContributionLoader,
   type PluginWorkerInitializationContext,
@@ -852,4 +856,136 @@ it("keeps actual shutdown waiting for a pending host loader without evaluating i
   await stop;
   expect(contributed).toBe(false);
   expect(host.events.some((message) => message.type === "ready")).toBe(false);
+});
+
+function directoryInitializationData() {
+  return {
+    contract: "ade-directory-helpers-v1" as const,
+    activationGeneration: 7,
+    operation: "recover" as const,
+    profile: {
+      version: 1 as const,
+      contract: "ade-directory-helpers-v1" as const,
+      qualificationSha256: "a".repeat(64),
+      runtimeClosureSha256: "b".repeat(64),
+      helperClosureSha256: "c".repeat(64),
+      moduleTableSha256: "d".repeat(64),
+      recipeSha256: "e".repeat(64),
+      initialization: "registration-only" as const,
+    },
+    snapshotRoot: "/immutable/snapshot",
+    snapshotSha256: "f".repeat(64),
+    hold: { generation: 42, transactionId: "native-reservation", instanceId: "actual-child" },
+  };
+}
+
+it.each([true, false, undefined])(
+  "valid F4 DATA cannot invoke a loader or grant support with managedSource=%s",
+  async (managedSource) => {
+    let loads = 0;
+    const host = await hostLoaderFixture(() => {
+      loads++;
+      return () => () => {};
+    });
+    const message = {
+      ...host.initialize,
+      passiveInitialization: undefined,
+      directoryInitialization: directoryInitializationData(),
+      managedSource,
+    };
+    host.dispatch(message);
+    expect(await host.fatal).toContain(
+      "Qualified ADE directory helper initialization producer unavailable",
+    );
+    expect(loads).toBe(0);
+    expect(
+      host.events.some(
+        (event) => event.type === "ready" || event.type === "initialization.rejected",
+      ),
+    ).toBe(false);
+    expect(host.worker.activityOwner.state()).toBe("unknown");
+  },
+);
+
+it("parses only strict F4 DATA, keeping activation ordinal distinct from the existing native hold", () => {
+  const original = directoryInitializationData();
+  const parsed = PluginDirectoryInitializationSchema.parse(original);
+  expect(parsed.activationGeneration).toBe(7);
+  expect(parsed.hold?.generation).toBe(42);
+  expect(parsed).not.toBe(original);
+  expect(parsed.profile).not.toBe(original.profile);
+  expect(parsed.hold).not.toBe(original.hold);
+  original.profile.recipeSha256 = "0".repeat(64);
+  original.hold.generation = 999;
+  expect(parsed.profile.recipeSha256).toBe("e".repeat(64));
+  expect(parsed.hold?.generation).toBe(42);
+  expect(
+    PluginDirectoryInitializationSchema.parse({ ...directoryInitializationData(), hold: undefined })
+      .hold,
+  ).toBeUndefined();
+});
+
+it.each([
+  { name: "unknown contract", patch: { contract: "other" } },
+  { name: "negative ordinal", patch: { activationGeneration: -1 } },
+  { name: "fraction ordinal", patch: { activationGeneration: 1.5 } },
+  { name: "unsafe ordinal", patch: { activationGeneration: Number.MAX_SAFE_INTEGER + 1 } },
+  { name: "unsupported operation", patch: { operation: "verify" } },
+  { name: "empty snapshot", patch: { snapshotRoot: "" } },
+  { name: "NUL snapshot", patch: { snapshotRoot: "snapshot\0path" } },
+  { name: "bad tree digest", patch: { snapshotSha256: "F".repeat(64) } },
+  { name: "bearer field", patch: { ownerToken: "must-never-cross-ipc" } },
+  { name: "incomplete hold", patch: { hold: { generation: 42, transactionId: "native" } } },
+  {
+    name: "hold bearer",
+    patch: { hold: { ...directoryInitializationData().hold, ownerToken: "not-allowed" } },
+  },
+  {
+    name: "wrong profile",
+    patch: {
+      profile: { ...directoryInitializationData().profile, contract: "native-passive-contract-1" },
+    },
+  },
+  {
+    name: "profile unknown field",
+    patch: { profile: { ...directoryInitializationData().profile, allowed: true } },
+  },
+  {
+    name: "profile bad digest",
+    patch: { profile: { ...directoryInitializationData().profile, moduleTableSha256: "bad" } },
+  },
+])("refuses malformed F4 $name without treating syntax as permission", ({ patch }) => {
+  expect(
+    PluginDirectoryInitializationSchema.safeParse({ ...directoryInitializationData(), ...patch })
+      .success,
+  ).toBe(false);
+});
+
+it("refuses mutually selected initialization profiles and preserves ordinary/passive request shapes", () => {
+  const initialize = {
+    type: "initialize",
+    pluginId: "ordinary",
+    pluginDirectory: "/canonical",
+    hostInstanceId: "original",
+    bundle: "original-bytes",
+    appVersion: "0.4.0",
+  };
+  expect(PluginProcessRequestSchema.safeParse(initialize).success).toBe(true);
+  const passive = { contract: "native-passive-contract-1" };
+  expect(
+    PluginProcessRequestSchema.safeParse({ ...initialize, passiveInitialization: passive }).success,
+  ).toBe(true);
+  expect(
+    PluginProcessRequestSchema.safeParse({
+      ...initialize,
+      directoryInitialization: directoryInitializationData(),
+    }).success,
+  ).toBe(true);
+  expect(
+    PluginProcessRequestSchema.safeParse({
+      ...initialize,
+      passiveInitialization: passive,
+      directoryInitialization: directoryInitializationData(),
+    }).success,
+  ).toBe(false);
 });

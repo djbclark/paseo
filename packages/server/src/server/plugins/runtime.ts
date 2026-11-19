@@ -1,3 +1,4 @@
+import { directoryInitializationFromTicket } from "./directory-initialization.js";
 import {
   assertQualifiedPluginInitialization,
   type QualifiedPluginInitialization,
@@ -2034,20 +2035,30 @@ export class PluginRuntime {
             fail(new Error(`Plugin ${pluginId} exited before initialize`));
             return;
           }
+          const directoryInitialization = directoryInitializationFromTicket(
+            input.activationTicket,
+            input.initializationBarrier
+              ? { ...input.initializationBarrier, instanceId }
+              : undefined,
+          );
+          const initializationProfiles: Pick<
+            Extract<PluginProcessRequest, { type: "initialize" }>,
+            "directoryInitialization" | "passiveInitialization"
+          > = {};
+          if (directoryInitialization)
+            initializationProfiles.directoryInitialization = directoryInitialization;
+          else if ((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier)
+            initializationProfiles.passiveInitialization = {
+              contract: "native-passive-contract-1",
+              hold: { ...input.initializationBarrier, instanceId },
+            };
           void send(child, {
             type: "initialize",
             pluginId,
             pluginDirectory: input.pluginDirectory,
             managedSource: input.managedSource === true,
             hostInstanceId: instanceId,
-            ...((input.qualifiedChild || input.builtinInstance) && input.initializationBarrier
-              ? {
-                  passiveInitialization: {
-                    contract: "native-passive-contract-1" as const,
-                    hold: { ...input.initializationBarrier, instanceId },
-                  },
-                }
-              : {}),
+            ...initializationProfiles,
             appVersion: this.daemonVersion,
             bundle,
             settingsDirectory: this.dependencies.settingsDirectory

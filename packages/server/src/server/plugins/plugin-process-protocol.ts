@@ -1,3 +1,4 @@
+import { DirectoryHelperPluginProfileSchema } from "./execution-profile.js";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { UsageScopeSchema, type UsageScope } from "@getpaseo/plugin/server/usage";
@@ -42,6 +43,23 @@ const maintenanceIdentityFields = {
   transactionId: z.string().min(1),
   instanceId: z.string().min(1),
 };
+/** Protected expectations transported as DATA only, never an execution capability. */
+export const PluginDirectoryInitializationSchema = z
+  .object({
+    contract: z.literal("ade-directory-helpers-v1"),
+    activationGeneration: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    operation: z.enum(["activate", "recover"]),
+    profile: DirectoryHelperPluginProfileSchema,
+    snapshotRoot: z
+      .string()
+      .min(1)
+      .refine((root) => !root.includes("\0"), "Snapshot root must not contain NUL"),
+    snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    hold: z.object(maintenanceIdentityFields).strict().optional(),
+  })
+  .strict();
+export type PluginDirectoryInitialization = z.infer<typeof PluginDirectoryInitializationSchema>;
+
 export type PluginProcessRequest =
   | ({ type: "initialization.retire"; requestId: string } & PluginMaintenanceIdentity)
   | ({
@@ -69,6 +87,7 @@ export type PluginProcessRequest =
         contract: "native-passive-contract-1";
         hold?: PluginMaintenanceIdentity;
       };
+      directoryInitialization?: PluginDirectoryInitialization;
       settingsDirectory?: string;
     }
   | {
@@ -249,9 +268,14 @@ export const PluginProcessRequestSchema: z.ZodType<PluginProcessRequest> = z.dis
           })
           .strict()
           .optional(),
+        directoryInitialization: PluginDirectoryInitializationSchema.optional(),
         settingsDirectory: z.string().optional(),
       })
-      .strict(),
+      .strict()
+      .refine(
+        (message) => !(message.passiveInitialization && message.directoryInitialization),
+        "Plugin initialization profiles are mutually exclusive",
+      ),
     z
       .object({
         type: z.literal("provider.catalog_key"),

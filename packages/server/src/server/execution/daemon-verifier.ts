@@ -1,3 +1,4 @@
+import { assertDaemonHelperInventory } from "./daemon-helper-inventory.js";
 import { verifySystemClosure, verifySystemMappings } from "./system-closure.js";
 import { readBuiltinProfiles } from "./builtin-profile.js";
 import { canonicalBuiltinJson } from "./builtin-format.js";
@@ -291,31 +292,7 @@ export async function verifyEnclosingDistribution(root: string) {
     if (!path.isAbsolute(file.path)) return unsupported();
     await verifyFile(root, file);
   }
-  const helperInventory = [
-    ...manifest.files.filter(
-      (file) =>
-        file.path.startsWith("system-closure/") ||
-        file.path.startsWith("native-provenance/") ||
-        file.path.startsWith("runtime/") ||
-        /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
-        file.path.endsWith(".node") ||
-        /\.so(?:\.[0-9]+)*$/.test(file.path) ||
-        file.path.endsWith("spawn-helper") ||
-        file.path.startsWith("node_modules/esbuild/") ||
-        file.path === "node_modules/typescript/lib/typescript.js",
-    ),
-    ...manifest.externalLibraries,
-  ].sort((a, b) => {
-    if (a.path < b.path) return -1;
-    if (a.path > b.path) return 1;
-    return 0;
-  });
-  const helperClosureSha256 = digest(JSON.stringify(helperInventory));
-  if (
-    manifest.helperClosureSha256 !== helperClosureSha256 ||
-    JSON.stringify(manifest.helperInventory) !== JSON.stringify(helperInventory)
-  )
-    return unsupported();
+  const helperClosureSha256 = assertDaemonHelperInventory(manifest);
   await verifySystemClosure(root, manifest);
   await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });
   return {

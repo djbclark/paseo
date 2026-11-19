@@ -270,6 +270,90 @@ test(
   },
 );
 test(
+  "runtime helper inventory matches finalized closure and rejects changed declarations",
+  { skip: !enabled },
+  async () => {
+    const root = process.env.QUALIFIED_DAEMON_ROOT;
+    assert.ok(root && path.isAbsolute(root));
+    const { pathToFileURL } = await import("node:url");
+    const { assertDaemonHelperInventory } = await import(
+      pathToFileURL(path.join(root, "daemon-launcher.mjs")).href
+    );
+    const { daemonHelperInventory } =
+      await import("../dist/server/server/execution/daemon-helper-inventory.js");
+    const manifest = JSON.parse(await readFile(`${root}.manifest.json`, "utf8"));
+    const bridges = [
+      "bridge-assets/identity.json",
+      "bridge-assets/v1.metafile.json",
+      "bridge-assets/v2.metafile.json",
+      "bridge-plugin.bundle.mjs",
+      "v2/bridge-plugin.bundle.mjs",
+      "v2/state.mjs",
+    ];
+    function baseline() {
+      assert.equal(assertDaemonHelperInventory(manifest), manifest.helperClosureSha256);
+      return structuredClone(manifest);
+    }
+    baseline();
+    for (const name of bridges) {
+      const file = manifest.files.find((row) => row.path === name);
+      assert.ok(file, `Missing actual bridge file ${name}`);
+      assert.deepEqual(
+        manifest.helperInventory.find((row) => row.path === name),
+        file,
+        `Missing fixed bridge helper ${name}`,
+      );
+    }
+    const mutations = [
+      (value) => {
+        value.helperInventory = value.helperInventory.filter((row) => !bridges.includes(row.path));
+      },
+      (value) => {
+        value.helperInventory.find((row) => row.path === bridges[0]).sha256 = "0".repeat(64);
+      },
+      (value) => {
+        value.helperInventory.reverse();
+      },
+      (value) => {
+        value.helperInventory.push({ ...value.helperInventory[0], path: "unknown-helper" });
+      },
+      (value) => {
+        value.helperInventory.push({ ...value.helperInventory[0] });
+      },
+    ];
+    for (const mutate of mutations) {
+      const value = baseline();
+      mutate(value);
+      // Keep the valid canonical digest: ONLY the exact-array guard can reject.
+      assert.equal(value.helperClosureSha256, manifest.helperClosureSha256);
+      assert.throws(() => assertDaemonHelperInventory(value));
+      // Self-consistent changed declarations must not authorize their own rows.
+      value.helperClosureSha256 = createHash("sha256")
+        .update(JSON.stringify(value.helperInventory))
+        .digest("hex");
+      assert.throws(() => assertDaemonHelperInventory(value));
+    }
+    const badDigest = baseline();
+    badDigest.helperClosureSha256 = "0".repeat(64);
+    assert.deepEqual(badDigest.helperInventory, manifest.helperInventory);
+    assert.throws(
+      () => assertDaemonHelperInventory(badDigest),
+      "Valid rows with wrong digest must fail the digest guard alone",
+    );
+    const unrelated = {
+      path: "bridge-assets/unrecognized.json",
+      mode: 292,
+      size: 0,
+      sha256: "0".repeat(64),
+    };
+    assert.deepEqual(
+      daemonHelperInventory({ files: [unrelated], externalLibraries: [] }),
+      [],
+      "No arbitrary bridge prefix expansion",
+    );
+  },
+);
+test(
   "retained OpenCode bridge uses original built bytes at flattened loader paths",
   { skip: !enabled },
   async () => {

@@ -54,10 +54,10 @@ jobs:
         run: node packages/server/scripts/finalize-qualified-daemon.mjs "$RUNNER_TEMP/qualified-daemon" "$(command -v node)" "$(printf '%s' finite-ci-recipe-v2 | sha256sum | cut -d' ' -f1)"
       - name: Finalize separately inventoried owner composition fixture
         run: node packages/server/scripts/finalize-qualified-daemon.mjs "$RUNNER_TEMP/qualified-owner-fixture" "$(command -v node)" "$(printf '%s' owner-sdk-composition-only-v1 | sha256sum | cut -d' ' -f1)"
-      - name: Original OpenCode bridge assets at actual flattened loader paths (no daemon launch)
+      - name: Bridge assets and owner config fixture source checks (no daemon launch)
         env:
           QUALIFIED_DAEMON_ROOT: ${{ runner.temp }}/qualified-daemon
-        run: node --test --test-name-pattern='retained OpenCode bridge' packages/server/scripts/qualified-daemon.test.mjs
+        run: node --test --test-name-pattern='retained OpenCode bridge|owner input fixture' packages/server/scripts/qualified-daemon.test.mjs
       - name: Actual finite Git gate and control-loss source checks (no profile grant)
         if: always() && steps.build_workspace.outcome == 'success'
         run: node --test packages/server/scripts/qualified-git.test.mjs

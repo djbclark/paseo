@@ -23,6 +23,39 @@ test(
     const root = process.env.QUALIFIED_DAEMON_ROOT;
     const manifest = JSON.parse(await readFile(`${root}.manifest.json`, "utf8"));
     const inputs = JSON.parse(await readFile(path.join(root, "inputs.json"), "utf8"));
+    const repository = path.resolve(import.meta.dirname, "../../..");
+    const { phaseSingletonPlugin } = await import("./build-qualified-daemon.mjs");
+    let resolvePhase;
+    phaseSingletonPlugin.setup({
+      onResolve: (_filter, callback) => {
+        resolvePhase = callback;
+      },
+    });
+    assert.equal(typeof resolvePhase, "function");
+    const resolveArgs = (relative) => ({
+      resolveDir: path.dirname(path.join(repository, relative)),
+      path: "./startup-phase.js",
+      kind: "import-statement",
+      namespace: "file",
+    });
+    for (const location of [
+      "packages/server/src/server/execution/startup-phase.js",
+      "packages/server/dist/server/server/execution/startup-phase.js",
+    ]) {
+      assert.deepEqual(resolvePhase(resolveArgs(location)), {
+        path: "./startup-phase.mjs",
+        external: true,
+      });
+    }
+    const originalArgs = resolveArgs("packages/server/src/server/execution/startup-phase.js");
+    for (const rejected of [
+      resolveArgs("packages/server/dist/other/execution/startup-phase.js"),
+      resolveArgs("packages/server/src/other/execution/startup-phase.js"),
+      { ...originalArgs, kind: "require-call" },
+      { ...originalArgs, kind: "dynamic-import" },
+      { ...originalArgs, namespace: "unreviewed" },
+    ])
+      assert.throws(() => resolvePhase(rejected));
     const { assertDaemonHelperInventory } =
       await import("../dist/server/server/execution/daemon-helper-inventory.js");
     const member = manifest.files.filter((row) => row.path === "startup-phase.mjs");
@@ -40,6 +73,16 @@ test(
       ).length,
       1,
     );
+    for (const name of [
+      "packages/server/src/server/execution/startup-phase.ts",
+      "packages/server/dist/server/server/execution/startup-phase.js",
+    ]) {
+      const measured = inputs.sourceInputs.filter((row) => row.path === name);
+      assert.equal(measured.length, 1);
+      const raw = await readFile(path.join(repository, name));
+      assert.equal(measured[0].bytes, raw.length);
+      assert.equal(measured[0].sha256, createHash("sha256").update(raw).digest("hex"));
+    }
     assert.ok(
       inputs.metafiles["startup-phase.mjs"].inputs[
         "packages/server/src/server/execution/startup-phase.ts"
@@ -60,7 +103,7 @@ test(
         ),
       );
       assert.equal(
-        Object.keys(meta.inputs).some((name) => name.endsWith("/execution/startup-phase.ts")),
+        Object.keys(meta.inputs).some((name) => /\/execution\/startup-phase\.[jt]s$/.test(name)),
         false,
       );
     }

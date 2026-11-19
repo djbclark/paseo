@@ -5,6 +5,7 @@ import type {
 } from "../../maintenance-operation.js";
 import {
   qualifiedMaintenanceParticipant,
+  isParticipantQualificationFailure,
   qualifiedDaemonExecutionAccess,
   type PluginMaintenancePort,
   type QualifiedDaemonOwner,
@@ -1350,6 +1351,57 @@ describe("native maintenance participant serialization", () => {
     reservation.bindTransport("mechanism-only-server", mechanismAuthority(refresh));
     reservation.setReady(true);
   }
+  async function composedEndFixture(mode: "pre" | "post" | "persistent" | "overlap" | "raw") {
+    const state: { phase: "normal" | "pre" | "post" | "final"; lost: boolean; pending: boolean; finalSucceeded: boolean } = {
+      phase: "normal", lost: false, pending: false, finalSucceeded: false,
+    };
+    let finish!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const rawFailure = new Error("ordinary raw END response lost");
+    const rawEnd = vi.fn(async () => {
+      state.phase = "post";
+      if (mode === "raw") throw rawFailure;
+    });
+    const refresh = vi.fn(async () => {
+      if (mode === "persistent" && state.lost) throw new Error("persistent proof loss");
+      if ((mode === "pre" && state.phase === "pre") ||
+          ((mode === "post" || mode === "persistent") && state.phase === "post")) {
+        if (!state.lost) {
+          state.lost = true;
+          throw new Error("one-shot qualification loss");
+        }
+      }
+      if (mode === "overlap" && state.phase === "post") state.pending = true;
+      if (state.phase === "final") {
+        if (mode === "overlap") {
+          entered();
+          await gate;
+          state.pending = false;
+        }
+        state.finalSucceeded = true;
+      }
+    });
+    const authority = mechanismAuthority(refresh);
+    authority.assertQualified = () => {
+      if (state.pending) throw new Error("overlapping qualification refresh pending");
+    };
+    const wrapped = qualifiedMaintenanceParticipant(
+      { supportsV1: () => true, begin: async () => "held", end: rawEnd }, authority,
+    );
+    const originalEnd = wrapped.end;
+    wrapped.end = async (identity) => {
+      state.phase = "pre";
+      try { await originalEnd(identity); } finally { state.phase = "final"; }
+    };
+    const f = await fixture(wrapped);
+    f.reservation.setReady(false);
+    f.reservation.bindTransport("composed-mechanism-only", authority);
+    f.reservation.setReady(true);
+    return { ...f, state, rawFailure, rawEnd, refresh, finish, entering,
+      path: maintenanceJoin(f.home, "maintenance-reservation.json") };
+  }
   test("preflight typed busy acquires no barrier or counter and cannot classify stale or unsupported", async () => {
     let supported = true;
     const begin = vi.fn<PluginMaintenancePort["begin"]>(async () => "held");
@@ -1953,7 +2005,7 @@ describe("native maintenance participant serialization", () => {
       mechanismAuthority(refresh),
     );
     await expect(wrapped.begin({ generation: 1, transactionId: "lost-refresh" })).rejects.toThrow(
-      "authority lost",
+      "qualification failed",
     );
   });
   test.each([1, 2])(
@@ -2024,6 +2076,86 @@ describe("native maintenance participant serialization", () => {
       }
     },
   );
+  test.each(["pre", "post"] as const)(
+    "composed wrapper %s-END one-shot proof loss stays durable after successful final refresh",
+    async (phase) => {
+      const f = await composedEndFixture(phase);
+      try {
+        const held = await f.reservation.begin(1, "composed-one-shot");
+        const error: unknown = await f.reservation.end(1, held.ownerToken).catch((failure: unknown) => failure);
+        expect(isParticipantQualificationFailure(error)).toBe(true);
+        expect(isParticipantQualificationFailure(JSON.parse(JSON.stringify(error)))).toBe(false);
+        expect(isParticipantQualificationFailure(new Error("Maintenance participant qualification failed"))).toBe(false);
+        expect(f.state.finalSucceeded).toBe(true);
+        expect(f.rawEnd).toHaveBeenCalledTimes(phase === "pre" ? 0 : 1);
+        expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({
+          generation: 1, transactionId: "composed-one-shot", tokenDigest: null, uncertain: true,
+        });
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+      } finally {
+        f.finish();
+        await f.reservation.flushStorage();
+        f.close();
+      }
+    },
+  );
+  test("composed ordinary raw END failure keeps authorized idle restart and is not privately tagged", async () => {
+    const f = await composedEndFixture("raw");
+    try {
+      const held = await f.reservation.begin(1, "composed-ordinary");
+      const error: unknown = await f.reservation.end(1, held.ownerToken).catch((failure: unknown) => failure);
+      expect(error).toBe(f.rawFailure);
+      expect(isParticipantQualificationFailure(error)).toBe(false);
+      expect(f.state.finalSucceeded).toBe(true);
+      expect(f.rawEnd).toHaveBeenCalledTimes(1);
+      const record = JSON.parse(readMaintenanceFile(f.path, "utf8"));
+      expect(record.tokenDigest).toBeNull();
+      expect(record.uncertain).toBeUndefined();
+      expect(f.reservation.status().state).toBe("recovery-required");
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("idle");
+    } finally {
+      f.finish();
+      await f.reservation.flushStorage();
+      f.close();
+    }
+  });
+  test("composed persistent post-END proof loss remains held without retrying raw END", async () => {
+    const f = await composedEndFixture("persistent");
+    try {
+      const held = await f.reservation.begin(1, "composed-persistent");
+      await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("persistent proof loss");
+      expect(f.rawEnd).toHaveBeenCalledTimes(1);
+      expect(f.state.finalSucceeded).toBe(false);
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({ tokenDigest: null, uncertain: true });
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+    } finally {
+      f.finish();
+      await f.reservation.flushStorage();
+      f.close();
+    }
+  });
+  test("composed overlapping-refresh assertion cannot disappear when the pending refresh settles", async () => {
+    const f = await composedEndFixture("overlap");
+    try {
+      const held = await f.reservation.begin(1, "composed-overlap");
+      const pending = f.reservation.end(1, held.ownerToken);
+      await f.entering;
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8")).tokenDigest).toBeNull();
+      expect(f.state.pending).toBe(true);
+      f.finish();
+      const error: unknown = await pending.catch((failure: unknown) => failure);
+      expect(isParticipantQualificationFailure(error)).toBe(true);
+      expect(f.state.pending).toBe(false);
+      expect(f.state.finalSucceeded).toBe(true);
+      expect(f.rawEnd).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(readMaintenanceFile(f.path, "utf8"))).toMatchObject({ tokenDigest: null, uncertain: true });
+      expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe("recovery-required");
+    } finally {
+      f.finish();
+      await f.reservation.flushStorage();
+      f.close();
+    }
+  });
   test("held operation final refresh retains its original lease and rejects interleaved cleanup", async () => {
     const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
     const refresh = vi.fn(async () => {});

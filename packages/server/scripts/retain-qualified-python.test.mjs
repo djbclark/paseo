@@ -28,9 +28,11 @@ import {
 const execute = promisify(execFile);
 const sha = (raw) => createHash("sha256").update(raw).digest("hex");
 const limits = { zip: 128 * 1024 * 1024, tar: 512 * 1024 * 1024, members: 10000 };
+let fdFixtureLaunches = 0;
 async function runFdFixture(root, descriptor, caseName) {
   const fixture = path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec");
   return await new Promise((resolve, reject) => {
+    fdFixtureLaunches++;
     const child = spawn(fixture, [root], {
       env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C", HOME: os.userInfo().homedir },
       stdio: ["ignore", "pipe", "pipe", "ignore", "ignore", descriptor ?? "ignore"],
@@ -108,18 +110,32 @@ function compareFdProbe(observation, record, root) {
     record.observed.relocated.nativeMapFiles,
   );
 }
-async function fdExecEvidence(root, retained, record) {
-  const python = path.join(root, "python/bin/python3");
+const noPrimaryError = Symbol("no primary interpreter error");
+async function closeInterpreter(handle, primary = noPrimaryError) {
+  try {
+    await handle.close();
+  } catch (closeError) {
+    if (primary !== noPrimaryError)
+      throw new AggregateError([primary, closeError], "Interpreter operation and close failed");
+    throw closeError;
+  }
+}
+async function withOpenedInterpreter(python, operation) {
   const handle = await open(
     python,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
-  const evidence = {
-    kind: "retained-python-fd-exec-CI-DATA",
-    qualification: false,
-    productionAuthority: false,
-    controls: [],
-  };
+  let primary = noPrimaryError;
+  try {
+    return await operation(handle);
+  } catch (error) {
+    primary = error;
+    throw error;
+  } finally {
+    await closeInterpreter(handle, primary);
+  }
+}
+async function prepareFixtureEvidence(evidence) {
   for (const [role, file] of [
     ["source", path.resolve("packages/server/scripts/qualified-python-fd-exec.c")],
     ["compiled", path.join(process.env.RUNNER_TEMP, "qualified-python-fd-exec")],
@@ -144,7 +160,17 @@ async function fdExecEvidence(root, retained, record) {
     }) + "\n",
     { flag: "wx", mode: 0o444 },
   );
-  try {
+}
+async function fdExecEvidence(root, retained, record) {
+  const python = path.join(root, "python/bin/python3");
+  const evidence = {
+    kind: "retained-python-fd-exec-CI-DATA",
+    qualification: false,
+    productionAuthority: false,
+    controls: [],
+  };
+  await withOpenedInterpreter(python, async (handle) => {
+    await prepareFixtureEvidence(evidence);
     const original = await handle.stat({ bigint: true });
     const identity = retained.files.find((row) => row.path === "python/bin/python3");
     assert.equal(original.nlink, 1n);
@@ -177,9 +203,7 @@ async function fdExecEvidence(root, retained, record) {
     const after = await handle.stat({ bigint: true });
     for (const key of ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"])
       assert.equal(after[key], original[key]);
-  } finally {
-    await handle.close();
-  }
+  });
   const wrong = path.join(path.dirname(root), "wrong-python-image");
   await writeFile(wrong, "not an ELF or shebang image\n", { flag: "wx", mode: 0o555 });
   const bad = await open(wrong, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -628,6 +652,41 @@ test(
         await fdExecEvidence(root, retained, record);
       },
     );
+    await t.test("preparation EEXIST closes original interpreter without launch", async () => {
+      let opened;
+      const before = fdFixtureLaunches;
+      await assert.rejects(
+        withOpenedInterpreter(path.join(root, "python/bin/python3"), async (handle) => {
+          opened = handle;
+          await prepareFixtureEvidence({});
+          await runFdFixture(root, handle.fd, "unexpected-preparation-launch");
+        }),
+        { code: "EEXIST" },
+      );
+      assert.ok(opened);
+      assert.equal(opened.fd, -1);
+      await assert.rejects(opened.stat(), { code: "EBADF" });
+      assert.equal(fdFixtureLaunches, before);
+      await assertRetainedQualifiedPython(root, retained.record);
+    });
+    await t.test("cleanup preserves primary and close errors", async () => {
+      const primary = new Error("controlled preparation failure");
+      const closeError = new Error("controlled close failure");
+      await assert.rejects(
+        closeInterpreter(
+          {
+            close: async () => {
+              throw closeError;
+            },
+          },
+          primary,
+        ),
+        (error) =>
+          error instanceof AggregateError &&
+          error.errors[0] === primary &&
+          error.errors[1] === closeError,
+      );
+    });
     await t.test(
       "standalone actual TAR+ZIP budgets, not combined producer acceptance",
       async () => {

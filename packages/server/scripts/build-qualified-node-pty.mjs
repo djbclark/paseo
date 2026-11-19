@@ -439,7 +439,7 @@ async function makeReceipts(stage, commands) {
 }
 async function compilerWrapper(stage, runtime) {
   const wrapper = path.join(stage, "cxx.mjs");
-  const script = `#!${runtime}\nimport {spawnSync} from 'node:child_process';\nimport {writeFileSync} from 'node:fs';\nconst stage=${JSON.stringify(stage)};\nconst incoming=process.argv.slice(2);\nconst role=incoming.includes('-c')?'compile':'link';\nconst extra=role==='compile'?['-save-temps=obj','-dD','-MD','-MF',stage+'/pty.d','-v']:['-Wl,-Map,'+stage+'/pty.map','-Wl,--trace','-v'];\nconst base=[];
+  const script = `#!${runtime}\nimport {spawnSync} from 'node:child_process';\nimport {writeFileSync} from 'node:fs';\nconst stage=${JSON.stringify(stage)};\nconst incoming=process.argv.slice(2);\nconst role=incoming.includes('-c')?'compile':'link';\nconst extra=role==='compile'?['-save-temps=obj','-Xpreprocessor','-dD','-MD','-MF',stage+'/pty.d','-v']:['-Wl,-Map,'+stage+'/pty.map','-Wl,--trace','-v'];\nconst base=[];
 for(let index=0;index<incoming.length;index++){
   const flag=incoming[index];
   if(role==='compile'&&(flag==='-MD'||flag==='-MMD'))continue;

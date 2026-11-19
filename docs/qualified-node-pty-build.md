@@ -53,7 +53,11 @@ The strict version-one record includes selected source/header/GYP identities,
 measured tool identities and versions, actual wrapper/compiler argv, generated
 Make/configuration files, compiler `-MD` dependencies including system headers,
 linker map inputs, raw ELF reports, and actual output hashes. GCC save-temps
-output is retained when emitted by the actual compilation. The wrapper replaces
+output is retained when emitted by the actual compilation. `-Xpreprocessor -dD`
+routes the macro-definition inspection to the preprocessing pass that writes
+that same translation unit; the retained file must show NAPI version 8 and the
+exception configuration. It is not a later auxiliary preprocessing substitute.
+The wrapper replaces
 GYP's system-excluding `-MMD`/`-MF` dependency options with one `-MD` output;
 source and ABI flags stay intact. Relative depfile names resolve from the
 recorded compiler working directory, not the configure caller's directory.

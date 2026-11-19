@@ -100,3 +100,5 @@ jobs:
             ${{ runner.temp }}/nodepty/staging/nodepty-*/*.json
             ${{ runner.temp }}/nodepty/staging/nodepty-*/*.map
             ${{ runner.temp }}/nodepty/staging/nodepty-*/*.d
+            ${{ runner.temp }}/nodepty/staging/nodepty-*/**/*.ii
+            ${{ runner.temp }}/nodepty/staging/nodepty-*/node_modules/node-pty/build/Release/pty.node

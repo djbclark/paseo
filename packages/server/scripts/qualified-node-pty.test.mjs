@@ -71,11 +71,20 @@ test("builds the selected source offline and reports the actual new artifact", a
   assert.ok(apiHeader);
   assert.ok(compile.cwd.endsWith("/node_modules/node-pty/build"));
   assert.ok(compile.argv.includes("-save-temps=obj"));
+  const forwarded = compile.argv.indexOf("-Xpreprocessor");
+  assert.ok(forwarded >= 0);
+  assert.equal(compile.argv[forwarded + 1], "-dD");
   assert.ok(compile.argv.includes("-DNAPI_CPP_EXCEPTIONS"));
   assert.ok(record.dependencies.headers.some((row) => row.path.endsWith("/napi.h")));
   assert.ok(record.dependencies.headers.some((row) => row.path.startsWith("/usr/include/")));
   assert.ok(record.dependencies.linkInputs.length > 0);
   assert.notEqual(record.outputs.preprocessed, null);
+  const actualTranslationUnit = await readFile(
+    path.join(root, record.outputs.preprocessed.path),
+    "utf8",
+  );
+  assert.match(actualTranslationUnit, /^#define NAPI_VERSION 8$/m);
+  assert.match(actualTranslationUnit, /^#define NAPI_CPP_EXCEPTIONS/m);
   assert.equal(record.coverage.syscallTrace, false);
   assert.equal(record.coverage.hermetic, false);
   assert.equal(record.coverage.reproducibleOldPrebuild, false);

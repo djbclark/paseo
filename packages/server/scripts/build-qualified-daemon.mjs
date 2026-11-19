@@ -64,15 +64,20 @@ export const qualifiedOptionalNativePlugin = {
     }));
   },
 };
-const phaseSourceDirectory = path.join(packageRoot, "src/server/execution");
+// Workspace default exports reach fresh tsc output as well as direct TS imports.
+// Both exact spellings must use the one retained counter/writer module.
+const phaseSourceFiles = new Set([
+  path.join(packageRoot, "src/server/execution/startup-phase.js"),
+  path.join(packageRoot, "dist/server/server/execution/startup-phase.js"),
+]);
 export const phaseSingletonPlugin = {
   name: "qualified-fixed-startup-phase-singleton",
   setup(builder) {
     builder.onResolve({ filter: /startup-phase\.js$/ }, (args) => {
       if (
-        path.resolve(args.resolveDir, args.path) !==
-          path.join(phaseSourceDirectory, "startup-phase.js") ||
-        args.kind !== "import-statement"
+        !phaseSourceFiles.has(path.resolve(args.resolveDir, args.path)) ||
+        args.kind !== "import-statement" ||
+        args.namespace !== "file"
       )
         throw new Error("Unexpected startup diagnostic singleton source");
       return { path: "./startup-phase.mjs", external: true };
@@ -232,7 +237,10 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
     sourceInputs.push({ path: inputName(file), bytes: raw.length, sha256: digest(raw) });
   }
   const inputNames = [
-    ...new Set(Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs))),
+    ...new Set([
+      ...Object.values(allInputs).flatMap((meta) => Object.keys(meta.inputs)),
+      "packages/server/dist/server/server/execution/startup-phase.js",
+    ]),
   ].sort();
   for (const name of inputNames) {
     const raw = name.startsWith("qualified-disabled:")

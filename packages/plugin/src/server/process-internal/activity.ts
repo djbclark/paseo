@@ -32,6 +32,8 @@ export interface PluginHelperAdmissionRequest {
 export interface PluginBuiltinExecFileLaunch {
   /** Producer-private, once-only fixed launch; no supplied command, options or authority. */
   start(): ChildProcess;
+  /** Definite inner exec failure only; descriptive data, never lifecycle settlement. */
+  readExecFailure?(): Readonly<{ errno: number; syscall: "fork" | "execveat" | "execvp" }> | null;
 }
 export interface PluginHelperAdmissionPermit {
   readonly settled: Promise<void>;

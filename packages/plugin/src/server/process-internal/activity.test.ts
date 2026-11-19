@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execQualifiedBuiltinFile } from "./builtin-helper.js";
-import { execFile as nativeExecFile } from "node:child_process";
+import { execFile as nativeExecFile, spawn } from "node:child_process";
+import { collectBuiltinExecFile } from "./builtin-exec-collector.js";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -262,7 +263,8 @@ it("uncertain cleanup never becomes a successful retirement", async () => {
 });
 
 it("preserves actual Git execFile stdin, NUL output and exit-1 errors through a once-only private launch", async () => {
-  const script = `
+  // Preserve JS escapes for the child parser; argv itself must contain no NUL.
+  const script = String.raw`
     import assert from 'node:assert/strict';
     import {execFileSync,spawn} from 'node:child_process';
     import {mkdtemp,writeFile,rm} from 'node:fs/promises';
@@ -356,4 +358,72 @@ it("preserves the original command after postlaunch observation failure while ho
     },
   );
   expect(stdout).toBe("original-finished-still-unknown");
+});
+
+it("distinguishes definite inner exec errno from actual carrier exit 126 at close", async () => {
+  for (const errno of [null, 2, 11]) {
+    let closed = false;
+    let reads = 0;
+    let callbacks = 0;
+    const result = await new Promise<Error | null>((resolve) => {
+      collectBuiltinExecFile(
+        {
+          start() {
+            const carrier = spawn(process.execPath, ["-e", "process.exit(126)"], { stdio: "pipe" });
+            carrier.once("close", () => {
+              closed = true;
+            });
+            return carrier;
+          },
+          readExecFailure() {
+            expect(closed).toBe(true);
+            reads++;
+            return errno === null ? null : { errno, syscall: errno === 11 ? "fork" : "execveat" };
+          },
+        },
+        { kind: "execFile", command: "git", args: ["query"], options: {} },
+        (error) => {
+          callbacks++;
+          resolve(error);
+        },
+      );
+    });
+    expect(reads).toBe(1);
+    expect(callbacks).toBe(1);
+    expect(result).toMatchObject(
+      errno === null
+        ? { code: 126 }
+        : {
+            code: errno === 11 ? "EAGAIN" : "ENOENT",
+            errno: -errno,
+            syscall: "spawn git",
+            path: "git",
+            spawnargs: ["query"],
+          },
+    );
+  }
+});
+
+it("keeps actual carrier spawn errors distinct and invokes its callback once", async () => {
+  let reads = 0;
+  let callbacks = 0;
+  const result = await new Promise<Error | null>((resolve) => {
+    collectBuiltinExecFile(
+      {
+        start: () => spawn("/paseo-nonexistent-carrier/exec", [], { stdio: "pipe" }),
+        readExecFailure() {
+          reads++;
+          return { errno: 13, syscall: "execvp" };
+        },
+      },
+      { kind: "execFile", command: "git", args: [], options: {} },
+      (error) => {
+        callbacks++;
+        resolve(error);
+      },
+    );
+  });
+  expect(result).toMatchObject({ code: "ENOENT", path: "/paseo-nonexistent-carrier/exec" });
+  expect(reads).toBe(0);
+  expect(callbacks).toBe(1);
 });

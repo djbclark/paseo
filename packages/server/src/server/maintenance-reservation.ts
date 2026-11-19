@@ -535,6 +535,22 @@ export class MaintenanceReservation {
     if (this.failed) throw new Error("Maintenance activity became unknown");
   }
 
+  private async refreshSuccessAuthority(): Promise<void> {
+    this.assertNoUnknownWork();
+    const transport = this.transport;
+    if (!transport) return; // Isolated mechanism reservations have no production owner.
+    try {
+      await transport.authority.refresh();
+      this.assertNoUnknownWork();
+      if (this.transport !== transport) throw new Error("Maintenance enclosing owner changed");
+      transport.authority.assertQualified();
+    } catch (error) {
+      // Recording uncertainty must never depend on the qualification that just failed.
+      if (!this.record?.uncertain) this.holdForUnknownWork();
+      throw error;
+    }
+  }
+
   private async prepareParticipant(identity: MaintenanceIdentity): Promise<boolean> {
     const initial = await this.participant.begin(identity);
     this.assertNoUnknownWork();
@@ -726,7 +742,11 @@ export class MaintenanceReservation {
       const validate = this.persistenceAuthority(record, next, identity);
       await this.storage(() => this.persist(next, false, validate));
       validate(true);
-      await this.participant.end(identity);
+      try {
+        await this.participant.end(identity);
+      } finally {
+        await this.refreshSuccessAuthority();
+      }
       validate(true);
       this.recovery = false;
     } catch (error) {
@@ -843,6 +863,7 @@ export class MaintenanceReservation {
         activityRevision,
         readinessRevision,
       );
+      await this.refreshSuccessAuthority();
       this.assertHeldActivity(scope, claim, activityRevision, readinessRevision);
       if (known) {
         const fresh = readPrivateKnownFailedHeld(result, scope, claim);
@@ -1028,6 +1049,7 @@ export class MaintenanceReservation {
       await file.sync();
       await file.close();
       file = undefined;
+      if (validate && !uncertain) await this.refreshSuccessAuthority();
       // The only synchronous IO: accepted actual-rename commit point. No yield
       // between final revision/latch check, rename and committed-state update.
       if (revision !== this.revision || (!uncertain && this.failed))
@@ -1039,6 +1061,7 @@ export class MaintenanceReservation {
       await directory.sync();
       await directory.close();
       directory = undefined;
+      if (validate && !uncertain) await this.refreshSuccessAuthority();
       if (!uncertain) this.assertNoUnknownWork();
       validate?.(true);
     } catch (error) {

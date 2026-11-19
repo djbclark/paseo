@@ -1337,6 +1337,19 @@ describe("native maintenance participant serialization", () => {
       close: () => removeMaintenanceHome(home, { recursive: true, force: true }),
     };
   }
+  function mechanismAuthority(refresh: () => Promise<void>) {
+    return {
+      refresh,
+      assertQualified() {},
+      incarnation: () => "mechanism-only-incarnation",
+      bindTerminalManager() {},
+    };
+  }
+  function bindMechanismAuthority(reservation: MaintenanceReservation, refresh: () => Promise<void>) {
+    reservation.setReady(false);
+    reservation.bindTransport("mechanism-only-server", mechanismAuthority(refresh));
+    reservation.setReady(true);
+  }
   test("preflight typed busy acquires no barrier or counter and cannot classify stale or unsupported", async () => {
     let supported = true;
     const begin = vi.fn<PluginMaintenancePort["begin"]>(async () => "held");
@@ -1816,6 +1829,8 @@ describe("native maintenance participant serialization", () => {
       serverBundleSha256: "b".repeat(64),
     };
     let retained!: HeldPluginOperationScope;
+    const assertRetained = () => assertHeldPluginOperation(retained, claim);
+    const assertForged = () => assertHeldPluginOperation({} as HeldPluginOperationScope, claim);
     try {
       await expect(
         f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
@@ -1823,9 +1838,9 @@ describe("native maintenance participant serialization", () => {
           globalReady = false;
           assertHeldPluginOperation(scope, claim);
           await expect(f.reservation.begin(2, "ordinary")).rejects.toThrow();
-          expect(() => assertHeldPluginOperation({} as HeldPluginOperationScope, claim)).toThrow();
+          expect(assertForged).toThrow();
           f.reservation.holdForUnknownWork();
-          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+          expect(assertRetained).toThrow();
           return { nativeGeneration: 2 };
         }),
       ).rejects.toThrow();
@@ -1854,12 +1869,15 @@ describe("native maintenance participant serialization", () => {
       snapshotSha256: "a".repeat(64),
       serverBundleSha256: "b".repeat(64),
     };
+    let retained!: HeldPluginOperationScope;
+    const assertRetained = () => assertHeldPluginOperation(retained, claim);
     try {
       await expect(
         f.reservation.ownerPluginOperation(claim, held.ownerToken, async (scope) => {
+          retained = scope;
           f.reservation.setReady(false);
           f.reservation.setReady(true);
-          expect(() => assertHeldPluginOperation(scope, claim)).toThrow();
+          expect(assertRetained).toThrow();
         }),
       ).rejects.toThrow();
     } finally {
@@ -1899,6 +1917,134 @@ describe("native maintenance participant serialization", () => {
       ).rejects.toThrow();
       expect(scoped).not.toHaveBeenCalled();
       expect(operation).not.toHaveBeenCalled();
+    } finally {
+      await f.reservation.flushStorage();
+      f.close();
+    }
+  });
+  test.each(["held", "known-busy", "unknown"] as const)(
+    "qualified wrapper refreshes after raw %s without promoting its result",
+    async (state) => {
+      const refresh = vi.fn(async () => {});
+      const raw: PluginMaintenancePort = {
+        supportsV1: () => true,
+        begin: async () => state,
+        end: async () => {},
+        supportsHeldRecoveryV1: () => true,
+        beginHeldRecoveryV1: async () => state,
+      };
+      const wrapped = qualifiedMaintenanceParticipant(raw, mechanismAuthority(refresh));
+      const identity = { generation: 1, transactionId: "refresh-raw" };
+      expect(await wrapped.begin(identity)).toBe(state);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      refresh.mockClear();
+      expect(await wrapped.beginHeldRecoveryV1!({ ...identity, pluginId: "unit" })).toBe(state);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      refresh.mockClear();
+      await wrapped.end(identity);
+      expect(refresh).toHaveBeenCalledTimes(2);
+    },
+  );
+  test("raw held response cannot survive failed post-await authority refresh", async () => {
+    const refresh = vi.fn(async () => {});
+    refresh.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("authority lost after barrier"));
+    const wrapped = qualifiedMaintenanceParticipant(
+      { supportsV1: () => true, begin: async () => "held", end: async () => {} },
+      mechanismAuthority(refresh),
+    );
+    await expect(wrapped.begin({ generation: 1, transactionId: "lost-refresh" })).rejects.toThrow(
+      "authority lost",
+    );
+  });
+  test.each([1, 2])(
+    "BEGIN authority refresh %s fails closed and uncertainty persists without retrying qualification",
+    async (failAt) => {
+      let entered!: () => void;
+      let finish!: () => void;
+      const entering = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      let calls = 0;
+      const refresh = vi.fn(async () => {
+        if (++calls === failAt) {
+          entered();
+          await gate;
+          throw new Error("protected authority lost");
+        }
+      });
+      const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+      bindMechanismAuthority(f.reservation, refresh);
+      const path = maintenanceJoin(f.home, "maintenance-reservation.json");
+      try {
+        const pending = f.reservation.begin(1, "refresh-begin");
+        await entering;
+        const before = JSON.parse(readMaintenanceFile(path, "utf8"));
+        expect(Boolean(before.tokenDigest)).toBe(failAt === 2);
+        finish();
+        await expect(pending).rejects.toThrow("protected authority lost");
+        expect(refresh).toHaveBeenCalledTimes(failAt);
+        const record = JSON.parse(readMaintenanceFile(path, "utf8"));
+        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-begin", uncertain: true });
+        expect(Boolean(record.tokenDigest)).toBe(failAt === 2);
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+          "recovery-required",
+        );
+      } finally {
+        finish();
+        await f.reservation.flushStorage();
+        f.close();
+      }
+    },
+  );
+  test.each([1, 2, 3])(
+    "END authority refresh %s preserves actual rename point and refuses success after proof loss",
+    async (failAt) => {
+      const end = vi.fn(async () => {});
+      const f = await fixture({ supportsV1: () => true, begin: async () => "held", end });
+      const refresh = vi.fn(async () => {});
+      bindMechanismAuthority(f.reservation, refresh);
+      try {
+        const held = await f.reservation.begin(1, "refresh-end");
+        refresh.mockReset();
+        let calls = 0;
+        refresh.mockImplementation(async () => {
+          if (++calls === failAt) throw new Error("protected authority lost");
+        });
+        await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("protected authority lost");
+        expect(end).toHaveBeenCalledTimes(failAt === 3 ? 1 : 0);
+        expect(refresh).toHaveBeenCalledTimes(failAt);
+        const record = JSON.parse(readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"));
+        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-end", uncertain: true });
+        expect(Boolean(record.tokenDigest)).toBe(failAt === 1);
+        expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
+          "recovery-required",
+        );
+      } finally {
+        await f.reservation.flushStorage();
+        f.close();
+      }
+    },
+  );
+  test("held operation final refresh retains its original lease and rejects interleaved cleanup", async () => {
+    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    const refresh = vi.fn(async () => {});
+    bindMechanismAuthority(f.reservation, refresh);
+    const claim: HeldPluginOperationClaim = {
+      generation: 1, transactionId: "refresh-held", operation: "replace", pluginId: "unit", path: "/B",
+      expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64),
+    };
+    try {
+      const held = await f.reservation.begin(1, claim.transactionId);
+      refresh.mockClear();
+      await f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      const cleanup = async () => {};
+      refresh.mockImplementation(async () => {
+        await f.reservation.runCleanup(cleanup);
+      });
+      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined)).rejects.toThrow(
+        "work or readiness changed",
+      );
+      expect(f.reservation.status().state).toBe("recovery-required");
     } finally {
       await f.reservation.flushStorage();
       f.close();

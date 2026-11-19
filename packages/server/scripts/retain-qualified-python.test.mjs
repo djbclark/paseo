@@ -377,7 +377,10 @@ test(
             kind === "raw-hash"
               ? retained.record
               : { path: retained.record.path, mode: 0o444, size: raw.length, sha256: sha(raw) };
-          await assert.rejects(assertRetainedQualifiedPython(root, expectation), kind === "raw-hash" ? /raw record identity/ : undefined);
+          await assert.rejects(
+            assertRetainedQualifiedPython(root, expectation),
+            kind === "raw-hash" ? /raw record identity/ : undefined,
+          );
         } finally {
           await overwrite(recordFile, recordRaw);
         }

@@ -36,6 +36,7 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import {
   ManagedPluginActivationPolicy,
+  requireAvailablePluginExecutionProfile,
   type ActivationOperation,
   type ManagedPluginActivationState,
 } from "./activation-policy.js";
@@ -866,7 +867,7 @@ export class PluginService {
           `Plugin ID "${pluginId}" is already configured; choose another ID with --id`,
         );
       }
-      await this.dependencies.activationPolicy?.authorize(pluginId, directory);
+      await this.dependencies.activationPolicy?.authorizeForExecution(pluginId, directory);
       await this.patchSource(pluginId, { source: "directory", path: directory, enabled: true });
       if (this.canPublish(pluginId)) await this.startConfigured(pluginId);
       this.notify(pluginId);
@@ -1144,7 +1145,7 @@ export class PluginService {
     if (!this.hasCompleteOtherHosts(held.claim.pluginId))
       throw new Error("Known failure cohort incomplete");
     const current = this.observeKnownFailureTarget(held, evidence, owner, config, first.state);
-    const latest = await policy.authorize(
+    const latest = await policy.authorizeForExecution(
       held.claim.pluginId,
       held.claim.path,
       ticket.authorization.operation,
@@ -1329,13 +1330,13 @@ export class PluginService {
     const candidate = path.resolve(input.path);
     if (candidate === source.path)
       throw new Error("Replacement must use a distinct immutable source");
-    const authorization = await policy.authorize(pluginId, candidate);
+    const authorization = await policy.authorizeForExecution(pluginId, candidate);
     if (!authorization) throw new Error("Replacement requires enrolled binary-only authorization");
     await this.checkRequirements(candidate);
     if (!this.runtime.validateActivation)
       throw new Error("Runtime cannot verify managed activation");
     await this.runtime.validateActivation(pluginId, candidate);
-    await policy.authorize(pluginId, candidate, "activate", undefined, authorization);
+    await policy.authorizeForExecution(pluginId, candidate, "activate", undefined, authorization);
     if (this.requireSource(pluginId).path !== source.path || !this.canPublish(pluginId))
       throw new Error("Source changed during replacement preparation");
     const receipt = await this.requireManagedBaseline(pluginId, source, policy);
@@ -1434,7 +1435,7 @@ export class PluginService {
   private async validateRetainedBaseline(input: RetainedBaselineValidation): Promise<void> {
     const { pluginId, baseline, policy } = input;
     if (!this.runtime.validateActivation) throw new Error("Managed recovery unavailable");
-    const ticket = await policy.authorize(pluginId, baseline.source.path, "recover");
+    const ticket = await policy.authorizeForExecution(pluginId, baseline.source.path, "recover");
     if (
       !ticket ||
       ticket.authorization.serverBundleSha256 !== baseline.receipt.serverBundleSha256 ||
@@ -1496,7 +1497,10 @@ export class PluginService {
         await managedSources.discard(candidate);
         throw error;
       }
-      await this.dependencies.activationPolicy?.authorize(pluginId, candidate.directory);
+      await this.dependencies.activationPolicy?.authorizeForExecution(
+        pluginId,
+        candidate.directory,
+      );
       await this.patchSource(pluginId, {
         source: "directory",
         path: candidate.directory,
@@ -1591,7 +1595,10 @@ export class PluginService {
         throw new Error("Plugins are globally disabled");
       }
       this.errors.delete(pluginId);
-      const ticket = await this.dependencies.activationPolicy?.authorize(pluginId, source.path);
+      const ticket = await this.dependencies.activationPolicy?.authorizeForExecution(
+        pluginId,
+        source.path,
+      );
       if (ticket && this.dependencies.activationPolicy)
         await this.requireManagedBaseline(pluginId, source, this.dependencies.activationPolicy);
       await this.stopPlugin(pluginId);
@@ -1738,8 +1745,12 @@ export class PluginService {
   ): Promise<void> {
     const source = this.requireEnabledSource(pluginId);
     try {
-      const ticket = await this.dependencies.activationPolicy?.authorize(pluginId, source.path);
-      if (!ticket?.authorization.passiveProfile) return this.startConfigured(pluginId, publishTurn);
+      const ticket = await this.dependencies.activationPolicy?.authorizeForExecution(
+        pluginId,
+        source.path,
+      );
+      if (!requireAvailablePluginExecutionProfile(ticket?.authorization))
+        return this.startConfigured(pluginId, publishTurn);
       const owner = this.dependencies.qualifiedDaemonOwner;
       const native = this.dependencies.nativeMaintenance;
       if (!owner || !isQualifiedDaemonOwner(owner) || !native)
@@ -1776,7 +1787,7 @@ export class PluginService {
     if (!policy) return;
     const state = await policy.status(pluginId);
     // Unmanaged compatibility has no recorded enrollment or policy ticket.
-    const ticket = await policy.authorize(pluginId, sourcePath, "recover");
+    const ticket = await policy.authorizeForExecution(pluginId, sourcePath, "recover");
     if (!ticket) return;
     const baseline = state.baseline;
     if (
@@ -1823,7 +1834,11 @@ export class PluginService {
     operation: ActivationOperation = "activate",
     initialization?: QualifiedPluginInitialization,
   ): Promise<void> {
-    await this.dependencies.activationPolicy?.authorize(pluginId, sourcePath, operation);
+    await this.dependencies.activationPolicy?.authorizeForExecution(
+      pluginId,
+      sourcePath,
+      operation,
+    );
     await this.runtime.startPlugin(
       pluginId,
       sourcePath,
@@ -2029,7 +2044,7 @@ export class PluginService {
     const shouldActivate =
       current.enabled !== false && this.configStore.get().pluginsEnabled === true;
     await this.dependencies.activationPolicy?.assertNativeAcquisitionAllowed(pluginId);
-    await this.dependencies.activationPolicy?.authorize(pluginId, candidate.directory);
+    await this.dependencies.activationPolicy?.authorizeForExecution(pluginId, candidate.directory);
     if (shouldActivate && isRunning) await this.stopPlugin(pluginId);
     try {
       if (shouldActivate) await this.startExplicit(pluginId, candidate.directory);

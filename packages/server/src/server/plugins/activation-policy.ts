@@ -25,6 +25,21 @@ export const PassivePluginProfileSchema = z
   })
   .strict();
 export type PassivePluginProfile = z.infer<typeof PassivePluginProfileSchema>;
+export const DirectoryHelperPluginProfileSchema = z
+  .object({
+    version: z.literal(1),
+    contract: z.literal("ade-directory-helpers-v1"),
+    qualificationSha256: Digest,
+    runtimeClosureSha256: Digest,
+    helperClosureSha256: Digest,
+    moduleTableSha256: Digest,
+    recipeSha256: Digest,
+    initialization: z.literal("registration-only"),
+  })
+  .strict();
+export type DirectoryHelperPluginProfile = z.infer<typeof DirectoryHelperPluginProfileSchema>;
+export type ManagedPluginExecutionProfile = PassivePluginProfile | DirectoryHelperPluginProfile;
+
 const Authorization = z
   .object({
     operation: z.enum(["activate", "recover"]),
@@ -36,8 +51,13 @@ const Authorization = z
     state: z.literal("binary-only"),
     forbiddenEnvironment: z.array(z.string()),
     passiveProfile: PassivePluginProfileSchema.optional(),
+    directoryHelperProfile: DirectoryHelperPluginProfileSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (authorization) => !(authorization.passiveProfile && authorization.directoryHelperProfile),
+    "Managed execution profiles are mutually exclusive",
+  );
 export const ManagedPluginPolicySchema = z
   .object({
     version: z.literal(1),
@@ -56,6 +76,24 @@ const State = z.object({
 });
 export type ManagedPluginActivationState = z.infer<typeof State>;
 type ManagedAuthorization = z.infer<typeof Authorization>;
+type ProfileAuthorization = Pick<ManagedAuthorization, "passiveProfile" | "directoryHelperProfile">;
+/** Protected expectations propagate unchanged; metadata does not qualify execution. */
+export function managedPluginExecutionProfile(
+  authorization: ProfileAuthorization,
+): ManagedPluginExecutionProfile | undefined {
+  if (authorization.passiveProfile && authorization.directoryHelperProfile)
+    throw new Error("Managed execution profiles are mutually exclusive");
+  return authorization.directoryHelperProfile ?? authorization.passiveProfile;
+}
+/** New realm support requires the genuine producer; never fall through to an ordinary child. */
+export function requireAvailablePluginExecutionProfile(
+  authorization: ProfileAuthorization | undefined,
+): PassivePluginProfile | undefined {
+  const profile = authorization && managedPluginExecutionProfile(authorization);
+  if (profile?.contract === "ade-directory-helpers-v1")
+    throw new Error("Qualified ADE directory helper execution producer unavailable");
+  return profile;
+}
 export type ActivationOperation = "activate" | "recover";
 export interface ActivationTicket {
   generation: number;
@@ -258,6 +296,18 @@ export class ManagedPluginActivationPolicy {
       throw new Error("Managed policy changed during verification");
     return { generation: generation + 1, authorization, policyRevision };
   }
+  /** Activation callers cannot downgrade an unsupported protected realm to an ordinary child. */
+  async authorizeForExecution(
+    id: string,
+    directory: string,
+    operation: ActivationOperation = "activate",
+    bundle?: string,
+    ticket?: ActivationTicket,
+  ): Promise<ActivationTicket | undefined> {
+    const current = await this.authorize(id, directory, operation, bundle, ticket);
+    requireAvailablePluginExecutionProfile(current?.authorization);
+    return current;
+  }
   async assertNativeAcquisitionAllowed(id?: string): Promise<void> {
     if (this.policyFile === undefined) {
       await this.assertUnconfiguredNativeAcquisition(id);
@@ -348,7 +398,7 @@ export class ManagedPluginActivationPolicy {
     receipt: PluginLoadedReceipt,
     ticket: ActivationTicket,
   ): Promise<string> {
-    if (!this.policyFile || !ticket.authorization.passiveProfile)
+    if (!this.policyFile || !managedPluginExecutionProfile(ticket.authorization))
       throw new Error("Loaded passive authority unavailable");
     const raw = await this.readPolicy();
     const policy = ManagedPluginPolicySchema.parse(JSON.parse(raw));

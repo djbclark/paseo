@@ -2327,45 +2327,69 @@ describe("managed plugin promotion boundary", () => {
       await restarted.stopAllPlugins();
     }
   });
-  it("does not turn administrator passive expectations into executing producer authority", async () => {
-    const f = await fixture();
-    const sentinel = path.join(f.home, "unqualified-evaluated");
-    const directory = await createPlugin(
-      "managed",
-      `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(sentinel)},'evaluated'); export default () => () => {};`,
-    );
-    const authorizationEntry = {
-      ...(await authorization(directory, 0)),
-      passiveProfile: {
-        version: 1,
-        contract: "native-passive-contract-1",
-        qualificationSha256: "a".repeat(64),
-        runtimeClosureSha256: "b".repeat(64),
-        helperClosureSha256: "c".repeat(64),
-        initialization: "registration-only",
-      },
-    };
-    await writeFile(
-      f.policyFile,
-      JSON.stringify({
-        version: 1,
-        plugins: { managed: { authorizations: [authorizationEntry] } },
-      }),
-    );
-    const service = createService(
-      f.home,
-      { managed: { source: "directory", path: directory } },
-      { activationPolicy: f.policy },
-    );
-    try {
-      await service.start();
-      expect(service.catalog()).toEqual([]);
-      expect(await readManagedSignal(sentinel)).toBe("");
-      expect(service.maintenance.supportsV1()).toBe(false);
-    } finally {
-      await service.stopAllPlugins();
-    }
-  });
+  it.each(["passive", "directory-helper"])(
+    "does not turn administrator %s expectations into executing producer authority",
+    async (kind) => {
+      const f = await fixture();
+      const sentinel = path.join(f.home, "unqualified-evaluated");
+      const directory = await createPlugin(
+        "managed",
+        `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(sentinel)},'evaluated'); export default () => () => {};`,
+      );
+      const authorizationEntry = {
+        ...(await authorization(directory, 0)),
+        ...(kind === "passive"
+          ? {
+              passiveProfile: {
+                version: 1,
+                contract: "native-passive-contract-1",
+                qualificationSha256: "a".repeat(64),
+                runtimeClosureSha256: "b".repeat(64),
+                helperClosureSha256: "c".repeat(64),
+                initialization: "registration-only",
+              },
+            }
+          : {
+              directoryHelperProfile: {
+                version: 1,
+                contract: "ade-directory-helpers-v1",
+                qualificationSha256: "a".repeat(64),
+                runtimeClosureSha256: "b".repeat(64),
+                helperClosureSha256: "c".repeat(64),
+                moduleTableSha256: "d".repeat(64),
+                recipeSha256: "e".repeat(64),
+                initialization: "registration-only",
+              },
+            }),
+      };
+      await writeFile(
+        f.policyFile,
+        JSON.stringify({
+          version: 1,
+          plugins: { managed: { authorizations: [authorizationEntry] } },
+        }),
+      );
+      const service = createService(
+        f.home,
+        { managed: { source: "directory", path: directory } },
+        { activationPolicy: f.policy },
+      );
+      try {
+        await service.start();
+        expect(service.catalog()).toEqual([]);
+        expect(await readManagedSignal(sentinel)).toBe("");
+        expect(service.maintenance.supportsV1()).toBe(false);
+        if (kind === "directory-helper") {
+          await expect(service.reloadPlugin("managed")).rejects.toThrow(
+            "directory helper execution producer unavailable",
+          );
+          expect(await readManagedSignal(sentinel)).toBe("");
+        }
+      } finally {
+        await service.stopAllPlugins();
+      }
+    },
+  );
 
   it("holds startup with unreadable or malformed configured policy", async () => {
     const f = await fixture();

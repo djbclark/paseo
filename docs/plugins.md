@@ -40,6 +40,18 @@ code can change its input; their private execution bindings remain separate.
 Initialization cannot acquire a helper root. Neither semantic JSON nor source
 metadata creates a binding or maintenance permission.
 
+The version 1 administrator policy accepts an optional `directoryHelperProfile`
+on an authorization, mutually exclusive with `passiveProfile`. Its strict fields
+are `version: 1`, `contract: "ade-directory-helpers-v1"`,
+`initialization: "registration-only"`, and SHA256 expectations
+`qualificationSha256`, `runtimeClosureSha256`, `helperClosureSha256`,
+`moduleTableSha256` and `recipeSha256`. The existing exact source, snapshot,
+compiled bundle, generation and binary-only state authorization still apply.
+The manager preserves those expectations in the activation ticket and refuses
+before ordinary compilation, bootstrap initialization or child launch while the
+new producer realm is unavailable. It cannot treat this profile as unmanaged or
+as the passive contract.
+
 The SDK source alone does not install `ade-directory-helpers-v1` execution support.
 The fixed producer must bind the actual interpreter/import closure, finite Git
 recipes, consumed namespaces and original live activity root before evaluating a

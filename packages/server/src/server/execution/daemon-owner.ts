@@ -739,8 +739,8 @@ async function produce(): Promise<QualifiedDaemonOwner> {
       request.activityOwner,
       request.root,
     );
-    const root = request.root;
-    const prior = admittedRoots.get(root);
+    const activityRoot = request.root;
+    const prior = admittedRoots.get(activityRoot);
     if (
       prior &&
       (prior.instance !== originalInstance || prior.activityOwner !== request.activityOwner)
@@ -773,7 +773,7 @@ async function produce(): Promise<QualifiedDaemonOwner> {
         authorityIdentity: builtinAuthorityIdentity,
         systemObservation: initial.systemObservation,
       });
-      admittedRoots.set(root, {
+      admittedRoots.set(activityRoot, {
         instance: originalInstance,
         activityOwner: request.activityOwner,
         context,

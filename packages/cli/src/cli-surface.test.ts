@@ -108,6 +108,8 @@ describe("canonical CLI surface", () => {
     const plugin = createCli().commands.find((command) => command.name() === "plugin");
 
     expect(plugin?.commands.map((command) => command.name())).toEqual([
+      "cohort-v2-status",
+      "cohort-status",
       "managed-status",
       "recover",
       "replace",

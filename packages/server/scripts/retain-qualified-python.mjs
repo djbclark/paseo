@@ -467,7 +467,10 @@ function retainedInventory(record, abi) {
 const aliasName = "_sysconfigdata__linux_x86_64-linux-gnu.py";
 const aliasTarget = "_sysconfigdata__x86_64-linux-gnu.py";
 function sourceAlias(record,row) {
-  if (!Object.hasOwn(row,"sourceLink")) return;
+  if (!Object.hasOwn(row,"sourceLink")) {
+    require(row.path!==record.layout.stdlib+"/"+aliasName,"source alias provenance missing");
+    return;
+  }
   exact(row.sourceLink,["target","resolvedSourcePath","mode"]);
   require(record.observed.source.build.MULTIARCH==="x86_64-linux-gnu" &&
     row.sourcePath===record.source.stdlib+"/"+aliasName &&

@@ -183,7 +183,7 @@ test(
       "escape",
       "source-mode",
       "source-map",
-      "alias-target", "alias-mode", "alias-path", "alias-abi", "alias-extra", "alias-other-row", "alias-missing-target",
+      "alias-missing-link", "alias-target", "alias-mode", "alias-path", "alias-abi", "alias-extra", "alias-other-row", "alias-missing-target",
       "missing-source",
       "layout",
       "flags",
@@ -202,6 +202,7 @@ test(
         if (kind === "source-map") mutated.sourceFiles[0].sourcePath = "/tmp/source";
         const alias=mutated.sourceFiles.find((r)=>r.sourceLink);
         assert.ok(alias,"actual fixed-source alias measured");
+        if(kind==="alias-missing-link") delete alias.sourceLink;
         if(kind==="alias-target") alias.sourceLink.target="../escape";
         if(kind==="alias-mode") alias.sourceLink.mode=0o444;
         if(kind==="alias-path") alias.sourceLink.resolvedSourcePath="/tmp/target";

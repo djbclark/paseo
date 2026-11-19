@@ -71,7 +71,7 @@ function text(value) {
     typeof value !== "string" ||
     !value.length ||
     Buffer.byteLength(value) > 4096 ||
-    /[\x00-\x1f\x7f]/.test(value)
+    [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
   )
     refuse("bounded string");
 }
@@ -256,7 +256,7 @@ async function identity(file, label = file) {
   try {
     await handle.close();
   } catch (error) {
-    if (primary) throw new AggregateError([primary, error], "Input read and close failed");
+    if (primary) throw new AggregateError([primary, error], "Input read and close failed", { cause: primary });
     throw error;
   }
   if (primary) throw primary;
@@ -462,9 +462,7 @@ async function evidence(root, entries) {
   }
   return records;
 }
-/** Fixed build operation on a disposable COPY, never a runtime eligibility port. */
-export async function buildQualifiedNodePtyCopy(root, options) {
-  await roots(root, options);
+async function selectedInputs(root, options) {
   const source = path.join(root, "node_modules/node-pty");
   const api = path.join(root, "node_modules/node-addon-api");
   const npm = path.dirname(path.dirname(options.nodeGypRoot));
@@ -490,6 +488,78 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     refuse("selected input digest");
   const original = await identity(path.join(root, ADDON), ADDON);
   if (original.sha256 !== NODE_PTY_INPUTS.original) refuse("original addon");
+  return { source, api, npm, inputs, original };
+}
+
+async function compiledEvidence(stage, work, commands, env) {
+  const compile = commands.find((command) => command.role === "compile");
+  if (compile.cwd !== path.join(work, "build")) refuse("unexpected compiler working directory");
+  const depfile = (await readFile(path.join(stage, "pty.d"), "utf8")).replace(/\\\r?\n/g, " ");
+  const headerNames = depfile
+    .slice(depfile.indexOf(":") + 1)
+    .trim()
+    .split(/\s+/)
+    .map((name) => path.resolve(compile.cwd, name));
+  if (!headerNames.length || headerNames.some((name) => name.includes("\\")))
+    refuse("dependency format");
+  const headers = await dependencies(headerNames);
+  if (
+    !headers.some((item) => item.path.endsWith("/napi.h")) ||
+    !headers.some((item) => item.path.startsWith("/usr/include/"))
+  )
+    refuse("missing system/header dependency evidence");
+  const map = await readFile(path.join(stage, "pty.map"), "utf8");
+  const linkNames = [...map.matchAll(/^LOAD (\/[^\s()]+)/gm)]
+    .map((match) => match[1])
+    .filter((name) => !within(stage, name));
+  const linkInputs = await dependencies(linkNames);
+  if (!linkInputs.length) refuse("missing linker inputs");
+  const output = path.join(work, "build/Release/pty.node");
+  const raw = await readFile(output);
+  if (
+    raw.subarray(0, 4).toString("hex") !== "7f454c46" ||
+    raw.readUInt16LE(16) !== 3 ||
+    raw.readUInt16LE(18) !== 62
+  )
+    refuse("Linux-x64 shared ELF");
+  const elf = await run(
+    commands,
+    "elf",
+    "/usr/bin/readelf",
+    ["-h", "-S", "-l", "-d", "-s", "-r", "-W", output],
+    stage,
+    env,
+  );
+  if (
+    !elf.includes("napi_register_module_v1") ||
+    !elf.includes("node_api_module_get_api_version_v1")
+  )
+    refuse("addon exports");
+  return { headers, map, linkInputs, output, raw, elf };
+}
+
+async function appendPreprocessedEvidence(entries, preprocessed) {
+  let preprocessedBytes = null;
+  try {
+    preprocessedBytes = await readFile(preprocessed);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  if (preprocessedBytes !== null) {
+    const definitions = preprocessedBytes.toString("utf8");
+    if (
+      !/^#define NAPI_VERSION 8$/m.test(definitions) ||
+      !/^#define NAPI_CPP_EXCEPTIONS/m.test(definitions)
+    )
+      refuse("actual NAPI/exception preprocessing");
+    entries.push(["pty.ii", preprocessedBytes]);
+  }
+}
+
+/** Fixed build operation on a disposable COPY, never a runtime eligibility port. */
+export async function buildQualifiedNodePtyCopy(root, options) {
+  await roots(root, options);
+  const { source, api, npm, inputs, original } = await selectedInputs(root, options);
   const stage = await mkdtemp(path.join(options.stagingRoot, "nodepty-"));
   const env = buildEnvironment(stage, options.runtime);
   const commands = [];
@@ -579,49 +649,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
     env,
   );
   const makefiles = await makeReceipts(stage, commands);
-  const compile = commands.find((command) => command.role === "compile");
-  if (compile.cwd !== path.join(work, "build")) refuse("unexpected compiler working directory");
-  const depfile = (await readFile(path.join(stage, "pty.d"), "utf8")).replace(/\\\r?\n/g, " ");
-  const headerNames = depfile
-    .slice(depfile.indexOf(":") + 1)
-    .trim()
-    .split(/\s+/)
-    .map((name) => path.resolve(compile.cwd, name));
-  if (!headerNames.length || headerNames.some((name) => name.includes("\\")))
-    refuse("dependency format");
-  const headers = await dependencies(headerNames);
-  if (
-    !headers.some((item) => item.path.endsWith("/napi.h")) ||
-    !headers.some((item) => item.path.startsWith("/usr/include/"))
-  )
-    refuse("missing system/header dependency evidence");
-  const map = await readFile(path.join(stage, "pty.map"), "utf8");
-  const linkNames = [...map.matchAll(/^LOAD (\/[^\s()]+)/gm)]
-    .map((match) => match[1])
-    .filter((name) => !within(stage, name));
-  const linkInputs = await dependencies(linkNames);
-  if (!linkInputs.length) refuse("missing linker inputs");
-  const output = path.join(work, "build/Release/pty.node");
-  const raw = await readFile(output);
-  if (
-    raw.subarray(0, 4).toString("hex") !== "7f454c46" ||
-    raw.readUInt16LE(16) !== 3 ||
-    raw.readUInt16LE(18) !== 62
-  )
-    refuse("Linux-x64 shared ELF");
-  const elf = await run(
-    commands,
-    "elf",
-    "/usr/bin/readelf",
-    ["-h", "-S", "-l", "-d", "-s", "-r", "-W", output],
-    stage,
-    env,
-  );
-  if (
-    !elf.includes("napi_register_module_v1") ||
-    !elf.includes("node_api_module_get_api_version_v1")
-  )
-    refuse("addon exports");
+  const { headers, map, linkInputs, output, raw, elf } = await compiledEvidence(stage, work, commands, env);
   const preprocessed = path.join(work, "build/Release/obj.target/pty/src/unix/pty.ii");
   const entries = [
     ["build-environment.json", json(env)],
@@ -639,21 +667,7 @@ export async function buildQualifiedNodePtyCopy(root, options) {
   ];
   for (let i = 0; i < makefiles.length; i++)
     entries.push([`generated-${i}.txt`, await readFile(makefiles[i])]);
-  let preprocessedBytes = null;
-  try {
-    preprocessedBytes = await readFile(preprocessed);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  if (preprocessedBytes !== null) {
-    const definitions = preprocessedBytes.toString("utf8");
-    if (
-      !/^#define NAPI_VERSION 8$/m.test(definitions) ||
-      !/^#define NAPI_CPP_EXCEPTIONS/m.test(definitions)
-    )
-      refuse("actual NAPI/exception preprocessing");
-    entries.push(["pty.ii", preprocessedBytes]);
-  }
+  await appendPreprocessedEvidence(entries, preprocessed);
   // Fresh source/tool checks after all compiler work. Nothing is installed on failure.
   for (const [directory, expected] of [
     [source, inputs.source],

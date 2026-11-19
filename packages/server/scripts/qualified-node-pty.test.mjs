@@ -27,8 +27,8 @@ let prepared;
 let root;
 let result;
 let record;
-async function copyRoot() {
-  const directory = await mkdtemp(path.join(path.dirname(prepared.root), "copy-"));
+async function copyRoot(prefix = "copy-") {
+  const directory = await mkdtemp(path.join(path.dirname(prepared.root), prefix));
   await mkdir(path.join(directory, "runtime"));
   await cp(path.join(prepared.root, "runtime/node"), path.join(directory, "runtime/node"));
   await cp(path.join(prepared.root, "node_modules"), path.join(directory, "node_modules"), {
@@ -45,7 +45,7 @@ before(async () => {
     "CI must provide checksum-verified prepared inputs",
   );
   prepared = JSON.parse(await readFile(process.env.QUALIFIED_NODE_PTY_INPUTS, "utf8"));
-  root = await copyRoot();
+  root = await copyRoot("built-");
   result = await buildQualifiedNodePtyCopy(root, options(root));
   record = JSON.parse(await readFile(path.join(root, result.record.path), "utf8"));
 });
@@ -130,9 +130,9 @@ test("colon-containing selected root refuses before any tool or configure spawn"
   const directory = await copyRoot();
   const colon = `${directory}:copy`;
   await rename(directory, colon);
-  const before = await readdir(prepared.options.stagingRoot);
+  const stagingBefore = await readdir(prepared.options.stagingRoot);
   await assert.rejects(buildQualifiedNodePtyCopy(colon, options(colon)), /PATH delimiter/);
-  assert.deepEqual(await readdir(prepared.options.stagingRoot), before);
+  assert.deepEqual(await readdir(prepared.options.stagingRoot), stagingBefore);
   assert.equal(hash(await readFile(path.join(colon, result.addon.path))), NODE_PTY_INPUTS.original);
 });
 

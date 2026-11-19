@@ -94,8 +94,8 @@ jobs:
           name: nodepty-build-evidence
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/nodepty/copy-*/native-provenance/
-            ${{ runner.temp }}/nodepty/copy-*/node_modules/node-pty/prebuilds/linux-x64/pty.node
+            ${{ runner.temp }}/nodepty/built-*/native-provenance/
+            ${{ runner.temp }}/nodepty/built-*/node_modules/node-pty/prebuilds/linux-x64/pty.node
             ${{ runner.temp }}/nodepty/staging/nodepty-*/**/*.log
             ${{ runner.temp }}/nodepty/staging/nodepty-*/*.json
             ${{ runner.temp }}/nodepty/staging/nodepty-*/*.map

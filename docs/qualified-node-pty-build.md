@@ -39,6 +39,8 @@ failed commands refuse the build. Staging evidence remains available on
 failure. A partially written disposable copy must be discarded; failure never
 produces a qualified fallback artifact.
 
+CI retains the actual successful build under `built-*`; rejection fixtures use `copy-*`. The artifact paths select the built addon and its receipt/evidence directory, including the actual preprocessed translation unit, plus staged compiler diagnostics. Colon-path rejection fixtures remain outside the upload glob because the artifact service rejects colons in member names.
+
 The helper returns `addon` and `record` file identities. The fixed addon path is
 `node_modules/node-pty/prebuilds/linux-x64/pty.node`. The record is
 `native-provenance/node-pty-source-build.json`, with evidence below

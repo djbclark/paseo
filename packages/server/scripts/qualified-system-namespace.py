@@ -27,6 +27,37 @@ class Hold(Exception):
     """Bounded, non-secret refusal; underlying exceptions never reach stderr."""
 
 
+_ADMINISTRATIVE_SITES = (
+    ("namespace-unshare", "unshare"), ("namespace-private", "mount"),
+    ("bind-source", "mount"), ("bind-readonly", "mount"),
+    ("drop-ambient", "prctl"), ("drop-keepcaps", "prctl"),
+    ("drop-bounding", "prctl"), ("drop-no-new-privileges", "prctl"),
+    ("drop-capset", "capset"),
+)
+
+
+class _AdministrativeSyscallFailure(Hold):
+    def __init__(self, phase, error_number):
+        syscall = dict(_ADMINISTRATIVE_SITES).get(phase)
+        require(syscall is not None and integer(error_number, 0, 4095),
+                "administrative-syscall-failed")
+        super().__init__("administrative-syscall-failed")
+        self.phase, self.syscall, self.error_number = phase, syscall, error_number
+
+
+def _administrative_diagnostic(error):
+    # Exact private type and a closed pair: no exception text, call arguments,
+    # paths, capability indices or caller-controlled metadata become output.
+    if type(error) is not _AdministrativeSyscallFailure:
+        return None
+    phase = getattr(error, "phase", None)
+    syscall = getattr(error, "syscall", None)
+    number = getattr(error, "error_number", None)
+    if (phase, syscall) not in _ADMINISTRATIVE_SITES or not integer(number, 0, 4095):
+        return None
+    return {"phase": phase, "syscall": syscall, "errno": number}
+
+
 def require(condition, reason):
     if not condition:
         raise Hold(reason)
@@ -346,18 +377,20 @@ class Admin:
         require(0 <= self.cap_last <= 63, "unsupported-capability-layout")
         hashlib.sha256(b"preload").digest()
 
-    def call(self, function, *arguments):
+    def call(self, phase, function, *arguments):
+        require(phase in dict(_ADMINISTRATIVE_SITES), "administrative-syscall-failed")
         if function(*arguments) == -1:
-            raise Hold("administrative-syscall-failed")
+            error_number = ctypes.get_errno()  # Capture immediately, before any other administrative call.
+            raise _AdministrativeSyscallFailure(phase, error_number)
 
     def private_namespace(self):
         require(not self.private and not self.sealed, "namespace-order")
         before = namespace_identity()
-        self.call(self.libc.unshare, self.CLONE_NEWNS)
+        self.call("namespace-unshare", self.libc.unshare, self.CLONE_NEWNS)
         after = namespace_identity()
         require(before != after, "namespace-not-created")
         self.namespace = after
-        self.call(self.libc.mount, None, b"/", None, self.MS_REC | self.MS_PRIVATE, None)
+        self.call("namespace-private", self.libc.mount, None, b"/", None, self.MS_REC | self.MS_PRIVATE, None)
         verify_private_mounts()
         self.private = True
 
@@ -365,25 +398,43 @@ class Admin:
         require(self.private and not self.sealed, "bind-before-private-or-after-seal")
         require(namespace_identity() == self.namespace, "mount-namespace-changed")
         source.check()
-        old = os.stat(target)
-        require(stat.S_ISREG(old.st_mode) and old.st_uid == 0 and
-                not old.st_mode & 0o022, "unsafe-existing-target")
-        rows = verify_private_mounts()
-        containing = max((row for row in rows if target == row["path"] or
-                          target.startswith(row["path"].rstrip("/") + "/")),
-                         key=lambda row: len(row["path"]))
-        require("noexec" not in containing["options"], "existing-noexec-target")
-        self.call(self.libc.mount, f"/proc/self/fd/{source.fd}".encode(), target.encode(),
-                  None, self.MS_BIND, None)
-        self.call(self.libc.mount, None, target.encode(), None,
-                  self.MS_BIND | self.MS_REMOUNT | self.MS_RDONLY | self.MS_NOSUID | self.MS_NODEV,
-                  None)
-        mounted = [row for row in verify_private_mounts() if row["path"] == target]
-        require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"], "readonly-bind-unproved")
-        actual = os.stat(target)
-        require((actual.st_dev, actual.st_ino) == source.before[:2] and
-                stat.S_IMODE(actual.st_mode) == stat.S_IMODE(source.before[2]), "bind-inode-mismatch")
-        source.check()
+        expected = {"mode": stat.S_IMODE(source.before[2]), "size": source.before[5],
+                    "sha256": hashlib.sha256(source.data).hexdigest()}
+        # Original FDs retain pre-unshare f_path mount objects, which Linux
+        # rejects as ordinary bind sources in the new namespace. Reopen ONLY
+        # the same retained object through its protected current-namespace path.
+        view = checked_file(source.path, len(source.data), expected)
+        try:
+            require(view.fd != source.fd and view.path == source.path and
+                    view.before == source.before and view.data == source.data and
+                    view.ancestors == source.ancestors, "bind-view-identity-mismatch")
+            source.check()
+            view.check()
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            old = os.stat(target)
+            require(stat.S_ISREG(old.st_mode) and old.st_uid == 0 and
+                    not old.st_mode & 0o022, "unsafe-existing-target")
+            rows = verify_private_mounts()
+            containing = max((row for row in rows if target == row["path"] or
+                              target.startswith(row["path"].rstrip("/") + "/")),
+                             key=lambda row: len(row["path"]))
+            require("noexec" not in containing["options"], "existing-noexec-target")
+            self.call("bind-source", self.libc.mount, f"/proc/self/fd/{view.fd}".encode(), target.encode(),
+                      None, self.MS_BIND, None)
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            self.call("bind-readonly", self.libc.mount, None, target.encode(), None,
+                      self.MS_BIND | self.MS_REMOUNT | self.MS_RDONLY | self.MS_NOSUID | self.MS_NODEV,
+                      None)
+            mounted = [row for row in verify_private_mounts() if row["path"] == target]
+            require(len(mounted) == 1 and {"ro", "nosuid", "nodev"} <= mounted[0]["options"], "readonly-bind-unproved")
+            actual = os.stat(target)
+            require((actual.st_dev, actual.st_ino) == source.before[:2] and
+                    stat.S_IMODE(actual.st_mode) == stat.S_IMODE(source.before[2]), "bind-inode-mismatch")
+            require(namespace_identity() == self.namespace, "mount-namespace-changed")
+            source.check()
+            view.check()
+        finally:
+            view.close()
 
     def seal(self):
         require(self.private and not self.sealed, "seal-order")
@@ -396,17 +447,17 @@ class Admin:
         require(self.sealed and namespace_identity() == self.namespace and
                 mount_rows() == self.mount_snapshot, "unsealed-or-changed-mounts")
         caller.check_alive()
-        self.call(self.libc.prctl, 47, 4, 0, 0, 0)  # PR_CAP_AMBIENT_CLEAR_ALL
-        self.call(self.libc.prctl, 8, 0, 0, 0, 0)   # PR_SET_KEEPCAPS=0
+        self.call("drop-ambient", self.libc.prctl, 47, 4, 0, 0, 0)  # PR_CAP_AMBIENT_CLEAR_ALL
+        self.call("drop-keepcaps", self.libc.prctl, 8, 0, 0, 0, 0)   # PR_SET_KEEPCAPS=0
         for capability in range(self.cap_last + 1):
-            self.call(self.libc.prctl, 24, capability, 0, 0, 0)  # PR_CAPBSET_DROP
-        self.call(self.libc.prctl, 38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
+            self.call("drop-bounding", self.libc.prctl, 24, capability, 0, 0, 0)  # PR_CAPBSET_DROP
+        self.call("drop-no-new-privileges", self.libc.prctl, 38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
         os.setgroups(list(caller.groups))
         os.setresgid(caller.gid, caller.gid, caller.gid)
         os.setresuid(caller.uid, caller.uid, caller.uid)
         header = (ctypes.c_uint32 * 2)(0x20080522, 0)
         empty_sets = (ctypes.c_uint32 * 6)()
-        self.call(self.libc.capset, ctypes.byref(header), ctypes.byref(empty_sets))
+        self.call("drop-capset", self.libc.capset, ctypes.byref(header), ctypes.byref(empty_sets))
         require(os.getresuid() == (caller.uid,) * 3 and os.getresgid() == (caller.gid,) * 3 and
                 tuple(sorted(os.getgroups())) == caller.groups, "privilege-drop-failed")
         values = dict(line.split(":", 1) for line in bounded_proc("/proc/self/status", 262144).splitlines()
@@ -682,12 +733,15 @@ class Distribution:
         expected_order = sorted(directories, key=lambda row: (row["kind"], row["path"].encode()))
         require(directories == expected_order, "unsorted-search-directories")
         self.directories = []
+        self.retained_directories = set()
         for row in directories:
             exact(row, ("kind", "path"))
             require(row["kind"] in ("system", "retained"), "invalid-search-kind")
             path = absolute(row["path"]) if row["kind"] == "system" else self.root + "/" + relative(row["path"])
             require(os.path.isdir(path) and path not in self.directories, "missing-or-duplicate-search-directory")
             self.directories.append(path)
+            if row["kind"] == "retained":
+                self.retained_directories.add(path)
         aliases = sequence(self.loader["aliases"], 512)
         require(aliases == sorted(aliases, key=lambda row: row["path"].encode()), "unsorted-aliases")
         self.aliases = {}
@@ -792,6 +846,24 @@ class Distribution:
 
         return walk(path, set())
 
+    def verify_retained_search_candidate(self, target, metadata):
+        member = relative(os.path.relpath(target, self.root))
+        measured = next((row for row in metadata if row["member"] == member), None)
+        source = self.opened.get(member)
+        require(target == self.root + "/" + member and measured is not None and
+                member in self.files and source is not None and source.path == target,
+                "unretained-search-candidate")
+        # Reuse the descriptor already opened/hashed by verify_loader, never
+        # authorize a sibling from a root prefix, SONAME or generic files row.
+        source.check()
+        expected = self.files[member]
+        info = os.fstat(source.fd)
+        require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == expected["mode"] and
+                info.st_size == expected["size"] == len(source.data) and
+                hashlib.sha256(source.data).hexdigest() == expected["sha256"], "file-identity-mismatch")
+        require(elf_metadata(source.data, member) == measured, "elf-metadata-mismatch")
+        source.check()
+
     def verify_search(self, metadata):
         declared_directories = {self.check_path_aliases(directory) for directory in self.directories}
         for row in metadata:
@@ -833,7 +905,10 @@ class Distribution:
                     continue
                 candidate = directory + "/" + name
                 if os.path.lexists(candidate):
-                    require(self.check_path_aliases(candidate) in self.external, "unretained-search-candidate")
+                    target = self.check_path_aliases(candidate)
+                    if target not in self.external:
+                        require(directory in self.retained_directories, "unretained-search-candidate")
+                        self.verify_retained_search_candidate(target, metadata)
                 else:
                     self.absent_selection.add(candidate)
             for variant in ("glibc-hwcaps", "tls"):
@@ -1057,8 +1132,12 @@ def main(arguments=None):
         reason = str(error) if isinstance(error, Hold) else "administrative-failure"
         if not re.fullmatch(r"[a-z0-9-]{1,80}", reason):
             reason = "administrative-failure"
-        sys.stderr.write(json.dumps({"error": {"code": "QUALIFIED_NAMESPACE_HOLD",
-                         "message": "Namespace bootstrap refused", "reason": reason}}) + "\n")
+        refusal = {"code": "QUALIFIED_NAMESPACE_HOLD",
+                   "message": "Namespace bootstrap refused", "reason": reason}
+        diagnostic = _administrative_diagnostic(error)
+        if diagnostic is not None:
+            refusal["diagnostic"] = diagnostic
+        sys.stderr.write(json.dumps({"error": refusal}) + "\n")
         return 1
     finally:
         if distribution is not None:

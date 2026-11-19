@@ -1,5 +1,5 @@
 import * as worker from "../plugins/plugin-process.js";
-import type { PluginWorkerChannel } from "../plugins/plugin-process.js";
+import type { PluginWorker, PluginWorkerChannel } from "../plugins/plugin-process.js";
 import type { PluginServerContribution } from "@getpaseo/plugin/server";
 import {
   evaluateQualifiedBundle,
@@ -9,8 +9,6 @@ import {
 } from "./qualified-host.js";
 export async function attachQualifiedPluginHost(): Promise<void> {
   await initializeQualifiedChildHost();
-  const attach = Reflect.get(worker, "attachPluginWorkerChannel");
-  if (typeof attach !== "function") throw new Error("Qualified worker initializer unavailable");
   const channel: PluginWorkerChannel = {
     send(message, callback) {
       process.send?.(message, () => callback?.());
@@ -34,13 +32,29 @@ export async function attachQualifiedPluginHost(): Promise<void> {
       process.disconnect();
     },
   };
-  attach(channel, (source: string): PluginServerContribution => {
-    const result = evaluateQualifiedBundle(source);
-    const contribution =
-      result && typeof result === "object" ? Reflect.get(result, "default") : undefined;
-    if (typeof contribution !== "function") throw new Error("Qualified contribution unavailable");
-    return contribution as PluginServerContribution;
-  });
+  // Only this fixed entry captures the actual returned worker, before IPC can dispatch.
+  // Context DATA is not authority; these references must be the originals we just attached.
+  let original: PluginWorker | null = null;
+  original = worker.attachPluginWorkerChannel(
+    channel,
+    (source, context): PluginServerContribution => {
+      if (
+        !original ||
+        context.workerIdentity !== original ||
+        context.activityOwner !== original.activityOwner ||
+        context.initialize.bundle !== source ||
+        !Object.isFrozen(original) ||
+        !Object.isFrozen(context) ||
+        !Object.isFrozen(context.initialize)
+      )
+        throw new Error("Qualified worker initialization identity mismatch");
+      const result = evaluateQualifiedBundle(source);
+      const contribution =
+        result && typeof result === "object" ? Reflect.get(result, "default") : undefined;
+      if (typeof contribution !== "function") throw new Error("Qualified contribution unavailable");
+      return contribution as PluginServerContribution;
+    },
+  );
 }
 export async function respondQualifiedChallenge(challenge: string): Promise<void> {
   await refreshQualifiedChildHost();

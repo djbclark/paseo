@@ -1,3 +1,4 @@
+import { daemonHelperInventory } from "../dist/server/server/execution/daemon-helper-inventory.js";
 import { createHash } from "node:crypto";
 import { assertSystemClosureMetadata } from "../dist/server/server/execution/system-closure.js";
 import { canonicalBuiltinJson } from "../dist/server/server/execution/builtin-format.js";
@@ -13,6 +14,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { retainSystemClosure } from "./retain-system-closure.mjs";
+import { assertRetainedOpenCodeBridge } from "./retain-qualified-opencode-bridge.mjs";
+import { assertRetainedCliMetadata } from "./retain-qualified-cli-metadata.mjs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import builtinBindingsRecipe from "../src/server/execution/builtin-bindings-recipe.json" with { type: "json" };
@@ -74,25 +77,9 @@ export async function finalizeQualifiedDaemon(root, runtime, qualificationSha256
     if (a.path > b.path) return 1;
     return 0;
   });
-  const helperInventory = [
-    ...files.filter(
-      (file) =>
-        file.path.startsWith("system-closure/") ||
-        file.path.startsWith("native-provenance/") ||
-        file.path.startsWith("runtime/") ||
-        /(?:compiler|terminal)-(?:entry|code)\.mjs$/.test(file.path) ||
-        file.path.endsWith(".node") ||
-        /\.so(?:\.[0-9]+)*$/.test(file.path) ||
-        file.path.endsWith("spawn-helper") ||
-        file.path.startsWith("node_modules/esbuild/") ||
-        file.path === "node_modules/typescript/lib/typescript.js",
-    ),
-    ...externalLibraries,
-  ].sort((a, b) => {
-    if (a.path < b.path) return -1;
-    if (a.path > b.path) return 1;
-    return 0;
-  });
+  await assertRetainedOpenCodeBridge(root, inputs, files);
+  await assertRetainedCliMetadata(root, inputs, files);
+  const helperInventory = daemonHelperInventory({ files, externalLibraries });
   const adaptation = files.find(
     (file) => file.path === "native-provenance/sherpa-addon-adaptation.json",
   );

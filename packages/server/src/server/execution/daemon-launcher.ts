@@ -1,4 +1,7 @@
 import { qualifiedDaemonStartupEnvironment } from "./finite-git-environment.js";
+// Read-only metadata assertion used by build regression checks. It does not
+// perform enrollment or mint an owner; acquisition below still runs every guard.
+export { assertDaemonHelperInventory } from "./daemon-helper-inventory.js";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import {

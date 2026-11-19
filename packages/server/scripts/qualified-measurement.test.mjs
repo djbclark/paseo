@@ -1,5 +1,332 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("directory compiler recipe data binds the full canonical body without granting admission", async () => {
+  const { parseDirectoryHelperRecipe } =
+    await import("../dist/server/server/execution/directory-recipe.js");
+  const { canonicalBuiltinJson } =
+    await import("../dist/server/server/execution/builtin-format.js");
+  const { createHash } = await import("node:crypto");
+  const body = {
+    version: 1,
+    contract: "ade-directory-helpers-v1",
+    initialization: "registration-only",
+    qualificationSha256: "1".repeat(64),
+    runtimeClosureSha256: "2".repeat(64),
+    helperClosureSha256: "3".repeat(64),
+    moduleTableSha256: "4".repeat(64),
+    compiler: {
+      version: 1,
+      contract: "ade-directory-entry-v1",
+      role: "claim",
+      entry: "index.directory.server.ts",
+      target: "server",
+      client: "none",
+    },
+  };
+  const profileFor = (recipe) => {
+    const { compiler, ...profile } = recipe;
+    assert.ok(compiler);
+    return {
+      ...profile,
+      recipeSha256: createHash("sha256").update(canonicalBuiltinJson(recipe)).digest("hex"),
+    };
+  };
+  const profile = profileFor(body);
+  const original = structuredClone(body);
+  const accepted = parseDirectoryHelperRecipe(body, profile, "ade-claim");
+  assert.deepEqual(accepted, body);
+  assert.notEqual(accepted, body);
+  assert.ok(Object.isFrozen(accepted));
+  assert.ok(Object.isFrozen(accepted.compiler));
+  body.compiler.entry = "index.server.ts";
+  assert.equal(accepted.compiler.entry, "index.directory.server.ts");
+  const positive = () =>
+    assert.deepEqual(parseDirectoryHelperRecipe(original, profile, "ade-claim"), original);
+  positive();
+  for (const compiler of [
+    { ...original.compiler, entry: "index.server.ts" },
+    { ...original.compiler, entry: "../index.directory.server.ts" },
+    { ...original.compiler, client: "default" },
+    { ...original.compiler, target: "client" },
+    { ...original.compiler, role: "other" },
+    { ...original.compiler, commands: [] },
+  ]) {
+    positive();
+    const changed = { ...original, compiler };
+    assert.equal(parseDirectoryHelperRecipe(changed, profileFor(changed), "ade-claim"), null);
+  }
+  for (const key of [
+    "qualificationSha256",
+    "runtimeClosureSha256",
+    "helperClosureSha256",
+    "moduleTableSha256",
+  ]) {
+    positive();
+    const changed = { ...original, [key]: "a".repeat(64) };
+    assert.equal(parseDirectoryHelperRecipe(changed, profile, "ade-claim"), null);
+    assert.equal(
+      parseDirectoryHelperRecipe(original, { ...profile, [key]: "a".repeat(64) }, "ade-claim"),
+      null,
+    );
+  }
+  positive();
+  for (const value of [
+    null,
+    {},
+    { ...original, helperPermission: true },
+    { ...original, recipeSha256: profile.recipeSha256 },
+    { ...original, compiler: undefined },
+  ])
+    assert.equal(parseDirectoryHelperRecipe(value, profile, "ade-claim"), null);
+  assert.equal(
+    parseDirectoryHelperRecipe(original, { ...profile, recipeSha256: "f".repeat(64) }, "ade-claim"),
+    null,
+  );
+  assert.equal(parseDirectoryHelperRecipe(original, profile, "ade-window-name"), null);
+  const window = { ...original, compiler: { ...original.compiler, role: "window" } };
+  assert.deepEqual(
+    parseDirectoryHelperRecipe(window, profileFor(window), "ade-window-name"),
+    window,
+  );
+  assert.equal(parseDirectoryHelperRecipe(window, profileFor(window), "ade-claim"), null);
+  positive();
+});
+
+test(
+  "fresh verifier bounds actual reads and drains every admitted descriptor before failure",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async (t) => {
+    const { verifyFreshFileRows } =
+      await import("../dist/server/server/execution/daemon-verifier.js");
+    const fs = await import("node:fs");
+    const promises = fs.default.promises;
+    const { syncBuiltinESMExports } = await import("node:module");
+    const { spawnSync } = await import("node:child_process");
+    const { createHash, randomUUID } = await import("node:crypto");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const originalOpen = promises.open;
+    const originalRealpath = promises.realpath;
+    const root = `/paseo-fresh-files-${randomUUID()}`;
+    const temporary = await promises.mkdtemp(path.join(tmpdir(), "fresh-files-"));
+    const rows = [];
+    const events = [];
+    const active = new Set();
+    const gates = new Set();
+    const pending = new Set();
+    let behavior = {};
+    let peak = 0;
+    function verify(...args) {
+      const task = verifyFreshFileRows(...args);
+      pending.add(task);
+      void task.then(
+        () => pending.delete(task),
+        () => pending.delete(task),
+      );
+      return task;
+    }
+    function admin(args) {
+      const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    function deferred() {
+      let resolve;
+      const promise = new Promise((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    function gate() {
+      const held = deferred();
+      gates.add(held);
+      return held;
+    }
+    async function install(name, size) {
+      const source = path.join(temporary, name);
+      const handle = await originalOpen(source, "w");
+      await handle.truncate(size);
+      await handle.close();
+      const hash = createHash("sha256");
+      const zeros = Buffer.alloc(1024 * 1024);
+      for (let remaining = size; remaining > 0; remaining -= zeros.length)
+        hash.update(zeros.subarray(0, Math.min(remaining, zeros.length)));
+      const row = { path: name, mode: 0o444, size, sha256: hash.digest("hex") };
+      admin(["install", "-o", "root", "-g", "root", "-m", "0444", source, path.join(root, name)]);
+      return row;
+    }
+    async function wrappedOpen(file, ...args) {
+      const handle = await originalOpen.call(promises, file, ...args);
+      if (!String(file).startsWith(`${root}/`)) return handle;
+      const name = path.basename(file);
+      active.add(handle);
+      peak = Math.max(peak, active.size);
+      events.push(`open:${name}`);
+      const read = handle.read.bind(handle);
+      const close = handle.close.bind(handle);
+      let first = true;
+      handle.read = async (...readArgs) => {
+        if (first) {
+          first = false;
+          behavior.entered?.[name]?.resolve();
+          await behavior.readGates?.[name]?.promise;
+          await behavior.mutate?.(name);
+        }
+        const result = await read(...readArgs);
+        if (behavior.readErrors?.[name]) throw behavior.readErrors[name];
+        return result;
+      };
+      handle.close = async () => {
+        behavior.closing?.[name]?.resolve();
+        await behavior.closeGates?.[name]?.promise;
+        await close();
+        active.delete(handle);
+        events.push(`close:${name}`);
+        if (behavior.closeErrors?.[name]) throw behavior.closeErrors[name];
+      };
+      return handle;
+    }
+    async function wrappedRealpath(file, ...args) {
+      if (String(file).startsWith(`${root}/`)) events.push(`start:${path.basename(file)}`);
+      return originalRealpath.call(promises, file, ...args);
+    }
+    function reset(next = {}) {
+      assert.equal(active.size, 0);
+      behavior = next;
+      events.length = 0;
+      peak = 0;
+    }
+    try {
+      admin(["install", "-d", "-o", "root", "-g", "root", "-m", "0555", root]);
+      for (let index = 0; index < 5; index++) rows.push(await install(`small${index}`, 16));
+      const mediumA = await install("mediumA", 33 * 1024 * 1024);
+      const mediumB = await install("mediumB", 33 * 1024 * 1024);
+      const large = await install("large", 65 * 1024 * 1024);
+      promises.open = wrappedOpen;
+      promises.realpath = wrappedRealpath;
+      syncBuiltinESMExports();
+      const actualModule = await import("node:fs/promises");
+      assert.equal(actualModule.open, wrappedOpen);
+      assert.equal(actualModule.realpath, wrappedRealpath);
+
+      await t.test("four actual files maximum and no fifth before all prior closes", async () => {
+        reset();
+        await verify(root, rows, "manifest");
+        assert.ok(peak <= 4);
+        for (const row of rows.slice(0, 4))
+          assert.ok(events.indexOf(`close:${row.path}`) < events.indexOf("start:small4"));
+      });
+      await t.test("declared byte budget and large file exclusive", async () => {
+        reset();
+        await verify(root, [mediumA, mediumB, large, rows[0]], "manifest");
+        assert.equal(peak, 1);
+        assert.deepEqual(
+          events.filter((event) => event.startsWith("start:")),
+          ["start:mediumA", "start:mediumB", "start:large", "start:small0"],
+        );
+        for (const [before, after] of [
+          ["mediumA", "mediumB"],
+          ["mediumB", "large"],
+          ["large", "small0"],
+        ])
+          assert.ok(events.indexOf(`close:${before}`) < events.indexOf(`start:${after}`));
+      });
+      await t.test("reverse errors retain index order and await actual sibling close", async () => {
+        const heldRead = gate();
+        const heldClose = gate();
+        const entered = deferred();
+        const closing = deferred();
+        const firstError = new Error("first original read");
+        const secondError = new Error("second original read");
+        reset({
+          readGates: { small0: heldRead },
+          closeGates: { small2: heldClose },
+          entered: { small0: entered },
+          closing: { small2: closing },
+          readErrors: { small0: firstError, small1: secondError },
+        });
+        let finished = false;
+        const task = verify(root, rows, "manifest");
+        const observed = task.then(
+          () => {
+            finished = true;
+            return null;
+          },
+          (error) => {
+            finished = true;
+            return error;
+          },
+        );
+        await Promise.all([entered.promise, closing.promise]);
+        assert.equal(finished, false);
+        assert.equal(events.includes("start:small4"), false);
+        heldRead.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(finished, false);
+        heldClose.resolve();
+        const error = await observed;
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, [firstError, secondError]);
+        assert.equal(error.cause, firstError);
+        assert.equal(active.size, 0);
+        assert.equal(events.includes("start:small4"), false);
+      });
+      await t.test("original read and actual-close error both retained", async () => {
+        const readError = new Error("actual read failure");
+        const closeError = new Error("after actual close failure");
+        reset({ readErrors: { small0: readError }, closeErrors: { small0: closeError } });
+        await assert.rejects(verify(root, [rows[0]], "manifest"), (error) => {
+          assert.ok(error instanceof AggregateError);
+          assert.deepEqual(error.errors, [readError, closeError]);
+          assert.equal(error.cause, readError);
+          return true;
+        });
+        reset({ closeErrors: { small0: closeError } });
+        await assert.rejects(verify(root, [rows[0]], "manifest"), (error) => error === closeError);
+      });
+      await t.test(
+        "fresh actual bytes, mode and inode races refuse after valid baseline",
+        async () => {
+          const target = path.join(root, rows[0].path);
+          for (const kind of ["bytes", "mode", "inode", "symlink"]) {
+            reset();
+            await install("small0", 16);
+            await verify(root, [rows[0]], "manifest");
+            reset({
+              mutate: async (name) => {
+                if (name !== "small0") return;
+                const script =
+                  "import os,sys; p,k=sys.argv[1:]; " +
+                  "exec({'bytes':\"f=open(p,'r+b'); f.write(b'x'); f.close()\",'mode':\"os.chmod(p,0o644)\",'inode':\"os.unlink(p); f=open(p,'wb'); f.write(bytes(16)); f.close(); os.chmod(p,0o444)\",'symlink':\"os.unlink(p); os.symlink('small1',p)\"}[k])";
+                admin(["/usr/bin/python3", "-I", "-c", script, target, kind]);
+              },
+            });
+            await assert.rejects(verify(root, [rows[0]], "manifest"));
+            admin(["rm", "-f", target]);
+          }
+          reset();
+          await install("small0", 16);
+          await verify(root, [rows[0]], "manifest");
+          await assert.rejects(verify(root, [{ ...rows[0], path: "../small0" }], "manifest"));
+          await assert.rejects(verify(root, [{ ...rows[0], path: target }], "manifest"));
+          await assert.rejects(verify(root, [rows[0]], "external"));
+          await verify(root, [{ ...rows[0], path: target }], "external");
+        },
+      );
+    } finally {
+      for (const held of gates) held.resolve();
+      await Promise.allSettled(pending);
+      promises.open = originalOpen;
+      promises.realpath = originalRealpath;
+      syncBuiltinESMExports();
+      assert.equal(active.size, 0, "all admitted actual descriptors must have closed");
+      admin(["rm", "-rf", root]);
+      await promises.rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
 import {
   cloneBoundedObservation,
   parseQualifiedMeasurementRequest,
@@ -343,4 +670,287 @@ test("counterfeit continuation data and SDK roots never mint an owner continuati
     captureQualifiedBuiltinContinuation({}, {}, { root: {}, activityOwner: {}, operation: {} }),
   );
   assert.equal(isQualifiedDaemonOwner(token), false);
+});
+
+test(
+  "retained search selection requires measured ELF and stable actual bytes",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async () => {
+    const { assertRetainedSearchElf } =
+      await import("../dist/server/server/execution/system-closure.js");
+    const { describeElf } = await import("../dist/server/server/execution/elf-format.js");
+    const { spawnSync } = await import("node:child_process");
+    const { mkdtemp, readFile, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { createHash, randomUUID } = await import("node:crypto");
+    function admin(args) {
+      const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const temporary = await mkdtemp(path.join(tmpdir(), "retained-elf-input-"));
+    const root = `/paseo-retained-elf-source-${randomUUID()}`;
+    const member = "libfixture.so",
+      target = path.join(root, member);
+    const original = await readFile("/usr/bin/true");
+    const measured = { member, ...describeElf(original) };
+    const identity = (bytes) => ({
+      path: member,
+      mode: 292,
+      size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const manifest = (bytes, elf = [measured]) => ({
+      files: [identity(bytes)],
+      externalLibraries: [],
+      systemClosure: { loaderResolution: { elf } },
+    });
+    async function install(bytes) {
+      const source = path.join(temporary, "member");
+      await writeFile(source, bytes);
+      admin(["install", "-o", "root", "-g", "root", "-m", "0444", source, target]);
+    }
+    async function baseline() {
+      await install(original);
+      await assertRetainedSearchElf(root, manifest(original), target);
+    }
+    try {
+      admin(["install", "-d", "-o", "root", "-g", "root", "-m", "0555", root]);
+      await baseline();
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original, []), target),
+        "files membership alone must refuse",
+      );
+      await baseline();
+      const nonElf = Buffer.alloc(original.length, 0x61);
+      await install(nonElf);
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(nonElf), target),
+        "matching file hash with false ELF metadata must refuse",
+      );
+      await baseline();
+      const changed = Buffer.from(original);
+      changed[changed.length - 1] ^= 1;
+      await install(changed);
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original), target),
+        "changed actual ELF bytes must refuse",
+      );
+      await baseline();
+      const changedMetadata = {
+        ...measured,
+        needed: [...measured.needed, "undeclared-library.so"],
+      };
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original, [changedMetadata]), target),
+        "actual ELF metadata must equal its measured row",
+      );
+      await baseline();
+      await assert.rejects(
+        () => assertRetainedSearchElf(root, manifest(original), "/usr/bin/true"),
+        "outside-root measured names cannot authorize host files",
+      );
+    } finally {
+      admin(["rm", "-rf", root]);
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
+
+// Artifact metadata is build acceptance DATA, never an execution capability.
+test("build TAR and actual uploaded ZIP budgets preserve exact identity and limits", async () => {
+  const { assertQualifiedTarBudget, assertQualifiedBuildArtifact, BUILD_ARCHIVE_LIMITS } =
+    await import("./qualified-build-budget.mjs");
+  assert.deepEqual(assertQualifiedTarBudget(BUILD_ARCHIVE_LIMITS.tarBytes, "root/\n"), {
+    bytes: BUILD_ARCHIVE_LIMITS.tarBytes,
+    members: 1,
+  });
+  assert.equal(
+    assertQualifiedTarBudget(1024, "member\n".repeat(BUILD_ARCHIVE_LIMITS.members)).members,
+    BUILD_ARCHIVE_LIMITS.members,
+  );
+  for (const bytes of [0, -1, NaN, Infinity, 1.5, BUILD_ARCHIVE_LIMITS.tarBytes + 1])
+    assert.throws(() => assertQualifiedTarBudget(bytes, "root/\n"));
+  for (const listing of ["", "missing-newline", "\n", "root/\n\n", "m\n".repeat(10001)])
+    assert.throws(() => assertQualifiedTarBudget(1024, listing));
+  const expected = { artifactId: "10", runId: "20", attempt: "1", head: "a".repeat(40) };
+  const baseline = {
+    id: 10,
+    name: `qualified-daemon-build-${expected.head}-20-1`,
+    expired: false,
+    size_in_bytes: BUILD_ARCHIVE_LIMITS.zipBytes,
+    workflow_run: {
+      id: 20,
+      head_sha: expected.head,
+      repository_id: 1432178170,
+      head_repository_id: 1432178170,
+    },
+  };
+  const positive = () =>
+    assert.deepEqual(assertQualifiedBuildArtifact(baseline, expected), {
+      artifactId: "10",
+      zipBytes: BUILD_ARCHIVE_LIMITS.zipBytes,
+      qualification: false,
+    });
+  positive();
+  for (const mutation of [
+    { id: 11 },
+    { name: baseline.name.replace("-20-1", "-20-2") },
+    { expired: true },
+    { size_in_bytes: BUILD_ARCHIVE_LIMITS.zipBytes + 1 },
+    { size_in_bytes: 0 },
+    { size_in_bytes: "100" },
+    { size_in_bytes: 1.5 },
+    { workflow_run: { ...baseline.workflow_run, id: 21 } },
+    { workflow_run: { ...baseline.workflow_run, head_sha: "b".repeat(40) } },
+    { workflow_run: { ...baseline.workflow_run, repository_id: 1 } },
+    { workflow_run: { ...baseline.workflow_run, head_repository_id: 1 } },
+    { workflow_run: null },
+  ]) {
+    positive();
+    assert.throws(() => assertQualifiedBuildArtifact({ ...baseline, ...mutation }, expected));
+  }
+  for (const mutation of [
+    { artifactId: "../10" },
+    { runId: "0" },
+    { attempt: "2" },
+    { head: "short" },
+  ]) {
+    positive();
+    assert.throws(() => assertQualifiedBuildArtifact(baseline, { ...expected, ...mutation }));
+  }
+});
+
+test(
+  "actual GNU TAR listing counts directories and escapes member newlines",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async () => {
+    const { mkdtemp, mkdir, writeFile, stat, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { assertQualifiedTarBudget } = await import("./qualified-build-budget.mjs");
+    const execute = promisify(execFile);
+    const temporary = await mkdtemp(join(tmpdir(), "qualified-build-budget-"));
+    try {
+      const input = join(temporary, "input");
+      await mkdir(input);
+      await writeFile(join(input, "line\nname.txt"), "real-member");
+      const archive = join(temporary, "build.tar");
+      await execute("/usr/bin/tar", ["--format=posix", "-cf", archive, "-C", temporary, "input"], {
+        timeout: 10000,
+      });
+      const listed = await execute(
+        "/usr/bin/tar",
+        ["--list", "--quoting-style=escape", "--file", archive],
+        { timeout: 10000, env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } },
+      );
+      assert.equal(assertQualifiedTarBudget((await stat(archive)).size, listed.stdout).members, 2);
+      assert.match(listed.stdout, /line\\nname/);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
+
+test("selected directory import audit refuses native/lazy escapes before code evaluation", async () => {
+  const { auditSelectedDirectoryImports } =
+    await import("../dist/server/server/execution/directory-import-audit.js");
+  const wrap = (body) => `(function(require) { ${body} })`;
+  const baseline = wrap('require("node:fs"); require("@getpaseo/plugin/server/ade-helpers");');
+  const positive = () =>
+    assert.deepEqual(auditSelectedDirectoryImports(baseline, "window"), [
+      "@getpaseo/plugin/server/ade-helpers",
+      "node:fs",
+    ]);
+  positive();
+  for (const body of [
+    'if (false) import("node:fs");',
+    'if (!context.managedSource) import("@getpaseo/plugin/server/ade-helpers");',
+    'Promise.resolve().then(() => import("node:child_process"));',
+    'require("node:url");',
+    'require("fs");',
+    'require("node:fs/promises");',
+    'require("@getpaseo/plugin/internal/ade-directory");',
+    'require("node:child_process");',
+    'require("node:module");',
+    "require(name);",
+    "require(`node:fs`);",
+    'const loader = require; loader("node:fs");',
+    'require.resolve("node:fs");',
+    "typeof require;",
+    "const meta = import.meta;",
+  ]) {
+    positive();
+    assert.throws(() => auditSelectedDirectoryImports(wrap(body), "window"));
+  }
+  for (const source of [
+    'import fs from "node:fs";',
+    "const notFactory = 1;",
+    "(async function(require) {})",
+    "(function* (require) {})",
+    "(function(require, extra) {})",
+    wrap("const broken = ;"),
+    `${baseline}; process.exit(0);`,
+  ]) {
+    positive();
+    assert.throws(() => auditSelectedDirectoryImports(source, "window"));
+  }
+  assert.deepEqual(
+    auditSelectedDirectoryImports(wrap('require("node:crypto"); require("node:os");'), "claim"),
+    ["node:crypto", "node:os"],
+  );
+  assert.throws(() => auditSelectedDirectoryImports(wrap('require("node:crypto");'), "window"));
+  assert.throws(() => auditSelectedDirectoryImports(baseline, "candidate"));
+  // Audit is DATA-only: a throwing body is parsed, never evaluated or converted.
+  assert.deepEqual(
+    auditSelectedDirectoryImports(wrap('throw new Error("must not execute");'), "window"),
+    [],
+  );
+});
+
+test("actual server compiler emits closed literal requires and exposes residual native imports", async () => {
+  const { auditSelectedDirectoryImports } =
+    await import("../dist/server/server/execution/directory-import-audit.js");
+  const { compilePlugin } = await import("../dist/server/server/plugins/compiler-build.js");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const temporary = await mkdtemp(join(tmpdir(), "directory-import-audit-"));
+  const server = join(temporary, "server.ts");
+  try {
+    await writeFile(
+      server,
+      [
+        'export * as fs from "node:fs";',
+        'export {runAdeDirectoryOperation} from "@getpaseo/plugin/server/ade-helpers";',
+        "export default () => () => {};",
+      ].join("\n"),
+    );
+    const baseline = await compilePlugin({ client: null, server });
+    assert.equal(typeof baseline.serverBundle, "string");
+    assert.deepEqual(auditSelectedDirectoryImports(baseline.serverBundle, "window"), [
+      "@getpaseo/plugin/server/ade-helpers",
+      "node:fs",
+    ]);
+    await writeFile(
+      server,
+      [
+        "export default (context) => {",
+        'context.before("agent.open", async () => {',
+        'if (!context.managedSource) await import("node:fs");',
+        "}); return () => {}; };",
+      ].join("\n"),
+    );
+    const residual = await compilePlugin({ client: null, server });
+    assert.equal(typeof residual.serverBundle, "string");
+    assert.throws(() => auditSelectedDirectoryImports(residual.serverBundle, "window"), /Native/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });

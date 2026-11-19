@@ -1346,7 +1346,10 @@ describe("native maintenance participant serialization", () => {
       bindTerminalManager() {},
     };
   }
-  function bindMechanismAuthority(reservation: MaintenanceReservation, refresh: () => Promise<void>) {
+  function bindMechanismAuthority(
+    reservation: MaintenanceReservation,
+    refresh: () => Promise<void>,
+  ) {
     reservation.setReady(false);
     reservation.bindTransport("mechanism-only-server", mechanismAuthority(refresh));
     reservation.setReady(true);
@@ -1999,7 +2002,9 @@ describe("native maintenance participant serialization", () => {
   );
   test("raw held response cannot survive failed post-await authority refresh", async () => {
     const refresh = vi.fn(async () => {});
-    refresh.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("authority lost after barrier"));
+    refresh
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("authority lost after barrier"));
     const wrapped = qualifiedMaintenanceParticipant(
       { supportsV1: () => true, begin: async () => "held", end: async () => {} },
       mechanismAuthority(refresh),
@@ -2013,8 +2018,12 @@ describe("native maintenance participant serialization", () => {
     async (failAt) => {
       let entered!: () => void;
       let finish!: () => void;
-      const entering = new Promise<void>((resolve) => { entered = resolve; });
-      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      const entering = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
       let calls = 0;
       const refresh = vi.fn(async () => {
         if (++calls === failAt) {
@@ -2023,7 +2032,11 @@ describe("native maintenance participant serialization", () => {
           throw new Error("protected authority lost");
         }
       });
-      const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+      const f = await fixture({
+        supportsV1: () => true,
+        begin: async () => "held",
+        end: async () => {},
+      });
       bindMechanismAuthority(f.reservation, refresh);
       const path = maintenanceJoin(f.home, "maintenance-reservation.json");
       try {
@@ -2035,7 +2048,11 @@ describe("native maintenance participant serialization", () => {
         await expect(pending).rejects.toThrow("protected authority lost");
         expect(refresh).toHaveBeenCalledTimes(failAt);
         const record = JSON.parse(readMaintenanceFile(path, "utf8"));
-        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-begin", uncertain: true });
+        expect(record).toMatchObject({
+          generation: 1,
+          transactionId: "refresh-begin",
+          uncertain: true,
+        });
         expect(Boolean(record.tokenDigest)).toBe(failAt === 2);
         expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
@@ -2061,11 +2078,19 @@ describe("native maintenance participant serialization", () => {
         refresh.mockImplementation(async () => {
           if (++calls === failAt) throw new Error("protected authority lost");
         });
-        await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow("protected authority lost");
+        await expect(f.reservation.end(1, held.ownerToken)).rejects.toThrow(
+          "protected authority lost",
+        );
         expect(end).toHaveBeenCalledTimes(failAt === 3 ? 1 : 0);
         expect(refresh).toHaveBeenCalledTimes(failAt);
-        const record = JSON.parse(readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"));
-        expect(record).toMatchObject({ generation: 1, transactionId: "refresh-end", uncertain: true });
+        const record = JSON.parse(
+          readMaintenanceFile(maintenanceJoin(f.home, "maintenance-reservation.json"), "utf8"),
+        );
+        expect(record).toMatchObject({
+          generation: 1,
+          transactionId: "refresh-end",
+          uncertain: true,
+        });
         expect(Boolean(record.tokenDigest)).toBe(failAt === 1);
         expect((await MaintenanceReservation.create(f.home, async () => true)).status().state).toBe(
           "recovery-required",
@@ -2157,12 +2182,23 @@ describe("native maintenance participant serialization", () => {
     }
   });
   test("held operation final refresh retains its original lease and rejects interleaved cleanup", async () => {
-    const f = await fixture({ supportsV1: () => true, begin: async () => "held", end: async () => {} });
+    const f = await fixture({
+      supportsV1: () => true,
+      begin: async () => "held",
+      end: async () => {},
+    });
     const refresh = vi.fn(async () => {});
     bindMechanismAuthority(f.reservation, refresh);
     const claim: HeldPluginOperationClaim = {
-      generation: 1, transactionId: "refresh-held", operation: "replace", pluginId: "unit", path: "/B",
-      expectedPath: "/A", expectedGeneration: 1, snapshotSha256: "a".repeat(64), serverBundleSha256: "b".repeat(64),
+      generation: 1,
+      transactionId: "refresh-held",
+      operation: "replace",
+      pluginId: "unit",
+      path: "/B",
+      expectedPath: "/A",
+      expectedGeneration: 1,
+      snapshotSha256: "a".repeat(64),
+      serverBundleSha256: "b".repeat(64),
     };
     try {
       const held = await f.reservation.begin(1, claim.transactionId);
@@ -2173,9 +2209,9 @@ describe("native maintenance participant serialization", () => {
       refresh.mockImplementation(async () => {
         await f.reservation.runCleanup(cleanup);
       });
-      await expect(f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined)).rejects.toThrow(
-        "work or readiness changed",
-      );
+      await expect(
+        f.reservation.ownerPluginOperation(claim, held.ownerToken, async () => undefined),
+      ).rejects.toThrow("work or readiness changed");
       expect(f.reservation.status().state).toBe("recovery-required");
     } finally {
       await f.reservation.flushStorage();

@@ -265,11 +265,12 @@ export async function acquirePidLock(
 
 export async function refreshPidLock(
   paseoHome: string,
-  options?: { ownerPid?: number },
+  options?: { ownerPid?: number; startedAt?: string },
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
   let fd;
+  let failed: { error: unknown } | null = null;
   try {
     fd = await open(pidPath, "r+");
   } catch (error) {
@@ -287,11 +288,38 @@ export async function refreshPidLock(
     if (lock.pid !== lockOwnerPid) {
       throw new PidLockError(`Cannot refresh PID lock owned by PID ${lock.pid}`, lock);
     }
+    if (options?.startedAt !== undefined && lock.startedAt !== options.startedAt) {
+      throw new PidLockError("Cannot refresh PID lock from another incarnation", lock);
+    }
     const now = new Date();
     await fd.utimes(now, now);
-  } finally {
-    await fd.close();
+  } catch (error) {
+    failed = { error };
   }
+  await closePidLockHandle(fd, failed, options?.startedAt !== undefined);
+}
+
+async function closePidLockHandle(
+  fd: FileHandle,
+  failed: { error: unknown } | null,
+  guarded: boolean,
+): Promise<void> {
+  let closeFailed: { error: unknown } | null = null;
+  try {
+    await fd.close();
+  } catch (error) {
+    closeFailed = { error };
+  }
+  if (closeFailed) {
+    if (failed && guarded)
+      throw new AggregateError(
+        [failed.error, closeFailed.error],
+        "PID operation and close failed",
+        { cause: failed.error },
+      );
+    throw closeFailed.error;
+  }
+  if (failed) throw failed.error;
 }
 
 async function readPidLockFromHandle(fd: FileHandle): Promise<PidLockInfo | null> {
@@ -358,11 +386,12 @@ export function startPidLockHeartbeat(
 export async function updatePidLock(
   paseoHome: string,
   patch: { listen: string; serverId: string } | { listen: null; serverId: null },
-  options?: { ownerPid?: number },
+  options?: { ownerPid?: number; startedAt?: string },
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
   const fd = await open(pidPath, "r+");
+  let failed: { error: unknown } | null = null;
   try {
     const existingLock = await readPidLockFromHandleWithRetry(fd);
     if (!existingLock) {
@@ -374,6 +403,9 @@ export async function updatePidLock(
         existingLock,
       );
     }
+    if (options?.startedAt !== undefined && existingLock.startedAt !== options.startedAt) {
+      throw new PidLockError("Cannot update PID lock from another incarnation", existingLock);
+    }
 
     const updatedLock: PidLockInfo = {
       ...existingLock,
@@ -381,16 +413,56 @@ export async function updatePidLock(
     };
     await fd.truncate(0);
     await fd.writeFile(JSON.stringify(updatedLock));
-  } finally {
-    await fd.close();
+  } catch (error) {
+    failed = { error };
   }
+  await closePidLockHandle(fd, failed, options?.startedAt !== undefined);
+}
+
+async function releaseStrictPidLock(
+  paseoHome: string,
+  options: { ownerPid?: number; startedAt?: string },
+): Promise<void> {
+  const pidPath = getPidFilePath(paseoHome);
+  if (
+    typeof options.ownerPid !== "number" ||
+    !Number.isSafeInteger(options.ownerPid) ||
+    options.ownerPid <= 0 ||
+    typeof options.startedAt !== "string" ||
+    !options.startedAt
+  )
+    throw new PidLockError("Strict PID release requires the original PID and start stamp");
+  let lock: PidLockInfo | null;
+  try {
+    lock = parsePidLockInfo(JSON.parse(await readFile(pidPath, "utf-8")));
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") return;
+    throw error;
+  }
+  if (!lock) throw new PidLockError("Cannot release invalid PID lock");
+  if (lock.pid !== options.ownerPid || lock.startedAt !== options.startedAt)
+    throw new PidLockError("Cannot release PID lock from another incarnation", lock);
+  const beforeUnlink = await getPidLockInfo(paseoHome);
+  if (!beforeUnlink) return;
+  if (beforeUnlink.pid !== options.ownerPid || beforeUnlink.startedAt !== options.startedAt)
+    throw new PidLockError("PID lock changed before strict release", beforeUnlink);
+  try {
+    await unlink(pidPath);
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
+  }
+  const current = await getPidLockInfo(paseoHome);
+  if (current?.pid === options.ownerPid && current.startedAt === options.startedAt)
+    throw new PidLockError("Original PID lock remains after strict release", current);
+  return;
 }
 
 export async function releasePidLock(
   paseoHome: string,
-  options?: { ownerPid?: number; startedAt?: string },
+  options?: { ownerPid?: number; startedAt?: string; strict?: true },
 ): Promise<void> {
   const pidPath = getPidFilePath(paseoHome);
+  if (options?.strict) return releaseStrictPidLock(paseoHome, options);
   const lockOwnerPid = resolveOwnerPid(options?.ownerPid);
   try {
     // Only remove if it's our lock

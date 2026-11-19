@@ -1,4 +1,4 @@
-import { mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -14,6 +14,86 @@ import {
 } from "./pid-lock.js";
 
 describe("pid-lock ownership", () => {
+  test("guarded refresh and publication preserve a same-PID replacement incarnation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-pid-incarnation-"));
+    const file = join(home, "paseo.pid");
+    try {
+      await acquirePidLock(home, null, { ownerPid: process.pid });
+      const original = await getPidLockInfo(home);
+      expect(original).not.toBeNull();
+      if (!original) throw new Error("Missing actual acquired PID record");
+      const expected = { ownerPid: process.pid, startedAt: original.startedAt };
+      await refreshPidLock(home, expected);
+      await updatePidLock(
+        home,
+        { listen: "/actual/daemon.sock", serverId: "original-server" },
+        expected,
+      );
+      expect(await getPidLockInfo(home)).toMatchObject({
+        pid: process.pid,
+        startedAt: original.startedAt,
+        listen: "/actual/daemon.sock",
+      });
+      const replacement = { ...original, startedAt: "2001-01-01T00:00:00.000Z", listen: null };
+      await writeFile(file, JSON.stringify(replacement));
+      const before = await stat(file, { bigint: true });
+      const bytes = await readFile(file);
+      await expect(refreshPidLock(home, expected)).rejects.toThrow("another incarnation");
+      await expect(
+        updatePidLock(home, { listen: "/wrong.sock", serverId: "wrong" }, expected),
+      ).rejects.toThrow("another incarnation");
+      expect(await readFile(file)).toEqual(bytes);
+      const after = await stat(file, { bigint: true });
+      expect(after.mtimeNs).toBe(before.mtimeNs);
+      await releasePidLock(home, expected);
+      expect(await readFile(file)).toEqual(bytes);
+      // Existing no-stamp callers preserve their original PID-only semantics.
+      await refreshPidLock(home, { ownerPid: process.pid });
+      await updatePidLock(home, { listen: null, serverId: null }, { ownerPid: process.pid });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("strict release exposes malformed and unlink failures and leaves replacements alone", async () => {
+    const home = await mkdtemp(join(tmpdir(), "paseo-pid-strict-release-"));
+    const file = join(home, "paseo.pid");
+    try {
+      await expect(releasePidLock(home, { strict: true })).rejects.toThrow(
+        "original PID and start stamp",
+      );
+      await acquirePidLock(home, null, { ownerPid: process.pid });
+      const original = await getPidLockInfo(home);
+      if (!original) throw new Error("Missing actual acquired PID record");
+      const expected = {
+        ownerPid: original.pid,
+        startedAt: original.startedAt,
+        strict: true as const,
+      };
+      const replacement = { ...original, startedAt: "2002-01-01T00:00:00.000Z" };
+      await writeFile(file, JSON.stringify(replacement));
+      await expect(releasePidLock(home, expected)).rejects.toThrow("another incarnation");
+      expect(await getPidLockInfo(home)).toEqual(replacement);
+      await writeFile(file, "{");
+      await expect(releasePidLock(home, expected)).rejects.toBeInstanceOf(SyntaxError);
+      await writeFile(file, "{}");
+      await expect(releasePidLock(home, expected)).rejects.toThrow("invalid PID lock");
+      await writeFile(file, JSON.stringify(original));
+      if (process.platform !== "win32" && process.getuid?.() !== 0) {
+        await chmod(home, 0o500);
+        await expect(releasePidLock(home, expected)).rejects.toMatchObject({ code: "EACCES" });
+        await chmod(home, 0o700);
+        expect(await getPidLockInfo(home)).toEqual(original);
+      }
+      await releasePidLock(home, expected);
+      expect(await getPidLockInfo(home)).toBeNull();
+      await releasePidLock(home, expected);
+    } finally {
+      await chmod(home, 0o700);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("writes and releases lock for explicit owner pid", async () => {
     const parent = await mkdtemp(join(tmpdir(), "paseo-pid-lock-owner-"));
     const paseoHome = join(parent, "home");

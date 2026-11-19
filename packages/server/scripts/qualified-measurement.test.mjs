@@ -1,6 +1,290 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test(
+  "direct daemon discovery metadata drains actual writes without claiming service startup",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async (t) => {
+    const { acquireQualifiedDaemonReadiness } =
+      await import("../dist/server/server/execution/daemon-readiness.js");
+    const { getPidLockInfo, acquirePidLock, releasePidLock } =
+      await import("../dist/server/server/pid-lock.js");
+    const { waitForDaemonReady } = await import("../dist/server/server/daemon-instance.js");
+    const fs = await import("node:fs");
+    const io = fs.default.promises;
+    const { syncBuiltinESMExports } = await import("node:module");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const parent = await io.mkdtemp(path.join(tmpdir(), "daemon-discovery-"));
+    const originalOpen = io.open;
+    const originalInterval = globalThis.setInterval;
+    const descriptors = new Set();
+    const gates = [];
+    const owners = [];
+    let pulse;
+    let behavior = {};
+    function deferred() {
+      let resolve;
+      const promise = new Promise((done) => {
+        resolve = done;
+      });
+      const result = { promise, resolve };
+      gates.push(result);
+      return result;
+    }
+    async function wrappedOpen(file, ...args) {
+      const handle = await originalOpen.call(io, file, ...args);
+      if (!String(file).startsWith(`${parent}/`) || args[0] !== "r+") return handle;
+      descriptors.add(handle);
+      const utimes = handle.utimes.bind(handle);
+      const close = handle.close.bind(handle);
+      const write = handle.writeFile.bind(handle);
+      handle.utimes = async (...times) => {
+        behavior.entered?.resolve();
+        await behavior.gate?.promise;
+        await utimes(...times);
+        if (behavior.error) throw behavior.error;
+      };
+      handle.close = async () => {
+        await close();
+        descriptors.delete(handle);
+        if (behavior.closeError) throw behavior.closeError;
+      };
+      handle.writeFile = async (...writeArgs) => {
+        behavior.writeEntered?.resolve();
+        await behavior.writeGate?.promise;
+        const result = await write(...writeArgs);
+        if (behavior.writeError) throw behavior.writeError;
+        return result;
+      };
+      return handle;
+    }
+    globalThis.setInterval = (callback, delay, ...args) => {
+      assert.equal(delay, 30000);
+      pulse = callback;
+      return originalInterval(callback, delay, ...args);
+    };
+    io.open = wrappedOpen;
+    syncBuiltinESMExports();
+    try {
+      assert.equal((await import("node:fs/promises")).open, wrappedOpen);
+      await t.test(
+        "actual public discovery observes null until publication and exact target afterward",
+        async () => {
+          const home = path.join(parent, "normal");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          const original = await getPidLockInfo(home);
+          assert.equal(original.pid, process.pid);
+          assert.equal(original.listen, null);
+          await assert.rejects(
+            waitForDaemonReady(home, { timeoutMs: 1 }),
+            (error) => error.code === "DAEMON_NOT_READY",
+          );
+          await assert.rejects(acquireQualifiedDaemonReadiness(home));
+          // Discovery DATA only; this test does not manufacture a daemon or socket server.
+          await owner.publish(path.join(parent, "actual-bound.sock"), "actual-server");
+          const ready = await waitForDaemonReady(home);
+          assert.equal(ready.listen, path.join(parent, "actual-bound.sock"));
+          assert.equal(ready.serverId, "actual-server");
+          assert.equal(ready.startedAt, original.startedAt);
+          await owner.clearAndDrain();
+          assert.equal((await getPidLockInfo(home)).listen, null);
+          await owner.releaseAfterStop();
+          assert.equal(await getPidLockInfo(home), null);
+        },
+      );
+      await t.test(
+        "retirement waits actual admitted heartbeat then publication and clearing",
+        async () => {
+          const home = path.join(parent, "delayed");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          const entered = deferred();
+          const gate = deferred();
+          behavior = { entered, gate };
+          pulse();
+          await entered.promise;
+          const publication = owner.publish(path.join(parent, "queued.sock"), "queued-server");
+          const clearing = owner.clearAndDrain();
+          let drained = false;
+          const observed = clearing.then(() => {
+            drained = true;
+            return undefined;
+          });
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(drained, false);
+          assert.equal((await getPidLockInfo(home)).listen, null);
+          assert.equal(descriptors.size, 1);
+          await assert.rejects(owner.publish("late", "late"), /admission is closed/);
+          gate.resolve();
+          await Promise.all([publication, observed]);
+          assert.equal(descriptors.size, 0);
+          assert.equal((await getPidLockInfo(home)).listen, null);
+          await owner.releaseAfterStop();
+          behavior = {};
+        },
+      );
+      await t.test(
+        "actual heartbeat error remains failure after drain and clears ready data",
+        async () => {
+          const home = path.join(parent, "failed");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          await owner.publish("/actual.sock", "actual-server");
+          const error = new Error("after actual heartbeat write failure");
+          behavior = { error };
+          pulse();
+          assert.equal(await owner.failed, error);
+          // One-shot failure: subsequent real reads/writes succeed, provenance stays failed.
+          behavior = {};
+          await assert.rejects(owner.clearAndDrain(), (failure) => failure === error);
+          assert.equal(descriptors.size, 0);
+          assert.equal((await getPidLockInfo(home)).listen, null);
+          assert.throws(
+            () => owner.assertHealthy(),
+            (failure) => failure === error,
+          );
+          await assert.rejects(owner.releaseAfterStop(), (failure) => failure === error);
+          assert.notEqual(await getPidLockInfo(home), null);
+          behavior = {};
+        },
+      );
+      await t.test(
+        "one-shot publication failure cannot become healthy after successful reads",
+        async () => {
+          const home = path.join(parent, "publication-error");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          const error = new Error("after actual publication write failure");
+          behavior = { writeError: error };
+          await assert.rejects(
+            owner.publish("/publication.sock", "publication-server"),
+            (failure) => failure === error,
+          );
+          behavior = {};
+          await assert.rejects(owner.clearAndDrain(), (failure) => failure === error);
+          assert.equal((await getPidLockInfo(home)).listen, null);
+          assert.throws(
+            () => owner.assertHealthy(),
+            (failure) => failure === error,
+          );
+          await assert.rejects(owner.releaseAfterStop(), (failure) => failure === error);
+          assert.equal(descriptors.size, 0);
+        },
+      );
+      await t.test("publication retirement awaits the actual descriptor write", async () => {
+        const home = path.join(parent, "write-delayed");
+        const owner = await acquireQualifiedDaemonReadiness(home);
+        owners.push(owner);
+        const writeEntered = deferred();
+        const writeGate = deferred();
+        behavior = { writeEntered, writeGate };
+        const publication = owner.publish("/written.sock", "written-server");
+        await writeEntered.promise;
+        let drained = false;
+        const retiring = owner.clearAndDrain().then(() => {
+          drained = true;
+          return undefined;
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(drained, false);
+        assert.equal(descriptors.size, 1);
+        writeGate.resolve();
+        await Promise.all([publication, retiring]);
+        assert.equal(descriptors.size, 0);
+        assert.equal((await getPidLockInfo(home)).listen, null);
+        await owner.releaseAfterStop();
+        behavior = {};
+      });
+      await t.test(
+        "original heartbeat failure survives actual descriptor-close failure",
+        async () => {
+          const home = path.join(parent, "double-error");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          const error = new Error("original actual heartbeat failure");
+          const closeError = new Error("after actual metadata descriptor close");
+          behavior = { error, closeError };
+          pulse();
+          const failure = await owner.failed;
+          assert.ok(failure instanceof AggregateError);
+          assert.deepEqual(failure.errors, [error, closeError]);
+          assert.equal(failure.cause, error);
+          await assert.rejects(owner.clearAndDrain(), (cleanup) => {
+            assert.ok(cleanup instanceof AggregateError);
+            assert.equal(cleanup.errors[0], failure);
+            return true;
+          });
+          assert.equal(descriptors.size, 0);
+          behavior = {};
+        },
+      );
+      await t.test(
+        "same PID replacement remains untouched and cannot publish or release",
+        async () => {
+          const home = path.join(parent, "replaced");
+          const owner = await acquireQualifiedDaemonReadiness(home);
+          owners.push(owner);
+          const original = await getPidLockInfo(home);
+          const replacement = {
+            ...original,
+            startedAt: "2003-01-01T00:00:00.000Z",
+            listen: "/replacement.sock",
+          };
+          const bytes = JSON.stringify(replacement);
+          await io.writeFile(path.join(home, "paseo.pid"), bytes);
+          await assert.rejects(owner.publish("/wrong.sock", "wrong"), /ownership changed/);
+          await assert.rejects(owner.clearAndDrain());
+          await assert.rejects(owner.releaseAfterStop());
+          assert.equal(await io.readFile(path.join(home, "paseo.pid"), "utf8"), bytes);
+          assert.equal(descriptors.size, 0);
+          await io.writeFile(path.join(home, "paseo.pid"), JSON.stringify(original));
+          assert.deepEqual(await getPidLockInfo(home), original);
+          assert.throws(() => owner.assertHealthy());
+          await assert.rejects(owner.releaseAfterStop());
+        },
+      );
+      await t.test(
+        "strict release observes its actual postcondition without deleting a successor",
+        async () => {
+          const home = path.join(parent, "release-race");
+          const file = path.join(home, "paseo.pid");
+          await acquirePidLock(home, null, { ownerPid: process.pid });
+          const original = await getPidLockInfo(home);
+          const expected = { ownerPid: original.pid, startedAt: original.startedAt, strict: true };
+          const unlink = io.unlink;
+          let successor = original;
+          io.unlink = async (target) => {
+            await unlink.call(io, target);
+            if (target === file) await io.writeFile(file, JSON.stringify(successor));
+          };
+          syncBuiltinESMExports();
+          try {
+            await assert.rejects(releasePidLock(home, expected), /remains after strict release/);
+            successor = { ...original, startedAt: "2004-01-01T00:00:00.000Z" };
+            await releasePidLock(home, expected);
+            assert.deepEqual(await getPidLockInfo(home), successor);
+          } finally {
+            io.unlink = unlink;
+            syncBuiltinESMExports();
+          }
+        },
+      );
+    } finally {
+      for (const gate of gates) gate.resolve();
+      await Promise.allSettled(owners.map((owner) => owner.clearAndDrain()));
+      assert.equal(descriptors.size, 0);
+      io.open = originalOpen;
+      syncBuiltinESMExports();
+      globalThis.setInterval = originalInterval;
+      await io.rm(parent, { recursive: true, force: true });
+    }
+  },
+);
+
 test("directory compiler recipe data binds the full canonical body without granting admission", async () => {
   const { parseDirectoryHelperRecipe } =
     await import("../dist/server/server/execution/directory-recipe.js");

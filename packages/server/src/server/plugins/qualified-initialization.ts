@@ -1,6 +1,14 @@
+import { recordStartupPhase, startupPhaseNow } from "../execution/startup-phase.js";
 import { isQualifiedDaemonOwner } from "../execution/qualified-host.js";
 import type { QualifiedDaemonOwner } from "../execution/daemon-types.js";
 import type { NativePluginAdmission } from "./maintenance.js";
+
+// Local diagnostic ordinals/durations never participate in admission or settlement.
+let startupPhaseSequence = 0;
+function startupDuration(start: number | null): number | undefined {
+  const end = startupPhaseNow();
+  return start !== null && end !== null && end >= start ? end - start : undefined;
+}
 
 declare const initializationBrand: unique symbol;
 export interface QualifiedPluginInitialization {
@@ -43,7 +51,17 @@ export async function runQualifiedPluginInitialization<T>(
   operation: (scope: QualifiedPluginInitialization) => Promise<T>,
 ): Promise<T> {
   if (!isQualifiedDaemonOwner(owner)) throw new Error("Qualified initialization owner unavailable");
+  const startupSpan = ++startupPhaseSequence;
+  const refreshStarted = startupPhaseNow();
+  recordStartupPhase({ phase: "plugin.pre-scope-refresh", edge: "begin", span: startupSpan });
   await owner.refresh();
+  recordStartupPhase({
+    phase: "plugin.pre-scope-refresh",
+    edge: "end",
+    span: startupSpan,
+    durationUs: startupDuration(refreshStarted),
+    outcome: "ok",
+  });
   return native.runQualifiedInitialization(async () => {
     const scope = Object.freeze({}) as QualifiedPluginInitialization;
     const entry = { owner, native, pluginId, sourcePath, active: true };

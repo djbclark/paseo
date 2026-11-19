@@ -989,3 +989,136 @@ it("refuses mutually selected initialization profiles and preserves ordinary/pas
     }).success,
   ).toBe(false);
 });
+
+// The entry basename selects diagnostics only; it never creates producer qualification.
+async function startupMarkerFixture(mode: string, entryName = "role.cjs") {
+  const directory = await realpath(await mkdtemp(nodePath.join(tmpdir(), "plugin-phase-markers-")));
+  const workerModule = fileURLToPath(
+    new URL("../../../dist/server/server/plugins/plugin-process.js", import.meta.url),
+  );
+  const entry = nodePath.join(directory, entryName);
+  await writeFile(
+    entry,
+    `
+    const { pathToFileURL } = require('node:url');
+    async function main() {
+      const { attachPluginWorkerChannel } = await import(pathToFileURL(${JSON.stringify(workerModule)}).href);
+      const mode = ${JSON.stringify(mode)};
+      const directory = ${JSON.stringify(directory)};
+      const messages = [];
+      let receive;
+      let resolveReady, resolveFatal, resolveContributed, releaseDrain;
+      const ready = new Promise(resolve => { resolveReady = resolve; });
+      const fatal = new Promise(resolve => { resolveFatal = resolve; });
+      const contributed = new Promise(resolve => { resolveContributed = resolve; });
+      const drain = new Promise(resolve => { releaseDrain = resolve; });
+      let readyBeforeDrain = null;
+      const channel = {
+        onMessage(handler) { receive = handler; return () => {}; }, disconnect() {},
+        send(message, callback) {
+          messages.push(message.type);
+          if (message.type === 'ready') resolveReady();
+          if (message.type === 'fatal') resolveFatal(message.error);
+          if (message.type === 'paseo_frame' && typeof message.data === 'string' && JSON.parse(message.data).type === 'hello') {
+            queueMicrotask(() => receive({ type: 'paseo_frame', isBinary: false, data: JSON.stringify({
+              type: 'session', message: { type: 'status', payload: { status: 'server_info',
+              serverId: 'phase-test', hostname: 'phase-test', version: '0.4.0', features: {} } }
+            }) }));
+          }
+          callback?.();
+        }
+      };
+      const worker = attachPluginWorkerChannel(channel, async (_source, original) => {
+        if (mode === 'loader-error') throw new Error('original loader rejection');
+        if (mode === 'drain') {
+          const continuation = original.activityOwner.retainCurrent();
+          void continuation.run(async () => { try { await drain; } finally { continuation.release(); } });
+        }
+        return () => {
+          if (mode === 'contribution-error') throw new Error('original contribution rejection');
+          resolveContributed();
+          return () => {};
+        };
+      });
+      receive({ type: 'initialize', pluginId: 'phase-test', pluginDirectory: directory,
+        appVersion: '0.4.0', bundle: 'host-loader-bytes', hostInstanceId: 'phase-instance',
+        passiveInitialization: { contract: 'native-passive-contract-1', hold: {
+          generation: 1, transactionId: 'phase-test', instanceId: 'phase-instance' } } });
+      if (mode === 'drain') {
+        await contributed;
+        await new Promise(resolve => setImmediate(resolve));
+        readyBeforeDrain = messages.includes('ready');
+        releaseDrain();
+      }
+      const outcome = await Promise.race([ready.then(() => ({ ready: true })), fatal.then(error => ({ error }))]);
+      await worker.shutdown();
+      process.stdout.write(JSON.stringify({ outcome, readyBeforeDrain, messages }));
+    }
+    main().catch(error => { console.error(error); process.exitCode = 1; });
+  `,
+  );
+  try {
+    const result = await promisify(execFile)(process.execPath, [entry], {
+      timeout: 30000,
+      maxBuffer: 1024 * 1024,
+    });
+    const rows = result.stderr
+      .split("\n")
+      .filter((line) => line.startsWith("PASEO_STARTUP_PHASE "))
+      .map((line) => JSON.parse(line.slice("PASEO_STARTUP_PHASE ".length)));
+    return { result: JSON.parse(result.stdout), rows };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+it("records actual original worker startup boundaries while retained init work drains before ready", async () => {
+  const { result, rows } = await startupMarkerFixture("drain");
+  expect(result.outcome).toEqual({ ready: true });
+  expect(result.readyBeforeDrain).toBe(false);
+  expect(rows.map((row) => [row.phase, row.edge])).toEqual([
+    ["worker.initialize-received", "point"],
+    ["worker.connect", "begin"],
+    ["worker.connect", "end"],
+    ["worker.load", "begin"],
+    ["worker.load", "end"],
+    ["worker.contribute", "begin"],
+    ["worker.contribute", "end"],
+    ["worker.usage-metadata", "begin"],
+    ["worker.usage-metadata", "end"],
+    ["worker.init-drain", "begin"],
+    ["worker.init-drain", "end"],
+    ["worker.ready-send", "point"],
+  ]);
+  const pid = rows[0].pid;
+  for (const [index, row] of rows.entries()) {
+    expect(row).toMatchObject({ version: 1, pid, role: "daemon", seq: index + 1 });
+    if (row.edge === "end")
+      expect(row).toMatchObject({ outcome: "ok", durationUs: expect.any(Number) });
+    expect(
+      Buffer.byteLength("PASEO_STARTUP_PHASE " + JSON.stringify(row) + "\n"),
+    ).toBeLessThanOrEqual(256);
+  }
+});
+
+it.each(["loader-error", "contribution-error"])(
+  "preserves %s without a false successful span or ready marker",
+  async (mode) => {
+    const { result, rows } = await startupMarkerFixture(mode);
+    expect(result.outcome).toEqual({
+      error:
+        mode === "loader-error" ? "original loader rejection" : "original contribution rejection",
+    });
+    expect(result.messages).not.toContain("ready");
+    const phase = mode === "loader-error" ? "worker.load" : "worker.contribute";
+    expect(rows.filter((row) => row.phase === phase).map((row) => row.edge)).toEqual(["begin"]);
+    expect(rows.some((row) => row.phase === "worker.ready-send")).toBe(false);
+    expect(rows.some((row) => row.phase === "worker.init-drain" && row.edge === "end")).toBe(false);
+  },
+);
+
+it("leaves ordinary unknown-entry worker behavior and stdout intact without diagnostic output", async () => {
+  const { result, rows } = await startupMarkerFixture("success", "ordinary.cjs");
+  expect(result.outcome).toEqual({ ready: true });
+  expect(rows).toEqual([]);
+});

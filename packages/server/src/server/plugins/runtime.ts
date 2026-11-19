@@ -1,3 +1,4 @@
+import { recordStartupPhase, startupPhaseNow } from "../execution/startup-phase.js";
 import { directoryInitializationFromTicket } from "./directory-initialization.js";
 import {
   assertQualifiedPluginInitialization,
@@ -139,6 +140,13 @@ interface ChildTermination {
   signal?: NodeJS.Signals | null;
   closed: boolean;
   completion: Promise<void>;
+}
+
+// Local diagnostic ordinals/durations never participate in admission or settlement.
+let startupPhaseSequence = 0;
+function startupDuration(start: number | null): number | undefined {
+  const end = startupPhaseNow();
+  return start !== null && end !== null && end >= start ? end - start : undefined;
 }
 
 interface LoadedPlugin {
@@ -847,7 +855,21 @@ export class PluginRuntime {
       bundle: retained.serverBundle,
       clientBundle: "",
       beforeInitialize: async (dispatch) => {
+        const startupSpan = ++startupPhaseSequence;
+        const refreshStarted = startupPhaseNow();
+        recordStartupPhase({
+          phase: "plugin.pre-dispatch-refresh",
+          edge: "begin",
+          span: startupSpan,
+        });
         await owner.refresh();
+        recordStartupPhase({
+          phase: "plugin.pre-dispatch-refresh",
+          edge: "end",
+          span: startupSpan,
+          durationUs: startupDuration(refreshStarted),
+          outcome: "ok",
+        });
         this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
         const current = getQualifiedBuiltinObservation(retained.child, owner);
         if (current.instanceId !== observation.instanceId)
@@ -859,7 +881,17 @@ export class PluginRuntime {
     try {
       if ((await this.childBarrier(loaded, barrier, "maintenance.begin")) !== "held")
         throw new Error("Builtin initialization did not reach idle barrier");
+      const startupSpan = ++startupPhaseSequence;
+      const refreshStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "plugin.post-ready-refresh", edge: "begin", span: startupSpan });
       await owner.refresh();
+      recordStartupPhase({
+        phase: "plugin.post-ready-refresh",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(refreshStarted),
+        outcome: "ok",
+      });
       this.requireLifecycleAdmission(undefined, initialization, pluginId, directory);
       if (inherited) assertQualifiedBuiltinInstance(retained.child, owner, pluginId);
       else if ((await this.childBarrier(loaded, barrier, "maintenance.end")) !== "ended")
@@ -2052,6 +2084,7 @@ export class PluginRuntime {
               contract: "native-passive-contract-1",
               hold: { ...input.initializationBarrier, instanceId },
             };
+          recordStartupPhase({ phase: "plugin.initialize-send", edge: "point" });
           void send(child, {
             type: "initialize",
             pluginId,

@@ -1,3 +1,4 @@
+import { recordStartupPhase, startupPhaseNow } from "../execution/startup-phase.js";
 import {
   capturePluginActivityOrigin,
   snapshotPluginActivityData,
@@ -52,6 +53,14 @@ import { createPluginClientId } from "./plugin-session-identity.js";
 import { PluginSettingsStore } from "./settings/index.js";
 import { readPluginProviderIcon } from "./provider-icon.js";
 import { initializeEnvironmentProxy } from "../network/index.js";
+
+// Local diagnostic ordinals/durations never participate in admission or settlement.
+let startupPhaseSequence = 0;
+function startupDuration(start: number | null): number | undefined {
+  const end = startupPhaseNow();
+  return start !== null && end !== null && end >= start ? end - start : undefined;
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -443,6 +452,8 @@ export function createPluginWorker(
   });
 
   async function initialize(request: Extract<PluginProcessRequest, { type: "initialize" }>) {
+    const startupSpan = ++startupPhaseSequence;
+    recordStartupPhase({ phase: "worker.initialize-received", edge: "point", span: startupSpan });
     // Capture before realpath/connect/loader awaits. Only the host loader sees these references.
     const message = snapshotPluginActivityData(request);
     const initializationContext: PluginWorkerInitializationContext = Object.freeze({
@@ -485,7 +496,16 @@ export function createPluginWorker(
         transportFactory,
       });
       paseo = createPaseoApi(daemonClient);
+      const connectStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "worker.connect", edge: "begin", span: startupSpan });
       await daemonClient.connect();
+      recordStartupPhase({
+        phase: "worker.connect",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(connectStarted),
+        outcome: "ok",
+      });
       settingsStore = message.settingsDirectory
         ? new PluginSettingsStore(message.settingsDirectory, (settingsId) =>
             send({ type: "settings.changed", settingsId }),
@@ -515,6 +535,8 @@ export function createPluginWorker(
         configurable: false,
         enumerable: true,
       });
+      const loadStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "worker.load", edge: "begin", span: startupSpan });
       const loading = initializationActivity.run(() =>
         "contribute" in options
           ? options.contribute
@@ -522,16 +544,34 @@ export function createPluginWorker(
       );
       // Preserve the synchronous path; asynchronous host preparation keeps the SAME init root.
       const contribute = typeof loading === "function" ? loading : await loading;
+      recordStartupPhase({
+        phase: "worker.load",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(loadStarted),
+        outcome: "ok",
+      });
       if (stopping || activity.state() === "unknown")
         throw new Error("Plugin initialization is unavailable");
       registrationPhase = true;
+      const contributeStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "worker.contribute", edge: "begin", span: startupSpan });
       const contributedCleanup = initializationActivity.run(() => contribute(context));
+      recordStartupPhase({
+        phase: "worker.contribute",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(contributeStarted),
+        outcome: "ok",
+      });
       registrationPhase = false;
       if (typeof contributedCleanup !== "function") {
         throw new Error("Plugin contribution must return a cleanup function");
       }
       cleanup = contributedCleanup;
       if (deferredInitializationError) throw deferredInitializationError;
+      const metadataStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "worker.usage-metadata", edge: "begin", span: startupSpan });
       const usageSourceMetadata = await Promise.all(
         [...usageSources.values()]
           .sort((a, b) => a.id.localeCompare(b.id))
@@ -543,8 +583,25 @@ export function createPluginWorker(
               : undefined,
           })),
       );
+      recordStartupPhase({
+        phase: "worker.usage-metadata",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(metadataStarted),
+        outcome: "ok",
+      });
+      const drainStarted = startupPhaseNow();
+      recordStartupPhase({ phase: "worker.init-drain", edge: "begin", span: startupSpan });
       initializationActivity.release();
       await initializationDrained;
+      recordStartupPhase({
+        phase: "worker.init-drain",
+        edge: "end",
+        span: startupSpan,
+        durationUs: startupDuration(drainStarted),
+        outcome: "ok",
+      });
+      recordStartupPhase({ phase: "worker.ready-send", edge: "point", span: startupSpan });
       send({
         type: "ready",
         methods: [...handlers.keys()].sort(),

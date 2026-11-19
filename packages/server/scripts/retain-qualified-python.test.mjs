@@ -46,22 +46,22 @@ async function changeDirectory(directory, operation) {
     await chmod(directory, 0o555);
   }
 }
-function mutateAliasRecord(mutated,kind) {
-        const alias = mutated.sourceFiles.find((r) => r.sourceLink);
-        assert.ok(alias, "actual fixed-source alias measured");
-        if (kind === "alias-missing-link") delete alias.sourceLink;
-        if (kind === "alias-target") alias.sourceLink.target = "../escape";
-        if (kind === "alias-mode") alias.sourceLink.mode = 0o444;
-        if (kind === "alias-path") alias.sourceLink.resolvedSourcePath = "/tmp/target";
-        if (kind === "alias-abi") mutated.observed.source.build.MULTIARCH = "aarch64-linux-gnu";
-        if (kind === "alias-extra") alias.sourceLink.permission = true;
-        if (kind === "alias-other-row")
-          mutated.sourceFiles[0].sourceLink = structuredClone(alias.sourceLink);
-        if (kind === "alias-missing-target")
-          mutated.sourceFiles = mutated.sourceFiles.filter(
-            (r) => r.sourcePath !== alias.sourceLink.resolvedSourcePath,
-          );
-        if (kind === "missing-source") mutated.sourceFiles.pop();
+function mutateAliasRecord(mutated, kind) {
+  const alias = mutated.sourceFiles.find((r) => r.sourceLink);
+  assert.ok(alias, "actual fixed-source alias measured");
+  if (kind === "alias-missing-link") delete alias.sourceLink;
+  if (kind === "alias-target") alias.sourceLink.target = "../escape";
+  if (kind === "alias-mode") alias.sourceLink.mode = 0o444;
+  if (kind === "alias-path") alias.sourceLink.resolvedSourcePath = "/tmp/target";
+  if (kind === "alias-abi") mutated.observed.source.build.MULTIARCH = "aarch64-linux-gnu";
+  if (kind === "alias-extra") alias.sourceLink.permission = true;
+  if (kind === "alias-other-row")
+    mutated.sourceFiles[0].sourceLink = structuredClone(alias.sourceLink);
+  if (kind === "alias-missing-target")
+    mutated.sourceFiles = mutated.sourceFiles.filter(
+      (r) => r.sourcePath !== alias.sourceLink.resolvedSourcePath,
+    );
+  if (kind === "missing-source") mutated.sourceFiles.pop();
 }
 test(
   "fixed source retention, relocation and strict preexec DATA refusals",
@@ -224,7 +224,7 @@ test(
         if (kind === "escape") mutated.files[0].path = "../outside";
         if (kind === "source-mode") mutated.sourceFiles[0].sourceMode = 0o777;
         if (kind === "source-map") mutated.sourceFiles[0].sourcePath = "/tmp/source";
-        mutateAliasRecord(mutated,kind);
+        mutateAliasRecord(mutated, kind);
         if (kind === "layout") mutated.layout.executable = "/usr/bin/python3";
         if (kind === "flags") mutated.layout.argvFlags = ["-S"];
         if (kind === "prefix") mutated.observed.relocated.prefix = "/usr";

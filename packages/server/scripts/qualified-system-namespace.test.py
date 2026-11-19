@@ -193,6 +193,9 @@ class LoaderTraversalTests(unittest.TestCase):
         self.distribution.root = "/retained"
         self.distribution.external = {"/usr/lib/libx-real.so": {"retainedPath": "system-closure/elf/usr/lib/libx-real.so"}}
         self.distribution.directories = ["/declared/lib", "/retained/lib"]
+        self.distribution.retained_directories = {"/retained/lib"}
+        self.distribution.files = {}
+        self.distribution.opened = {}
         self.distribution.aliases = {}
         self.distribution.layout_snapshot = {}
         self.distribution.absent_selection = set()
@@ -261,6 +264,18 @@ class LoaderTraversalTests(unittest.TestCase):
         prefix = self.resolve(path).rstrip("/") + "/"
         return [candidate[len(prefix):] for candidate in self.nodes
                 if candidate.startswith(prefix) and "/" not in candidate[len(prefix):]]
+
+    def test_retained_candidate_writable_route_or_alias_escape_refuses(self):
+        self.file("/retained/lib/libx.so")
+        self.nodes["/retained/lib"].st_mode |= 0o020
+        with self.assertRaisesRegex(ns.Hold, "unprotected-loader-layout"):
+            self.distribution.verify_search([])
+        self.nodes["/retained/lib"].st_mode &= ~0o020
+        self.distribution.layout_snapshot.clear()
+        self.file("/other/unmeasured.so")
+        self.link("/retained/lib/libx.so", "/other/unmeasured.so", "/other/unmeasured.so")
+        with self.assertRaises(ns.Hold):
+            self.distribution.verify_search([])
 
     def test_writable_empty_ordinary_hwcaps_child_refuses(self):
         for variant in ("glibc-hwcaps", "tls"):
@@ -631,6 +646,104 @@ class AdministrativeOrderingTests(unittest.TestCase):
                     for capability in range(3):
                         self.assertIn(mock.call(24, capability, 0, 0, 0), admin.libc.prctl.call_args_list)
                     self.assertIn(mock.call(38, 1, 0, 0, 0), admin.libc.prctl.call_args_list)
+
+
+class RetainedSearchCandidateTests(unittest.TestCase):
+    """Real sibling bytes/FD/inodes; root-layout authority is a source-test double."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = str(pathlib.Path(temporary.name).resolve())
+        self.directory = pathlib.Path(self.root, "lib")
+        self.directory.mkdir()
+        self.member = "lib/libx.so"
+        self.path = self.directory / "libx.so"
+        self.path.write_bytes(elf_bytes())
+        self.path.chmod(0o444)
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        self.addCleanup(os.close, fd)
+        data = os.read(fd, 4096)
+        source = ns.CheckedFile(str(self.path), fd, ns.identity(os.fstat(fd)), data, ())
+        self.source = source
+        distribution = ns.Distribution.__new__(ns.Distribution)
+        self.distribution = distribution
+        distribution.root = self.root
+        distribution.external = {}
+        distribution.directories = [str(self.directory)]
+        distribution.retained_directories = {str(self.directory)}
+        distribution.files = {self.member: {"path": self.member, "mode": 0o444,
+            "size": len(data), "sha256": ns.hashlib.sha256(data).hexdigest()}}
+        distribution.opened = {self.member: source}
+        distribution.absent_selection = set()
+        distribution.needed = {"libx.so"}
+        self.metadata = [ns.elf_metadata(data, self.member)]
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        stack.enter_context(mock.patch.object(ns, "protected_ancestors", return_value=()))
+        # Existing traversal tests exercise literal root-owned route authority;
+        # these tests isolate the additional real retained descriptor boundary.
+        stack.enter_context(mock.patch.object(distribution, "check_path_aliases", side_effect=lambda path: path))
+
+    def test_real_retained_sibling_elf_uses_original_open_descriptor(self):
+        self.distribution.verify_search(self.metadata)
+        self.assertIs(self.distribution.opened[self.member], self.source)
+        self.source.check()
+
+    def test_files_membership_without_measured_elf_or_live_original_fd_refuses(self):
+        for field in ("metadata", "files", "opened", "retained_directories"):
+            with self.subTest(field=field):
+                if field == "metadata":
+                    with self.assertRaises(ns.Hold):
+                        self.distribution.verify_search([])
+                else:
+                    original = getattr(self.distribution, field)
+                    setattr(self.distribution, field, set() if field == "retained_directories" else {})
+                    try:
+                        with self.assertRaises(ns.Hold):
+                            self.distribution.verify_search(self.metadata)
+                    finally:
+                        setattr(self.distribution, field, original)
+
+    def test_non_elf_cannot_be_granted_by_a_measured_row(self):
+        self.path.chmod(0o644)
+        self.path.write_bytes(b"not an ELF")
+        self.path.chmod(0o444)
+        self.source.data = self.path.read_bytes()
+        self.source.before = ns.identity(os.fstat(self.source.fd))
+        expected = self.distribution.files[self.member]
+        expected.update(size=len(self.source.data), sha256=ns.hashlib.sha256(self.source.data).hexdigest())
+        # Even consistent actual file/descriptor identities cannot make it ELF.
+        with self.assertRaises(ns.Hold):
+            self.distribution.verify_search(self.metadata)
+
+    def test_manifest_hash_size_and_mode_cannot_change(self):
+        original = self.distribution.files[self.member].copy()
+        for changed in ({"sha256": "0" * 64}, {"size": original["size"] + 1}, {"mode": 0o555}):
+            self.distribution.files[self.member] = {**original, **changed}
+            with self.subTest(changed=changed), self.assertRaisesRegex(ns.Hold, "file-identity-mismatch"):
+                self.distribution.verify_search(self.metadata)
+
+    def test_actual_changed_bytes_and_replaced_path_inode_refuse(self):
+        self.path.chmod(0o644)
+        self.path.write_bytes(b"x" * len(self.source.data))
+        self.path.chmod(0o444)
+        with self.assertRaisesRegex(ns.Hold, "file-changed"):
+            self.distribution.verify_search(self.metadata)
+        self.path.unlink()
+        self.path.write_bytes(self.source.data)
+        self.path.chmod(0o444)
+        with self.assertRaisesRegex(ns.Hold, "file-changed"):
+            self.distribution.verify_search(self.metadata)
+
+    def test_descriptor_path_escape_and_stale_metadata_refuse(self):
+        self.source.path = str(self.directory / "other.so")
+        with self.assertRaisesRegex(ns.Hold, "unretained-search-candidate"):
+            self.distribution.verify_search(self.metadata)
+        self.source.path = str(self.path)
+        changed = [{**self.metadata[0], "soname": "forged.so"}]
+        with self.assertRaisesRegex(ns.Hold, "elf-metadata-mismatch"):
+            self.distribution.verify_search(changed)
 
 
 class CallerAncestryTests(unittest.TestCase):

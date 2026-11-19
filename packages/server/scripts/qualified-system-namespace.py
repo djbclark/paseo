@@ -682,12 +682,15 @@ class Distribution:
         expected_order = sorted(directories, key=lambda row: (row["kind"], row["path"].encode()))
         require(directories == expected_order, "unsorted-search-directories")
         self.directories = []
+        self.retained_directories = set()
         for row in directories:
             exact(row, ("kind", "path"))
             require(row["kind"] in ("system", "retained"), "invalid-search-kind")
             path = absolute(row["path"]) if row["kind"] == "system" else self.root + "/" + relative(row["path"])
             require(os.path.isdir(path) and path not in self.directories, "missing-or-duplicate-search-directory")
             self.directories.append(path)
+            if row["kind"] == "retained":
+                self.retained_directories.add(path)
         aliases = sequence(self.loader["aliases"], 512)
         require(aliases == sorted(aliases, key=lambda row: row["path"].encode()), "unsorted-aliases")
         self.aliases = {}
@@ -792,6 +795,24 @@ class Distribution:
 
         return walk(path, set())
 
+    def verify_retained_search_candidate(self, target, metadata):
+        member = relative(os.path.relpath(target, self.root))
+        measured = next((row for row in metadata if row["member"] == member), None)
+        source = self.opened.get(member)
+        require(target == self.root + "/" + member and measured is not None and
+                member in self.files and source is not None and source.path == target,
+                "unretained-search-candidate")
+        # Reuse the descriptor already opened/hashed by verify_loader, never
+        # authorize a sibling from a root prefix, SONAME or generic files row.
+        source.check()
+        expected = self.files[member]
+        info = os.fstat(source.fd)
+        require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == expected["mode"] and
+                info.st_size == expected["size"] == len(source.data) and
+                hashlib.sha256(source.data).hexdigest() == expected["sha256"], "file-identity-mismatch")
+        require(elf_metadata(source.data, member) == measured, "elf-metadata-mismatch")
+        source.check()
+
     def verify_search(self, metadata):
         declared_directories = {self.check_path_aliases(directory) for directory in self.directories}
         for row in metadata:
@@ -833,7 +854,10 @@ class Distribution:
                     continue
                 candidate = directory + "/" + name
                 if os.path.lexists(candidate):
-                    require(self.check_path_aliases(candidate) in self.external, "unretained-search-candidate")
+                    target = self.check_path_aliases(candidate)
+                    if target not in self.external:
+                        require(directory in self.retained_directories, "unretained-search-candidate")
+                        self.verify_retained_search_candidate(target, metadata)
                 else:
                     self.absent_selection.add(candidate)
             for variant in ("glibc-hwcaps", "tls"):

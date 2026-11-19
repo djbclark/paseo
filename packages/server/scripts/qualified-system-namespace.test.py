@@ -567,7 +567,9 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
         stack.enter_context(mock.patch.object(ns, "process_record",
             return_value=(123, 1, 1, (caller.uid,) * 4, (caller.gid,) * 4)))
         arguments = (source, target) if method == "bind" else (caller,) if method == "drop" else ()
-        return admin, arguments
+        # Scope syscall doubles to Admin execution. Real main/argparse/gettext
+        # serialization below must observe the real filesystem again.
+        return admin, arguments, stack
 
     def emit(self, error):
         arguments = ["--distribution", "/not-for-logs/root", "--expected-manifest", "/private/manifest",
@@ -588,10 +590,10 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
                          ns._ADMINISTRATIVE_SITES)
         for phase, syscall, method, index in self.SITES:
             with self.subTest(phase=phase):
-                admin, arguments = self.fixture(method)
+                admin, arguments, scope = self.fixture(method)
                 function = getattr(admin.libc, syscall)
                 function.side_effect = [0] * (index - 1) + [-1]
-                with mock.patch.object(ns.ctypes, "get_errno", return_value=13) as read_errno:
+                with scope, mock.patch.object(ns.ctypes, "get_errno", return_value=13) as read_errno:
                     with self.assertRaises(ns._AdministrativeSyscallFailure) as caught:
                         getattr(admin, method)(*arguments)
                     read_errno.assert_called_once_with()
@@ -606,8 +608,8 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
     def test_each_call_site_success_preserves_original_flow_and_never_reads_errno(self):
         for phase, _syscall, method, _index in self.SITES:
             with self.subTest(phase=phase):
-                admin, arguments = self.fixture(method)
-                with mock.patch.object(ns.ctypes, "get_errno") as read_errno:
+                admin, arguments, scope = self.fixture(method)
+                with scope, mock.patch.object(ns.ctypes, "get_errno") as read_errno:
                     self.assertIsNone(getattr(admin, method)(*arguments))
                     read_errno.assert_not_called()
 
@@ -617,9 +619,9 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
                 ns._AdministrativeSyscallFailure("namespace-unshare", value)
             self.assertNotEqual(type(caught.exception), ns._AdministrativeSyscallFailure)
             self.assertNotIn("diagnostic", self.emit(caught.exception))
-        admin, _arguments = self.fixture("private_namespace")
+        admin, _arguments, scope = self.fixture("private_namespace")
         function = mock.Mock(return_value=-1)
-        with self.assertRaises(ns.Hold) as caught:
+        with scope, self.assertRaises(ns.Hold) as caught:
             admin.call("not-for-logs-unknown-site", function, "/secret/argument")
         function.assert_not_called()
         self.assertNotIn("diagnostic", self.emit(caught.exception))
@@ -643,11 +645,11 @@ class AdministrativeDiagnosticTests(unittest.TestCase):
                 self.assertNotIn("diagnostic", self.emit(error))
 
     def test_arguments_and_exception_repr_are_never_diagnostic_inputs(self):
-        admin, _arguments = self.fixture("private_namespace")
+        admin, _arguments, scope = self.fixture("private_namespace")
         secret = mock.Mock()
         secret.__repr__ = mock.Mock(side_effect=AssertionError("repr must never run"))
         function = mock.Mock(return_value=-1)
-        with mock.patch.object(ns.ctypes, "get_errno", return_value=1):
+        with scope, mock.patch.object(ns.ctypes, "get_errno", return_value=1):
             with self.assertRaises(ns._AdministrativeSyscallFailure) as caught:
                 admin.call("namespace-unshare", function, secret, "/secret/argument")
         self.assertEqual(self.emit(caught.exception)["diagnostic"]["errno"], 1)

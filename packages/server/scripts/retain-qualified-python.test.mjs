@@ -64,26 +64,67 @@ function mutateAliasRecord(mutated, kind) {
   if (kind === "missing-source") mutated.sourceFiles.pop();
 }
 const materializationMutations = {
-  "missing-materialization":(row)=>{delete row.sourceMaterialization;},
-  "wrong-kind":(row)=>{row.sourceMaterialization.kind="other";},
-  "swapped-kind":(row)=>{row.sourceMaterialization.kind=row.sourceMaterialization.kind==="sitecustomize"?"config-libpython":"sitecustomize";},
-  "wrong-hop":(row)=>{row.sourceMaterialization.hops[0].target="../wrong";},
-  "extra-hop":(row)=>{row.sourceMaterialization.hops.push(row.sourceMaterialization.hops[0]);},
-  "changed-link":(row)=>{row.sourceMaterialization.hops[0].identity="0:0:0:0:0:0:0:0:0";},
-  "changed-ancestor":(row)=>{row.sourceMaterialization.ancestors[0].mode=0o777;},
-  "changed-target":(row)=>{row.sourceMaterialization.target.sha256="0".repeat(64);},
-  "target-mode":(row)=>{row.sourceMaterialization.target.mode=0o666;},
-  "target-size":(row)=>{row.sourceMaterialization.target.size++;},
-  "target-path":(row)=>{row.sourceMaterialization.target.path="/tmp/target";},
-  "retained-digest":(row)=>{row.sourceMaterialization.retained.sha256="0".repeat(64);},
-  "unknown-row":(row)=>{row.sourceMaterialization.authorized=true;},
-  "source-path":(row)=>{row.sourceMaterialization.sourcePath="/tmp/source";},
-  "source-link-mix":(row)=>{row.sourceLink={target:"any"};},
-  "missing-provenance":(row)=>{row.sourceMaterialization.provenance.pop();},
-  "wrong-owner":(row)=>{row.sourceMaterialization.provenance[0].owners[0].permission=true;},
-  "wrong-abi":(row)=>{row.sourceMaterialization.abi.build.MULTIARCH="aarch64-linux-gnu";},
-  "wrong-elf":(row)=>{row.sourceMaterialization.evidence.elfs[0].sha256="0".repeat(64);},
-  "wrong-source-identity":(row)=>{row.sourceMaterialization.evidence.sourceFiles[0].identity="0:0:0:0:0:0:0:0:0";},
+  "missing-materialization": (row) => {
+    delete row.sourceMaterialization;
+  },
+  "wrong-kind": (row) => {
+    row.sourceMaterialization.kind = "other";
+  },
+  "swapped-kind": (row) => {
+    row.sourceMaterialization.kind =
+      row.sourceMaterialization.kind === "sitecustomize" ? "config-libpython" : "sitecustomize";
+  },
+  "wrong-hop": (row) => {
+    row.sourceMaterialization.hops[0].target = "../wrong";
+  },
+  "extra-hop": (row) => {
+    row.sourceMaterialization.hops.push(row.sourceMaterialization.hops[0]);
+  },
+  "changed-link": (row) => {
+    row.sourceMaterialization.hops[0].identity = "0:0:0:0:0:0:0:0:0";
+  },
+  "changed-ancestor": (row) => {
+    row.sourceMaterialization.ancestors[0].mode = 0o777;
+  },
+  "changed-target": (row) => {
+    row.sourceMaterialization.target.sha256 = "0".repeat(64);
+  },
+  "target-mode": (row) => {
+    row.sourceMaterialization.target.mode = 0o666;
+  },
+  "target-size": (row) => {
+    row.sourceMaterialization.target.size++;
+  },
+  "target-path": (row) => {
+    row.sourceMaterialization.target.path = "/tmp/target";
+  },
+  "retained-digest": (row) => {
+    row.sourceMaterialization.retained.sha256 = "0".repeat(64);
+  },
+  "unknown-row": (row) => {
+    row.sourceMaterialization.authorized = true;
+  },
+  "source-path": (row) => {
+    row.sourceMaterialization.sourcePath = "/tmp/source";
+  },
+  "source-link-mix": (row) => {
+    row.sourceLink = { target: "any" };
+  },
+  "missing-provenance": (row) => {
+    row.sourceMaterialization.provenance.pop();
+  },
+  "wrong-owner": (row) => {
+    row.sourceMaterialization.provenance[0].owners[0].permission = true;
+  },
+  "wrong-abi": (row) => {
+    row.sourceMaterialization.abi.build.MULTIARCH = "aarch64-linux-gnu";
+  },
+  "wrong-elf": (row) => {
+    row.sourceMaterialization.evidence.elfs[0].sha256 = "0".repeat(64);
+  },
+  "wrong-source-identity": (row) => {
+    row.sourceMaterialization.evidence.sourceFiles[0].identity = "0:0:0:0:0:0:0:0:0";
+  },
 };
 test(
   "fixed source retention, relocation and strict preexec DATA refusals",
@@ -99,20 +140,35 @@ test(
     const recordFile = path.join(root, retained.record.path);
     const recordRaw = await readFile(recordFile);
     assert.equal(record.qualification, false);
-    const materialized=record.sourceFiles.filter((row)=>row.sourceMaterialization);
-    assert.equal(materialized.length,2);
-    for(const row of materialized) {
-      const value=row.sourceMaterialization;
-      assert.equal(row.mode,0o444);
-      assert.equal(row.sourceMode,0o644);
-      assert.equal(row.size,value.target.size);
-      assert.equal(row.sha256,value.target.sha256);
-      assert.ok(value.provenance.some((entry)=>entry.path===value.target.path));
-      assert.ok(value.evidence.sourceFiles.some((entry)=>entry.path===record.source.stdlib+"/site.py"));
-      assert.deepEqual(value.retained,{path:row.path,mode:row.mode,size:row.size,sha256:row.sha256});
-      assert.equal((await lstat(path.join(root,row.path))).isSymbolicLink(),false);
+    const materialized = record.sourceFiles.filter((row) => row.sourceMaterialization);
+    assert.equal(materialized.length, 2);
+    for (const row of materialized) {
+      const value = row.sourceMaterialization;
+      assert.equal(row.mode, 0o444);
+      assert.equal(row.sourceMode, 0o644);
+      assert.equal(row.size, value.target.size);
+      assert.equal(row.sha256, value.target.sha256);
+      assert.ok(value.provenance.some((entry) => entry.path === value.target.path));
+      assert.ok(
+        value.evidence.sourceFiles.some(
+          (entry) => entry.path === record.source.stdlib + "/site.py",
+        ),
+      );
+      assert.deepEqual(value.retained, {
+        path: row.path,
+        mode: row.mode,
+        size: row.size,
+        sha256: row.sha256,
+      });
+      assert.equal((await lstat(path.join(root, row.path))).isSymbolicLink(), false);
     }
-    console.log(JSON.stringify({kind:"retained-python-per-file-source-evidence",qualification:false,rows:materialized.map((row)=>row.sourceMaterialization)}));
+    console.log(
+      JSON.stringify({
+        kind: "retained-python-per-file-source-evidence",
+        qualification: false,
+        rows: materialized.map((row) => row.sourceMaterialization),
+      }),
+    );
     assert.deepEqual(Object.keys(retained).sort(), ["files", "record", "sourceInputs"]);
     assert.equal(retained.files.filter((r) => r.path === retained.record.path).length, 1);
     assert.ok(!record.files.some((r) => r.path === retained.record.path));
@@ -157,7 +213,7 @@ test(
     for (const name of [
       "python/bin/python3",
       record.layout.stdlib + "/os.py",
-      ...materialized.map((row)=>row.path),
+      ...materialized.map((row) => row.path),
       record.layout.stdlib + "/encodings/__init__.py",
       record.files.find(
         (r) =>
@@ -283,18 +339,29 @@ test(
         }
       });
     }
-    for(const [kind,mutate] of Object.entries(materializationMutations)) {
-      for(const selected of materialized) {
-        await t.test("strict materialization refuses "+kind+" on "+selected.sourceMaterialization.kind,async()=>{
-          const changed=structuredClone(record);
-          const row=changed.sourceFiles.find((entry)=>entry.path===selected.path);
-          mutate(row);
-          const raw=Buffer.from(JSON.stringify(changed)+"\n");
-          try {
-            await overwrite(recordFile,raw);
-            await assert.rejects(assertRetainedQualifiedPython(root,{...retained.record,size:raw.length,sha256:sha(raw)}));
-          } finally {await overwrite(recordFile,recordRaw);}
-        });
+    for (const [kind, mutate] of Object.entries(materializationMutations)) {
+      for (const selected of materialized) {
+        await t.test(
+          "strict materialization refuses " + kind + " on " + selected.sourceMaterialization.kind,
+          async () => {
+            const changed = structuredClone(record);
+            const row = changed.sourceFiles.find((entry) => entry.path === selected.path);
+            mutate(row);
+            const raw = Buffer.from(JSON.stringify(changed) + "\n");
+            try {
+              await overwrite(recordFile, raw);
+              await assert.rejects(
+                assertRetainedQualifiedPython(root, {
+                  ...retained.record,
+                  size: raw.length,
+                  sha256: sha(raw),
+                }),
+              );
+            } finally {
+              await overwrite(recordFile, recordRaw);
+            }
+          },
+        );
       }
     }
     await t.test("expected record path cannot select an arbitrary manifest", async () => {

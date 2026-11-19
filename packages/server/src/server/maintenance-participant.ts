@@ -122,6 +122,22 @@ export async function qualifiedDaemonExecutionAccess(
   };
 }
 
+const participantQualificationFailures = new WeakSet<object>();
+/** Read-only provenance: neither error text nor serialized metadata can mint it. */
+export function isParticipantQualificationFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && participantQualificationFailures.has(error);
+}
+async function refreshParticipantAuthority(authority: QualifiedDaemonAccess): Promise<void> {
+  try {
+    await authority.refresh();
+    authority.assertQualified();
+  } catch {
+    const failure = new Error("Maintenance participant qualification failed");
+    participantQualificationFailures.add(failure);
+    throw failure;
+  }
+}
+
 export function qualifiedMaintenanceParticipant(
   participant: PluginMaintenancePort,
   authority: QualifiedDaemonAccess,
@@ -138,10 +154,9 @@ export function qualifiedMaintenanceParticipant(
             }
           },
           async beginHeldRecoveryV1(identity: HeldRecoveryIdentity) {
-            await authority.refresh();
+            await refreshParticipantAuthority(authority);
             const result = await participant.beginHeldRecoveryV1!(identity);
-            await authority.refresh();
-            authority.assertQualified();
+            await refreshParticipantAuthority(authority);
             if (result !== "held") return result;
             return participant.supportsHeldRecoveryV1?.(identity) === true
               ? ("held" as const)
@@ -158,10 +173,9 @@ export function qualifiedMaintenanceParticipant(
       }
     },
     async begin(identity) {
-      await authority.refresh();
+      await refreshParticipantAuthority(authority);
       const result = await participant.begin(identity);
-      await authority.refresh();
-      authority.assertQualified();
+      await refreshParticipantAuthority(authority);
       return result;
     },
     async restoreBeforeStart(identity) {
@@ -174,11 +188,9 @@ export function qualifiedMaintenanceParticipant(
       }
     },
     async end(identity) {
-      await authority.refresh();
-      authority.assertQualified();
+      await refreshParticipantAuthority(authority);
       await participant.end(identity);
-      await authority.refresh();
-      authority.assertQualified();
+      await refreshParticipantAuthority(authority);
     },
   };
 }

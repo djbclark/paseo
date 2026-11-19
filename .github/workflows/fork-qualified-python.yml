@@ -1,0 +1,36 @@
+name: Fork qualified Python retention DATA
+on:
+  push:
+    branches: [fork/qualified-python-retention]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  retained-python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: node
+      - name: Actual fixed-source copy, relocation and preexec DATA refusals
+        run: node --test packages/server/scripts/retain-qualified-python.test.mjs
+      - name: Install isolated CI formatting tools only
+        if: always()
+        run: npm install --prefix "$RUNNER_TEMP/python-retention-tools" --ignore-scripts --no-package-lock oxfmt oxlint
+      - name: Focused existing-script lint and format
+        if: always()
+        run: |
+          export PATH="$RUNNER_TEMP/python-retention-tools/node_modules/.bin:$PATH"
+          npm run lint -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs
+          npm run format:files -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs .github/workflows/fork-qualified-python.yml
+          git diff --binary -- packages/server/scripts/retain-qualified-python.mjs packages/server/scripts/retain-qualified-python.test.mjs .github/workflows/fork-qualified-python.yml > "$RUNNER_TEMP/python-retention-format.patch"
+          git diff --exit-code
+      - name: Retain formatting DATA for owned source repair
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-retention-format-${{ github.sha }}
+          path: ${{ runner.temp }}/python-retention-format.patch
+          if-no-files-found: ignore

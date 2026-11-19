@@ -31,6 +31,8 @@ async function snapshotBytes(
   maximum: number,
 ): Promise<{ data: Buffer; identity: string }> {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let snapshot: { data: Buffer; identity: string } | undefined;
+  let failed: { error: unknown } | null = null;
   try {
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.size > BigInt(maximum)) return unsupported();
@@ -50,7 +52,7 @@ async function snapshotBytes(
       if (before[key] !== after[key] || before[key] !== current[key]) return unsupported();
     }
     if (BigInt(total) !== before.size) return unsupported();
-    return {
+    snapshot = {
       data: Buffer.concat(chunks),
       identity: [
         before.dev,
@@ -65,9 +67,21 @@ async function snapshotBytes(
         .map(String)
         .join(":"),
     };
-  } finally {
-    await handle.close();
+  } catch (error) {
+    failed = { error };
   }
+  try {
+    await handle.close();
+  } catch (error) {
+    if (failed)
+      throw new AggregateError([failed.error, error], "Fresh file read and close failed", {
+        cause: failed.error,
+      });
+    throw error;
+  }
+  if (failed) throw failed.error;
+  if (!snapshot) return unsupported();
+  return snapshot;
 }
 async function bytes(file: string, maximum: number): Promise<Buffer> {
   return (await snapshotBytes(file, maximum)).data;
@@ -93,6 +107,60 @@ async function verifyFile(root: string, file: FileIdentity): Promise<void> {
   )
     return unsupported();
 }
+const FRESH_FILE_JOBS = 4;
+const FRESH_FILE_BYTES = 64 * 1024 * 1024;
+
+function reservedFileBytes(file: FileIdentity): number {
+  return Number.isSafeInteger(file.size) && file.size >= 0 && file.size <= 512 * 1024 * 1024
+    ? file.size
+    : 0;
+}
+async function verifyPlacedFile(
+  root: string,
+  file: FileIdentity,
+  placement: "manifest" | "external",
+): Promise<void> {
+  if (!file || typeof file.path !== "string") return unsupported();
+  if (placement === "manifest") {
+    if (path.isAbsolute(file.path) || file.path.split("/").includes("..")) return unsupported();
+  } else if (!path.isAbsolute(file.path)) return unsupported();
+  await verifyFile(root, file);
+}
+
+/** Fresh file DATA checks only. No role/owner grant, cache or caller scheduling knobs. */
+export async function verifyFreshFileRows(
+  root: string,
+  files: readonly FileIdentity[],
+  placement: "manifest" | "external",
+): Promise<void> {
+  if (placement !== "manifest" && placement !== "external") return unsupported();
+  let cursor = 0;
+  while (cursor < files.length) {
+    const batch: FileIdentity[] = [];
+    let reserved = 0;
+    while (cursor < files.length && batch.length < FRESH_FILE_JOBS) {
+      // Freeze the exact declared metadata used for this reservation/job together.
+      const file = { ...files[cursor] };
+      const size = reservedFileBytes(file);
+      if (batch.length && (size > FRESH_FILE_BYTES || reserved + size > FRESH_FILE_BYTES)) break;
+      batch.push(file);
+      cursor++;
+      reserved += size;
+      if (size > FRESH_FILE_BYTES) break;
+    }
+    const tasks = batch.map((file) => verifyPlacedFile(root, file, placement));
+    const settled = await Promise.allSettled(tasks);
+    const failures = settled.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "Fresh file verification batch failed", {
+        cause: failures[0],
+      });
+  }
+}
+
 async function enrollment(root: string): Promise<{
   manifestSha256: string;
   distributionBuildId: string;
@@ -282,16 +350,10 @@ export async function verifyEnclosingDistribution(root: string) {
     JSON.stringify(names.sort()) !== JSON.stringify(manifest.files.map((file) => file.path).sort())
   )
     return unsupported();
-  for (const file of manifest.files) {
-    if (path.isAbsolute(file.path) || file.path.split("/").includes("..")) return unsupported();
-    await verifyFile(root, file);
-  }
+  await verifyFreshFileRows(root, manifest.files, "manifest");
   await verifyFile(root, manifest.runtime);
   await verifyFile(root, manifest.esbuild);
-  for (const file of manifest.externalLibraries) {
-    if (!path.isAbsolute(file.path)) return unsupported();
-    await verifyFile(root, file);
-  }
+  await verifyFreshFileRows(root, manifest.externalLibraries, "external");
   const helperClosureSha256 = assertDaemonHelperInventory(manifest);
   await verifySystemClosure(root, manifest);
   await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });

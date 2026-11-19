@@ -1,5 +1,240 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test(
+  "fresh verifier bounds actual reads and drains every admitted descriptor before failure",
+  {
+    skip: process.platform !== "linux" || process.env.GITHUB_ACTIONS !== "true",
+  },
+  async (t) => {
+    const { verifyFreshFileRows } =
+      await import("../dist/server/server/execution/daemon-verifier.js");
+    const fs = await import("node:fs");
+    const promises = fs.default.promises;
+    const { syncBuiltinESMExports } = await import("node:module");
+    const { spawnSync } = await import("node:child_process");
+    const { createHash, randomUUID } = await import("node:crypto");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const originalOpen = promises.open;
+    const originalRealpath = promises.realpath;
+    const root = `/paseo-fresh-files-${randomUUID()}`;
+    const temporary = await promises.mkdtemp(path.join(tmpdir(), "fresh-files-"));
+    const rows = [];
+    const events = [];
+    const active = new Set();
+    const gates = new Set();
+    const pending = new Set();
+    let behavior = {};
+    let peak = 0;
+    function verify(...args) {
+      const task = verifyFreshFileRows(...args);
+      pending.add(task);
+      void task.then(
+        () => pending.delete(task),
+        () => pending.delete(task),
+      );
+      return task;
+    }
+    function admin(args) {
+      const result = spawnSync("sudo", ["-k", "-n", ...args], { encoding: "utf8", timeout: 30000 });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    function deferred() {
+      let resolve;
+      const promise = new Promise((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    function gate() {
+      const held = deferred();
+      gates.add(held);
+      return held;
+    }
+    async function install(name, size) {
+      const source = path.join(temporary, name);
+      const handle = await originalOpen(source, "w");
+      await handle.truncate(size);
+      await handle.close();
+      const hash = createHash("sha256");
+      const zeros = Buffer.alloc(1024 * 1024);
+      for (let remaining = size; remaining > 0; remaining -= zeros.length)
+        hash.update(zeros.subarray(0, Math.min(remaining, zeros.length)));
+      const row = { path: name, mode: 0o444, size, sha256: hash.digest("hex") };
+      admin(["install", "-o", "root", "-g", "root", "-m", "0444", source, path.join(root, name)]);
+      return row;
+    }
+    async function wrappedOpen(file, ...args) {
+      const handle = await originalOpen.call(promises, file, ...args);
+      if (!String(file).startsWith(`${root}/`)) return handle;
+      const name = path.basename(file);
+      active.add(handle);
+      peak = Math.max(peak, active.size);
+      events.push(`open:${name}`);
+      const read = handle.read.bind(handle);
+      const close = handle.close.bind(handle);
+      let first = true;
+      handle.read = async (...readArgs) => {
+        if (first) {
+          first = false;
+          behavior.entered?.[name]?.resolve();
+          await behavior.readGates?.[name]?.promise;
+          await behavior.mutate?.(name);
+        }
+        const result = await read(...readArgs);
+        if (behavior.readErrors?.[name]) throw behavior.readErrors[name];
+        return result;
+      };
+      handle.close = async () => {
+        behavior.closing?.[name]?.resolve();
+        await behavior.closeGates?.[name]?.promise;
+        await close();
+        active.delete(handle);
+        events.push(`close:${name}`);
+        if (behavior.closeErrors?.[name]) throw behavior.closeErrors[name];
+      };
+      return handle;
+    }
+    async function wrappedRealpath(file, ...args) {
+      if (String(file).startsWith(`${root}/`)) events.push(`start:${path.basename(file)}`);
+      return originalRealpath.call(promises, file, ...args);
+    }
+    function reset(next = {}) {
+      assert.equal(active.size, 0);
+      behavior = next;
+      events.length = 0;
+      peak = 0;
+    }
+    try {
+      admin(["install", "-d", "-o", "root", "-g", "root", "-m", "0555", root]);
+      for (let index = 0; index < 5; index++) rows.push(await install(`small${index}`, 16));
+      const mediumA = await install("mediumA", 33 * 1024 * 1024);
+      const mediumB = await install("mediumB", 33 * 1024 * 1024);
+      const large = await install("large", 65 * 1024 * 1024);
+      promises.open = wrappedOpen;
+      promises.realpath = wrappedRealpath;
+      syncBuiltinESMExports();
+      const actualModule = await import("node:fs/promises");
+      assert.equal(actualModule.open, wrappedOpen);
+      assert.equal(actualModule.realpath, wrappedRealpath);
+
+      await t.test("four actual files maximum and no fifth before all prior closes", async () => {
+        reset();
+        await verify(root, rows, "manifest");
+        assert.ok(peak <= 4);
+        for (const row of rows.slice(0, 4))
+          assert.ok(events.indexOf(`close:${row.path}`) < events.indexOf("start:small4"));
+      });
+      await t.test("declared byte budget and large file exclusive", async () => {
+        reset();
+        await verify(root, [mediumA, mediumB, large, rows[0]], "manifest");
+        assert.equal(peak, 1);
+        assert.deepEqual(
+          events.filter((event) => event.startsWith("start:")),
+          ["start:mediumA", "start:mediumB", "start:large", "start:small0"],
+        );
+        for (const [before, after] of [
+          ["mediumA", "mediumB"],
+          ["mediumB", "large"],
+          ["large", "small0"],
+        ])
+          assert.ok(events.indexOf(`close:${before}`) < events.indexOf(`start:${after}`));
+      });
+      await t.test("reverse errors retain index order and await actual sibling close", async () => {
+        const heldRead = gate();
+        const heldClose = gate();
+        const entered = deferred();
+        const closing = deferred();
+        const firstError = new Error("first original read");
+        const secondError = new Error("second original read");
+        reset({
+          readGates: { small0: heldRead },
+          closeGates: { small2: heldClose },
+          entered: { small0: entered },
+          closing: { small2: closing },
+          readErrors: { small0: firstError, small1: secondError },
+        });
+        let finished = false;
+        const task = verify(root, rows, "manifest");
+        const observed = task.then(
+          () => {
+            finished = true;
+            return null;
+          },
+          (error) => {
+            finished = true;
+            return error;
+          },
+        );
+        await Promise.all([entered.promise, closing.promise]);
+        assert.equal(finished, false);
+        assert.equal(events.includes("start:small4"), false);
+        heldRead.resolve();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(finished, false);
+        heldClose.resolve();
+        const error = await observed;
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors, [firstError, secondError]);
+        assert.equal(error.cause, firstError);
+        assert.equal(active.size, 0);
+        assert.equal(events.includes("start:small4"), false);
+      });
+      await t.test("original read and actual-close error both retained", async () => {
+        const readError = new Error("actual read failure");
+        const closeError = new Error("after actual close failure");
+        reset({ readErrors: { small0: readError }, closeErrors: { small0: closeError } });
+        await assert.rejects(verify(root, [rows[0]], "manifest"), (error) => {
+          assert.ok(error instanceof AggregateError);
+          assert.deepEqual(error.errors, [readError, closeError]);
+          assert.equal(error.cause, readError);
+          return true;
+        });
+        reset({ closeErrors: { small0: closeError } });
+        await assert.rejects(verify(root, [rows[0]], "manifest"), (error) => error === closeError);
+      });
+      await t.test(
+        "fresh actual bytes, mode and inode races refuse after valid baseline",
+        async () => {
+          const target = path.join(root, rows[0].path);
+          for (const kind of ["bytes", "mode", "inode", "symlink"]) {
+            reset();
+            await install("small0", 16);
+            await verify(root, [rows[0]], "manifest");
+            reset({
+              mutate: async (name) => {
+                if (name !== "small0") return;
+                const script =
+                  "import os,sys; p,k=sys.argv[1:]; " +
+                  "exec({'bytes':\"f=open(p,'r+b'); f.write(b'x'); f.close()\",'mode':\"os.chmod(p,0o644)\",'inode':\"os.unlink(p); f=open(p,'wb'); f.write(bytes(16)); f.close(); os.chmod(p,0o444)\",'symlink':\"os.unlink(p); os.symlink('small1',p)\"}[k])";
+                admin(["/usr/bin/python3", "-I", "-c", script, target, kind]);
+              },
+            });
+            await assert.rejects(verify(root, [rows[0]], "manifest"));
+            admin(["rm", "-f", target]);
+          }
+          reset();
+          await install("small0", 16);
+          await verify(root, [rows[0]], "manifest");
+          await assert.rejects(verify(root, [{ ...rows[0], path: "../small0" }], "manifest"));
+          await assert.rejects(verify(root, [{ ...rows[0], path: target }], "manifest"));
+          await assert.rejects(verify(root, [rows[0]], "external"));
+          await verify(root, [{ ...rows[0], path: target }], "external");
+        },
+      );
+    } finally {
+      for (const held of gates) held.resolve();
+      await Promise.allSettled([...pending]);
+      promises.open = originalOpen;
+      promises.realpath = originalRealpath;
+      syncBuiltinESMExports();
+      assert.equal(active.size, 0, "all admitted actual descriptors must have closed");
+      admin(["rm", "-rf", root]);
+      await promises.rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
 import {
   cloneBoundedObservation,
   parseQualifiedMeasurementRequest,

@@ -183,6 +183,7 @@ test(
       "escape",
       "source-mode",
       "source-map",
+      "alias-target", "alias-mode", "alias-path", "alias-abi", "alias-extra", "alias-other-row", "alias-missing-target",
       "missing-source",
       "layout",
       "flags",
@@ -199,6 +200,15 @@ test(
         if (kind === "escape") mutated.files[0].path = "../outside";
         if (kind === "source-mode") mutated.sourceFiles[0].sourceMode = 0o777;
         if (kind === "source-map") mutated.sourceFiles[0].sourcePath = "/tmp/source";
+        const alias=mutated.sourceFiles.find((r)=>r.sourceLink);
+        assert.ok(alias,"actual fixed-source alias measured");
+        if(kind==="alias-target") alias.sourceLink.target="../escape";
+        if(kind==="alias-mode") alias.sourceLink.mode=0o444;
+        if(kind==="alias-path") alias.sourceLink.resolvedSourcePath="/tmp/target";
+        if(kind==="alias-abi") mutated.observed.source.build.MULTIARCH="aarch64-linux-gnu";
+        if(kind==="alias-extra") alias.sourceLink.permission=true;
+        if(kind==="alias-other-row") mutated.sourceFiles[0].sourceLink=structuredClone(alias.sourceLink);
+        if(kind==="alias-missing-target") mutated.sourceFiles=mutated.sourceFiles.filter((r)=>r.sourcePath!==alias.sourceLink.resolvedSourcePath);
         if (kind === "missing-source") mutated.sourceFiles.pop();
         if (kind === "layout") mutated.layout.executable = "/usr/bin/python3";
         if (kind === "flags") mutated.layout.argvFlags = ["-S"];

@@ -464,11 +464,40 @@ function retainedInventory(record, abi) {
   sourceMappings(record, files, abi);
   return files;
 }
+const aliasName = "_sysconfigdata__linux_x86_64-linux-gnu.py";
+const aliasTarget = "_sysconfigdata__x86_64-linux-gnu.py";
+function sourceAlias(record,row) {
+  if (!Object.hasOwn(row,"sourceLink")) return;
+  exact(row.sourceLink,["target","resolvedSourcePath","mode"]);
+  require(record.observed.source.build.MULTIARCH==="x86_64-linux-gnu" &&
+    row.sourcePath===record.source.stdlib+"/"+aliasName &&
+    row.path===record.layout.stdlib+"/"+aliasName &&
+    row.sourceLink.target===aliasTarget && row.sourceLink.mode===0o777 &&
+    row.sourceLink.resolvedSourcePath===record.source.stdlib+"/"+aliasTarget,
+    "literal source alias");
+  const target=record.sourceFiles.find((r)=>r.path===record.layout.stdlib+"/"+aliasTarget);
+  require(target && !Object.hasOwn(target,"sourceLink") && target.sourcePath===row.sourceLink.resolvedSourcePath &&
+    target.sourceMode===row.sourceMode && target.mode===row.mode && target.size===row.size && target.sha256===row.sha256,
+    "independent alias target binding");
+}
+async function readSourceAlias(file,source) {
+  require(process.arch==="x64" && source.build.MULTIARCH==="x86_64-linux-gnu" && file===source.stdlib+"/"+aliasName,"unsupported source alias");
+  await protectedSource(path.join(source.stdlib,aliasTarget));
+  const before=await lstat(file,{bigint:true});
+  require(before.isSymbolicLink() && before.uid===0n && before.nlink===1n && (before.mode&0o777n)===0o777n,"source alias identity");
+  require(await readlink(file)===aliasTarget,"source alias target");
+  const resolvedSourcePath=source.stdlib+"/"+aliasTarget;
+  const data=await bytes(resolvedSourcePath,leafLimit,true);
+  require(stamp(before)===stamp(await lstat(file,{bigint:true})) && await readlink(file)===aliasTarget,"source alias changed");
+  return {data,linkStamp:stamp(before),sourceLink:{target:aliasTarget,resolvedSourcePath,mode:Number(before.mode&0o777n)}};
+}
+
 function sourceMappings(record, files, abi) {
   const mapped = new Set();
   let previous = "";
   for (const row of record.sourceFiles) {
-    exact(row, ["sourcePath", "path", "sourceMode", "mode", "size", "sha256"]);
+    exact(row, ["sourcePath", "path", "sourceMode", "mode", "size", "sha256", ...(Object.hasOwn(row,"sourceLink")?["sourceLink"]:[])]);
+    sourceAlias(record,row);
     require(typeof row.sourcePath === "string" &&
       path.isAbsolute(row.sourcePath) &&
       Number.isInteger(row.sourceMode) &&
@@ -657,7 +686,8 @@ export async function retainQualifiedPython(root) {
       "python/pyvenv.cfg",
       "python/bin/pyvenv.cfg",
     ]);
-  async function retain(sourcePath, member, rawData) {
+  const aliasStamps=new Map();
+  async function retain(sourcePath, member, rawData, sourceLink) {
     const data = rawData ?? (await bytes(sourcePath, leafLimit, true));
     const mode = member === "python/bin/python3" ? 0o555 : 0o444;
     const destination = path.join(parent, member);
@@ -670,6 +700,7 @@ export async function retainQualifiedPython(root) {
       mode,
       size: data.raw.length,
       sha256: digest(data.raw),
+      ...(sourceLink?{sourceLink}:{}),
     });
     require(sourceFiles.length < memberLimit &&
       sourceFiles.reduce((n, r) => n + r.size, 0) <= tarLimit, "copy bounds");
@@ -691,12 +722,25 @@ export async function retainQualifiedPython(root) {
         info = await lstat(file);
       if (info.isDirectory() && !info.isSymbolicLink()) await copyDirectory(file, rel);
       else {
+        if (info.isSymbolicLink() && rel===aliasName) {
+          const alias=await readSourceAlias(file,source);
+          aliasStamps.set(file,alias.linkStamp);
+          await retain(file,`python/lib/python${abi}/`+rel,alias.data,alias.sourceLink);
+          continue;
+        }
         if (!info.isFile() || info.isSymbolicLink()) {
           const target = info.isSymbolicLink() ? (await readlink(file)).slice(0, 4096) : null;
           fail("source symlink/special " + JSON.stringify({ path: rel.slice(0, 4096), target }));
         }
         await retain(file, `python/lib/python${abi}/` + rel);
       }
+    }
+  }
+  async function recheckSources() {
+    for (const row of sourceFiles) {
+      const captured=row.sourceLink ? await readSourceAlias(row.sourcePath,source) : {data:await bytes(row.sourcePath,leafLimit,true)};
+      require(digest(captured.data.raw)===row.sha256 && captured.data.mode===row.sourceMode,"source changed after capture");
+      if(row.sourceLink) require(captured.linkStamp===aliasStamps.get(row.sourcePath),"source alias changed after capture");
     }
   }
   try {
@@ -795,6 +839,7 @@ export async function retainQualifiedPython(root) {
     }
     await rename(stage, prefix);
     await assertRetainedQualifiedPython(root, recordFile);
+    await recheckSources();
     record.observed.relocated = normalizeProbe(
       await probe(path.join(root, record.layout.executable), path.join(root, probePath)),
       root,
@@ -803,9 +848,7 @@ export async function retainQualifiedPython(root) {
       JSON.stringify(source.version), "relocated version");
     recordFile = await saveRecord(root);
     await assertRetainedQualifiedPython(root, recordFile);
-    for (const row of sourceFiles)
-      require(digest((await bytes(row.sourcePath, leafLimit, true)).raw) ===
-        row.sha256, "source changed after capture");
+    await recheckSources();
     require((await realpath("/usr/bin/python3")) ===
       selected, "source interpreter selection changed");
     const final = await inventory(prefix);

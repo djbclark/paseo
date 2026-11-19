@@ -374,22 +374,21 @@ async function createStartupFanoutSchedules(
   }
   const schedules = [];
   for (const agentId of agentIds) {
-    schedules.push(await service.create({
-      prompt: "original startup fanout",
-      cadence: { type: "every", everyMs: 60_000 },
-      target: phase === "orphan sweep"
-        ? { type: "agent", agentId }
-        : { type: "new-agent", config: { provider: "claude", cwd: home } },
-    }));
+    schedules.push(
+      await service.create({
+        prompt: "original startup fanout",
+        cadence: { type: "every", everyMs: 60_000 },
+        target:
+          phase === "orphan sweep"
+            ? { type: "agent", agentId }
+            : { type: "new-agent", config: { provider: "claude", cwd: home } },
+      }),
+    );
   }
   return { service, schedules, agentIds };
 }
 
-function gateStartupFanout(
-  phase: StartupFanoutPhase,
-  agentStorage: AgentStorage,
-  ids: string[],
-) {
+function gateStartupFanout(phase: StartupFanoutPhase, agentStorage: AgentStorage, ids: string[]) {
   const firstStarted = scheduleDrainGate();
   const secondStarted = scheduleDrainGate();
   const firstFailed = scheduleDrainGate();
@@ -409,21 +408,48 @@ function gateStartupFanout(
     return operation();
   };
   const observed = <T>(id: string, pending: Promise<T>): Promise<T> => {
-    if (id === ids[0]) void pending.catch(() => { firstFailed.resolve(); });
+    if (id === ids[0])
+      void pending.catch(() => {
+        firstFailed.resolve();
+      });
     return pending;
   };
   if (phase === "recovery") {
     const update = ScheduleStore.prototype.update;
-    const spy = vi.spyOn(ScheduleStore.prototype, "update").mockImplementation(function (this: ScheduleStore, id, updater) {
-      return observed(id, update.call(this, id, (current) => hold(id, async () => updater(current))));
-    });
-    return { firstStarted, secondStarted, firstFailed, allowFailure, allowSibling, failure,
-      restore: () => spy.mockRestore() };
+    const spy = vi
+      .spyOn(ScheduleStore.prototype, "update")
+      .mockImplementation(function (this: ScheduleStore, id, updater) {
+        return observed(
+          id,
+          update.call(this, id, (current) => hold(id, async () => updater(current))),
+        );
+      });
+    return {
+      firstStarted,
+      secondStarted,
+      firstFailed,
+      allowFailure,
+      allowSibling,
+      failure,
+      restore: () => spy.mockRestore(),
+    };
   }
   const get = agentStorage.get.bind(agentStorage);
-  const spy = vi.spyOn(agentStorage, "get").mockImplementation((id) => observed(id, hold(id, () => get(id))));
-  return { firstStarted, secondStarted, firstFailed, allowFailure, allowSibling, failure,
-    restore: () => spy.mockRestore() };
+  const spy = vi.spyOn(agentStorage, "get").mockImplementation((id) =>
+    observed(
+      id,
+      hold(id, () => get(id)),
+    ),
+  );
+  return {
+    firstStarted,
+    secondStarted,
+    firstFailed,
+    allowFailure,
+    allowSibling,
+    failure,
+    restore: () => spy.mockRestore(),
+  };
 }
 
 describe("ScheduleService", () => {
@@ -573,12 +599,22 @@ describe("ScheduleService", () => {
     for (const stopBeforeFailure of [true, false]) {
       test(`${phase} retains both original IDs when stop is requested ${stopBeforeFailure ? "before" : "after"} a child fails`, async () => {
         const fixture = await createStartupFanoutSchedules(tempDir, agentStorage, () => now, phase);
-        const ids = phase === "recovery" ? fixture.schedules.map((schedule) => schedule.id) : fixture.agentIds;
+        const ids =
+          phase === "recovery"
+            ? fixture.schedules.map((schedule) => schedule.id)
+            : fixture.agentIds;
         const gate = gateStartupFanout(phase, agentStorage, ids);
         let startSettled = false;
         let stopSettled = false;
         const starting = fixture.service.start();
-        void starting.then(() => { startSettled = true; }, () => { startSettled = true; });
+        void starting.then(
+          () => {
+            startSettled = true;
+          },
+          () => {
+            startSettled = true;
+          },
+        );
         const originalFailure = expect(starting).rejects.toBe(gate.failure);
         let stopping: Promise<void> | undefined;
         try {
@@ -592,14 +628,23 @@ describe("ScheduleService", () => {
           await gate.firstFailed.promise;
           await yieldStartupDrainTurn();
           stopping ??= fixture.service.stop();
-          void stopping.then(() => { stopSettled = true; }, () => { stopSettled = true; });
+          void stopping.then(
+            () => {
+              stopSettled = true;
+            },
+            () => {
+              stopSettled = true;
+            },
+          );
           const drainFailure = expect(stopping).rejects.toMatchObject({
             errors: expect.arrayContaining([gate.failure]),
           });
           await yieldStartupDrainTurn();
           expect(startSettled).toBe(false);
           expect(stopSettled).toBe(false);
-          await expect(fixture.service.runOnce(fixture.schedules[0]!.id)).rejects.toThrow("stopped");
+          await expect(fixture.service.runOnce(fixture.schedules[0]!.id)).rejects.toThrow(
+            "stopped",
+          );
           gate.allowSibling.resolve();
           await originalFailure;
           await drainFailure;
@@ -622,7 +667,8 @@ describe("ScheduleService", () => {
   for (const phase of ["recovery", "orphan sweep"] as const) {
     test(`${phase} retains startup failure when the first stop follows enclosing promise removal`, async () => {
       const fixture = await createStartupFanoutSchedules(tempDir, agentStorage, () => now, phase);
-      const ids = phase === "recovery" ? fixture.schedules.map((schedule) => schedule.id) : fixture.agentIds;
+      const ids =
+        phase === "recovery" ? fixture.schedules.map((schedule) => schedule.id) : fixture.agentIds;
       const gate = gateStartupFanout(phase, agentStorage, ids);
       const starting = fixture.service.start();
       const originalFailure = expect(starting).rejects.toBe(gate.failure);

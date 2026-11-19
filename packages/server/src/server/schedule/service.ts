@@ -762,7 +762,9 @@ export class ScheduleService {
   private async sweepOrphanedSchedules(): Promise<void> {
     const now = this.now();
     const schedules = await this.store.list();
-    await settleStartupSchedules(schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)));
+    await settleStartupSchedules(
+      schedules.map((schedule) => this.sweepOrphanedSchedule(schedule.id, now)),
+    );
   }
 
   private async sweepOrphanedSchedule(scheduleId: string, now: Date): Promise<void> {

@@ -97,7 +97,8 @@ const roles: Record<string, string> = {
   "terminal-entry.mjs": "terminal",
   "plugin-child-entry.mjs": "plugin-child",
 };
-const role = isMainThread ? roles[basename(process.argv[1] ?? "")] : undefined;
+const entryLabel = basename(process.argv[1] ?? "");
+const role = isMainThread && Object.hasOwn(roles, entryLabel) ? roles[entryLabel] : undefined;
 const limits: Record<string, { records: number; bytes: number }> = {
   daemon: { records: 2048, bytes: 524288 },
   terminal: { records: 256, bytes: 65536 },

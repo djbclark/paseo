@@ -149,7 +149,7 @@ test(
       else api.recordStartupPhase({phase:"owner.refresh",edge:"point"});
       process.stdout.write(JSON.stringify({sentinel:true}));`;
       const file = path.join(directory, entry);
-      const commonJs = entry.endsWith(".cjs");
+      const commonJs = entry.endsWith(".cjs") || !path.extname(entry);
       const body = commonJs
         ? script.replace(
             'import {createRequire} from "node:module";\n      const require=createRequire(import.meta.url);',
@@ -193,6 +193,10 @@ test(
       assert.equal(normal.stderr, "", "unknown entry must not acquire a diagnostic role");
       const daemon = run("valid", "role.cjs.mjs");
       assert.equal(daemon.stderr, "");
+      for (const inherited of ["constructor", "toString", "__proto__"]) {
+        const unknown = run("valid", inherited);
+        assert.equal(unknown.stderr, "", "inherited names must not acquire a diagnostic role");
+      }
       // An ESM entry with the fixed CLI name tests stdout isolation and its ONE-row budget.
       const cli = run("cli", "cli-entry.mjs");
       const cliRows = decode(cli);

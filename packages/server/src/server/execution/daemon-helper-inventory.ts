@@ -3,6 +3,7 @@ import type { FileIdentity } from "./types.js";
 import type { RetainedExternal } from "./system-closure.js";
 
 const fixedDataHelpers = new Set([
+  "startup-phase.mjs",
   "cli-package.json",
   "cli-assets/metadata.json",
   "cli-assets/version.ts",

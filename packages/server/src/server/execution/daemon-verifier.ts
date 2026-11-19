@@ -13,6 +13,47 @@ import path from "node:path";
 import { QUALIFIED_BINDING_KEYS } from "./binding-keys.js";
 import type { FileIdentity } from "./types.js";
 import type { DaemonManifest } from "./daemon-types.js";
+import {
+  recordStartupPhase,
+  startupPhaseNow,
+  type StartupPhase,
+  type StartupPhaseCounter,
+} from "./startup-phase.js";
+
+let phaseOrdinal = 0;
+interface VerifierPhase {
+  phase: StartupPhase;
+  span: number;
+  started: number | null;
+  counts: Partial<Record<StartupPhaseCounter, number>>;
+}
+function beginVerifierPhase(phase: StartupPhase): VerifierPhase {
+  const span = ++phaseOrdinal;
+  const started = startupPhaseNow();
+  recordStartupPhase({ phase, span, edge: "begin" });
+  return { phase, span, started, counts: {} };
+}
+function endVerifierPhase(state: VerifierPhase, outcome: "ok" | "error"): void {
+  const now = startupPhaseNow();
+  for (const [counter, value] of Object.entries(state.counts))
+    recordStartupPhase({
+      phase: state.phase,
+      span: state.span,
+      edge: "add",
+      counter: counter as StartupPhaseCounter,
+      value,
+    });
+  recordStartupPhase({
+    phase: state.phase,
+    span: state.span,
+    edge: "end",
+    outcome,
+    durationUs:
+      now !== null && state.started !== null && now >= state.started
+        ? now - state.started
+        : undefined,
+  });
+}
 
 declare const __QUALIFIED_DISTRIBUTION_ID__: string;
 export const unsupported = (): never => {
@@ -29,6 +70,7 @@ async function protectedPath(file: string): Promise<void> {
 async function snapshotBytes(
   file: string,
   maximum: number,
+  diagnostic?: VerifierPhase,
 ): Promise<{ data: Buffer; identity: string }> {
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let snapshot: { data: Buffer; identity: string } | undefined;
@@ -41,6 +83,7 @@ async function snapshotBytes(
     for (;;) {
       const buffer = Buffer.alloc(Math.min(1024 * 1024, maximum - total + 1));
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (diagnostic) diagnostic.counts.readBytes = (diagnostic.counts.readBytes ?? 0) + bytesRead;
       if (!bytesRead) break;
       total += bytesRead;
       if (total > maximum || BigInt(total) > before.size) return unsupported();
@@ -91,11 +134,15 @@ async function snapshotBytes(
   if (!snapshot) return unsupported();
   return snapshot;
 }
-async function bytes(file: string, maximum: number): Promise<Buffer> {
-  return (await snapshotBytes(file, maximum)).data;
+async function bytes(file: string, maximum: number, diagnostic?: VerifierPhase): Promise<Buffer> {
+  return (await snapshotBytes(file, maximum, diagnostic)).data;
 }
 const digest = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
-async function verifyFile(root: string, file: FileIdentity): Promise<void> {
+async function verifyFile(
+  root: string,
+  file: FileIdentity,
+  diagnostic?: VerifierPhase,
+): Promise<void> {
   if (
     !file ||
     typeof file.path !== "string" ||
@@ -105,13 +152,17 @@ async function verifyFile(root: string, file: FileIdentity): Promise<void> {
     !/^[a-f0-9]{64}$/.test(file.sha256)
   )
     return unsupported();
+  if (diagnostic) {
+    diagnostic.counts.files = (diagnostic.counts.files ?? 0) + 1;
+    diagnostic.counts.declaredBytes = (diagnostic.counts.declaredBytes ?? 0) + file.size;
+  }
   const target = path.isAbsolute(file.path) ? file.path : path.resolve(root, file.path);
   await protectedPath(target);
   const stat = await lstat(target);
   if (
     (stat.mode & 0o777) !== file.mode ||
     stat.size !== file.size ||
-    digest(await bytes(target, file.size)) !== file.sha256
+    digest(await bytes(target, file.size, diagnostic)) !== file.sha256
   )
     return unsupported();
 }
@@ -127,12 +178,13 @@ async function verifyPlacedFile(
   root: string,
   file: FileIdentity,
   placement: "manifest" | "external",
+  diagnostic: VerifierPhase,
 ): Promise<void> {
   if (!file || typeof file.path !== "string") return unsupported();
   if (placement === "manifest") {
     if (path.isAbsolute(file.path) || file.path.split("/").includes("..")) return unsupported();
   } else if (!path.isAbsolute(file.path)) return unsupported();
-  await verifyFile(root, file);
+  await verifyFile(root, file, diagnostic);
 }
 
 /** Fresh file DATA checks only. No role/owner grant, cache or caller scheduling knobs. */
@@ -142,34 +194,52 @@ export async function verifyFreshFileRows(
   placement: "manifest" | "external",
 ): Promise<void> {
   if (placement !== "manifest" && placement !== "external") return unsupported();
-  let cursor = 0;
-  while (cursor < files.length) {
-    const batch: FileIdentity[] = [];
-    let reserved = 0;
-    while (cursor < files.length && batch.length < FRESH_FILE_JOBS) {
-      // Freeze the exact declared metadata used for this reservation/job together.
-      const file = { ...files[cursor] };
-      const size = reservedFileBytes(file);
-      if (batch.length && (size > FRESH_FILE_BYTES || reserved + size > FRESH_FILE_BYTES)) break;
-      batch.push(file);
-      cursor++;
-      reserved += size;
-      if (size > FRESH_FILE_BYTES) break;
+  const diagnostic = beginVerifierPhase(
+    placement === "manifest" ? "verify.files" : "verify.externals",
+  );
+  let outcome: "ok" | "error" = "error";
+  try {
+    let cursor = 0;
+    while (cursor < files.length) {
+      const batch: FileIdentity[] = [];
+      let reserved = 0;
+      while (cursor < files.length && batch.length < FRESH_FILE_JOBS) {
+        // Freeze the exact declared metadata used for this reservation/job together.
+        const file = { ...files[cursor] };
+        const size = reservedFileBytes(file);
+        if (batch.length && (size > FRESH_FILE_BYTES || reserved + size > FRESH_FILE_BYTES)) break;
+        batch.push(file);
+        cursor++;
+        reserved += size;
+        if (size > FRESH_FILE_BYTES) break;
+      }
+      diagnostic.counts.maxWidth = Math.max(diagnostic.counts.maxWidth ?? 0, batch.length);
+      diagnostic.counts.maxReservedBytes = Math.max(
+        diagnostic.counts.maxReservedBytes ?? 0,
+        reserved,
+      );
+      const tasks = batch.map((file) => verifyPlacedFile(root, file, placement, diagnostic));
+      const settled = await Promise.allSettled(tasks);
+      diagnostic.counts.batches = (diagnostic.counts.batches ?? 0) + 1;
+      const failures = settled.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "Fresh file verification batch failed", {
+          cause: failures[0],
+        });
     }
-    const tasks = batch.map((file) => verifyPlacedFile(root, file, placement));
-    const settled = await Promise.allSettled(tasks);
-    const failures = settled.flatMap((result) =>
-      result.status === "rejected" ? [result.reason] : [],
-    );
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1)
-      throw new AggregateError(failures, "Fresh file verification batch failed", {
-        cause: failures[0],
-      });
+    outcome = "ok";
+  } finally {
+    endVerifierPhase(diagnostic, outcome);
   }
 }
 
-async function enrollment(root: string): Promise<{
+async function enrollment(
+  root: string,
+  diagnostic?: VerifierPhase,
+): Promise<{
   manifestSha256: string;
   distributionBuildId: string;
   qualificationSha256: string;
@@ -186,7 +256,7 @@ async function enrollment(root: string): Promise<{
     if (current === home) break;
     if (current === path.dirname(current)) return unsupported();
   }
-  const snapshot = await snapshotBytes(file, 65536);
+  const snapshot = await snapshotBytes(file, 65536, diagnostic);
   const policy = JSON.parse(snapshot.data.toString("utf8"));
   if (policy.schemaVersion !== 1 || !Array.isArray(policy.qualifications)) return unsupported();
   const rows = policy.qualifications.filter(
@@ -202,8 +272,15 @@ export async function assertEnclosingAuthorityUnchanged(observed: {
   root: string;
   authorityIdentity: string;
 }): Promise<void> {
-  const current = await enrollment(observed.root);
-  if (current.authorityIdentity !== observed.authorityIdentity) return unsupported();
+  const diagnostic = beginVerifierPhase("verify.authority");
+  let outcome: "ok" | "error" = "error";
+  try {
+    const current = await enrollment(observed.root, diagnostic);
+    if (current.authorityIdentity !== observed.authorityIdentity) return unsupported();
+    outcome = "ok";
+  } finally {
+    endVerifierPhase(diagnostic, outcome);
+  }
 }
 export async function observeLinuxProcess(pid: number) {
   const text = await readFile(`/proc/${pid}/stat`, "utf8");
@@ -323,80 +400,117 @@ async function assertBuiltinInventory(root: string, names: string[]): Promise<vo
     if (!names.includes(`builtin-plugins/${id}/paseo-plugin.json`)) return unsupported();
 }
 export async function verifyEnclosingDistribution(root: string) {
-  if (
-    process.platform !== "linux" ||
-    !["x64", "arm64"].includes(process.arch) ||
-    process.getuid?.() === 0 ||
-    process.versions.electron ||
-    typeof __QUALIFIED_DISTRIBUTION_ID__ === "undefined"
-  )
-    return unsupported();
-  await protectedPath(root);
-  const expected = await enrollment(root);
-  const manifestPath = `${root}.manifest.json`;
-  await protectedPath(manifestPath);
-  const raw = await bytes(manifestPath, 4 * 1024 * 1024);
-  const manifestSha256 = digest(raw);
-  const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
-  assertManifestIdentity(manifest, expected, manifestSha256);
-  assertBuiltinArtifacts(manifest);
-  const names: string[] = [];
-  async function visit(directory: string): Promise<void> {
-    for (const name of await readdir(directory)) {
-      const file = path.join(directory, name);
-      const stat = await lstat(file);
-      if (stat.isDirectory()) await visit(file);
-      else {
-        if (!stat.isFile()) return unsupported();
-        names.push(path.relative(root, file));
+  let active: VerifierPhase | null = beginVerifierPhase("verify.policy");
+  try {
+    if (
+      process.platform !== "linux" ||
+      !["x64", "arm64"].includes(process.arch) ||
+      process.getuid?.() === 0 ||
+      process.versions.electron ||
+      typeof __QUALIFIED_DISTRIBUTION_ID__ === "undefined"
+    )
+      return unsupported();
+    await protectedPath(root);
+    const expected = await enrollment(root, active);
+    const manifestPath = `${root}.manifest.json`;
+    await protectedPath(manifestPath);
+    const raw = await bytes(manifestPath, 4 * 1024 * 1024, active);
+    const manifestSha256 = digest(raw);
+    const manifest = JSON.parse(raw.toString("utf8")) as DaemonManifest;
+    assertManifestIdentity(manifest, expected, manifestSha256);
+    assertBuiltinArtifacts(manifest);
+    endVerifierPhase(active, "ok");
+    active = beginVerifierPhase("verify.tree");
+    const names: string[] = [];
+    async function visit(directory: string): Promise<void> {
+      if (active) active.counts.directories = (active.counts.directories ?? 0) + 1;
+      for (const name of await readdir(directory)) {
+        const file = path.join(directory, name);
+        const stat = await lstat(file);
+        if (stat.isDirectory()) await visit(file);
+        else {
+          if (!stat.isFile()) return unsupported();
+          names.push(path.relative(root, file));
+          if (active) active.counts.files = (active.counts.files ?? 0) + 1;
+        }
       }
     }
+    await visit(root);
+    await assertBuiltinInventory(root, names);
+    if (
+      JSON.stringify(names.sort()) !==
+      JSON.stringify(manifest.files.map((file) => file.path).sort())
+    )
+      return unsupported();
+    endVerifierPhase(active, "ok");
+    active = null;
+    await verifyFreshFileRows(root, manifest.files, "manifest");
+    active = beginVerifierPhase("verify.runtime");
+    await verifyFile(root, manifest.runtime, active);
+    await verifyFile(root, manifest.esbuild, active);
+    endVerifierPhase(active, "ok");
+    active = null;
+    await verifyFreshFileRows(root, manifest.externalLibraries, "external");
+    active = beginVerifierPhase("verify.system");
+    const helperClosureSha256 = assertDaemonHelperInventory(manifest);
+    await verifySystemClosure(root, manifest);
+    endVerifierPhase(active, "ok");
+    active = null;
+    await assertEnclosingAuthorityUnchanged({
+      root,
+      authorityIdentity: expected.authorityIdentity,
+    });
+    return {
+      root,
+      manifest,
+      manifestSha256,
+      authorityIdentity: expected.authorityIdentity,
+      builtinProfiles: readBuiltinProfiles(expected.builtinProfiles),
+      closure: Object.freeze({
+        runtimeClosureSha256: manifestSha256,
+        helperClosureSha256,
+        qualificationSha256: expected.qualificationSha256,
+      }),
+    };
+  } finally {
+    if (active) endVerifierPhase(active, "error");
   }
-  await visit(root);
-  await assertBuiltinInventory(root, names);
-  if (
-    JSON.stringify(names.sort()) !== JSON.stringify(manifest.files.map((file) => file.path).sort())
-  )
-    return unsupported();
-  await verifyFreshFileRows(root, manifest.files, "manifest");
-  await verifyFile(root, manifest.runtime);
-  await verifyFile(root, manifest.esbuild);
-  await verifyFreshFileRows(root, manifest.externalLibraries, "external");
-  const helperClosureSha256 = assertDaemonHelperInventory(manifest);
-  await verifySystemClosure(root, manifest);
-  await assertEnclosingAuthorityUnchanged({ root, authorityIdentity: expected.authorityIdentity });
-  return {
-    root,
-    manifest,
-    manifestSha256,
-    authorityIdentity: expected.authorityIdentity,
-    builtinProfiles: readBuiltinProfiles(expected.builtinProfiles),
-    closure: Object.freeze({
-      runtimeClosureSha256: manifestSha256,
-      helperClosureSha256,
-      qualificationSha256: expected.qualificationSha256,
-    }),
-  };
 }
 export async function verifyEnclosingProcess(root: string) {
-  if (
-    process.execArgv.length ||
-    Object.keys(process.env).some((key) =>
-      /^(NODE_OPTIONS|NODE_PATH|GLIBC_TUNABLES|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
+  const diagnostic = beginVerifierPhase("verify.total");
+  let active: VerifierPhase | null = beginVerifierPhase("verify.policy");
+  let outcome: "ok" | "error" = "error";
+  try {
+    if (
+      process.execArgv.length ||
+      Object.keys(process.env).some((key) =>
+        /^(NODE_OPTIONS|NODE_PATH|GLIBC_TUNABLES|LD_.+|DYLD_.+|ELECTRON_.+)$/.test(key),
+      )
     )
-  )
-    return unsupported();
-  if (
-    process.env.ESBUILD_BINARY_PATH &&
-    process.env.ESBUILD_BINARY_PATH !== path.join(root, "runtime/esbuild")
-  )
-    return unsupported();
-  const managedPolicy = await readFixedManagedPluginPolicy();
-  if (process.env.PASEO_MANAGED_PLUGIN_POLICY !== managedPolicy.path) return unsupported();
-  const distribution = await verifyEnclosingDistribution(root);
-  const observed = await observeLinuxProcess(process.pid);
-  if (observed.executable !== path.join(root, "runtime/node")) return unsupported();
-  const systemObservation = await verifySystemMappings(root, distribution.manifest, process.pid);
-  await assertEnclosingAuthorityUnchanged(distribution);
-  return { ...distribution, observed, systemObservation };
+      return unsupported();
+    if (
+      process.env.ESBUILD_BINARY_PATH &&
+      process.env.ESBUILD_BINARY_PATH !== path.join(root, "runtime/esbuild")
+    )
+      return unsupported();
+    const managedPolicy = await readFixedManagedPluginPolicy();
+    if (process.env.PASEO_MANAGED_PLUGIN_POLICY !== managedPolicy.path) return unsupported();
+    endVerifierPhase(active, "ok");
+    active = null;
+    const distribution = await verifyEnclosingDistribution(root);
+    active = beginVerifierPhase("verify.process");
+    const observed = await observeLinuxProcess(process.pid);
+    if (observed.executable !== path.join(root, "runtime/node")) return unsupported();
+    endVerifierPhase(active, "ok");
+    active = beginVerifierPhase("verify.maps");
+    const systemObservation = await verifySystemMappings(root, distribution.manifest, process.pid);
+    endVerifierPhase(active, "ok");
+    active = null;
+    await assertEnclosingAuthorityUnchanged(distribution);
+    outcome = "ok";
+    return { ...distribution, observed, systemObservation };
+  } finally {
+    if (active) endVerifierPhase(active, "error");
+    endVerifierPhase(diagnostic, outcome);
+  }
 }

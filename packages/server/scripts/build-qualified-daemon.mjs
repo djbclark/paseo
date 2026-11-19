@@ -64,6 +64,21 @@ export const qualifiedOptionalNativePlugin = {
     }));
   },
 };
+const phaseSourceDirectory = path.join(packageRoot, "src/server/execution");
+export const phaseSingletonPlugin = {
+  name: "qualified-fixed-startup-phase-singleton",
+  setup(builder) {
+    builder.onResolve({ filter: /startup-phase\.js$/ }, (args) => {
+      if (
+        path.resolve(args.resolveDir, args.path) !==
+          path.join(phaseSourceDirectory, "startup-phase.js") ||
+        args.kind !== "import-statement"
+      )
+        throw new Error("Unexpected startup diagnostic singleton source");
+      return { path: "./startup-phase.mjs", external: true };
+    });
+  },
+};
 export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   if (
     !distributionBuildId ||
@@ -75,6 +90,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
   const cli = await retainQualifiedCliMetadata(repositoryRoot, outDir);
   const allInputs = {};
   const entries = [
+    ["startup-phase", "startup-phase.mjs", {}],
     ["daemon-entry", "daemon-entry.mjs", {}],
     ["daemon-launcher", "daemon-launcher.mjs", {}],
     ["cli-entry", "cli-entry.mjs", {}],
@@ -113,7 +129,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         __QUALIFIED_DISTRIBUTION_ID__: JSON.stringify(distributionBuildId),
         ...define,
       },
-      plugins: [qualifiedOptionalNativePlugin, cli.plugin],
+      plugins: [qualifiedOptionalNativePlugin, cli.plugin, phaseSingletonPlugin],
       logLevel: "warning",
     });
     for (const emitted of Object.values(result.metafile.outputs))
@@ -121,6 +137,7 @@ export async function buildQualifiedDaemon({ outDir, distributionBuildId }) {
         if (
           imported.external &&
           !isBuiltin(imported.path) &&
+          imported.path !== "./startup-phase.mjs" &&
           !externals.some((name) => imported.path === name || imported.path.startsWith(`${name}/`))
         )
           throw new Error(`Unknown qualified daemon external: ${imported.path}`);

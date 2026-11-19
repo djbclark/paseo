@@ -60,7 +60,7 @@ jobs:
       - name: Helper inventory, bridge, CLI metadata and owner fixture source checks (no daemon launch)
         env:
           QUALIFIED_DAEMON_ROOT: ${{ runner.temp }}/qualified-daemon
-        run: node --test --test-name-pattern='runtime helper inventory|retained OpenCode bridge|retained CLI metadata|owner input fixture' packages/server/scripts/qualified-daemon.test.mjs
+        run: node --test --test-name-pattern='runtime helper inventory|retained OpenCode bridge|retained CLI metadata|owner input fixture|startup phase' packages/server/scripts/qualified-daemon.test.mjs
       - name: Actual finite Git gate and control-loss source checks (no profile grant)
         if: always() && steps.build_workspace.outcome == 'success'
         run: node --test packages/server/scripts/qualified-git.test.mjs

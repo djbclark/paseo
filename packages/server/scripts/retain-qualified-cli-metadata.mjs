@@ -117,7 +117,7 @@ export async function retainQualifiedCliMetadata(repo, root) {
     plugin: {
       name: "retained-original-cli-metadata",
       setup(builder) {
-        builder.onLoad({ filter: /[\/]packages[\/]cli[\/]src[\/]version\.ts$/ }, (args) => {
+        builder.onLoad({ filter: /[/]packages[/]cli[/]src[/]version\.ts$/ }, (args) => {
           if (args.path !== exactSource) throw new Error("Unexpected CLI version source");
           return {
             contents: prepared.adapted.toString("utf8"),

@@ -137,7 +137,7 @@
     "js-yaml": "^4.1.1",
     "knip": "^5.82.1",
     "lefthook": "^2.1.6",
-    "oxfmt": "0.46.0",
+    "oxfmt": "0.79.0",
     "oxlint": "1.61.0",
     "oxlint-tsgolint": "^0.22.1",
     "patch-package": "^8.0.1",

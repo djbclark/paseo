@@ -75,6 +75,10 @@ function withFdroidAutolinking(config) {
           ...expo,
           autolinking: {
             ...autolinking,
+            // The overlay project root is android/fdroid-autolinking, so Expo's default
+            // ./modules would be empty and the local native modules (scroll, display
+            // metrics, ...) would not be built while their config plugins still call them.
+            nativeModulesDir: path.join(modConfig.modRequest.projectRoot, "modules"),
             android: {
               ...android,
               buildFromSource: [".*"],

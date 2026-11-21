@@ -48,6 +48,10 @@ import {
 } from "@/components/desktop-sidebar-layout";
 import { useTopBand, useWindowLayout, resolveDesktopDivisionLayout } from "@/window-layout";
 import {
+  resolveMobileSidebarPersistedWidth,
+  resolveMobileSidebarWidth,
+} from "@/components/mobile-sidebar-layout";
+import {
   SIDEBAR_RESIZE_ACTIVATION_OFFSET,
   SIDEBAR_RESIZE_FAIL_OFFSET,
 } from "@/components/sidebar-resize-handle-layout";
@@ -56,6 +60,9 @@ import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-pref
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
 import { SidebarToastRegion } from "@/components/sidebar/sidebar-toast-region";
 import { SidebarNavRows, useVisibleSidebarNavItems } from "@/components/sidebar/sidebar-nav-rows";
+import { isNative as platformIsNative } from "@/constants/platform";
+import { useAppSettings } from "@/hooks/use-settings";
+import { ResizableSidebarNav } from "@/components/sidebar/resizable-sidebar-nav";
 import { SidebarFooterIconHighlight } from "@/components/sidebar/sidebar-footer-icon-highlight";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { SidebarFooterOverflowMenu } from "@/components/sidebar/sidebar-footer-overflow-menu";
@@ -75,7 +82,6 @@ import { SidebarSectionHeader } from "@/components/sidebar/sidebar-section-heade
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HEADER_INNER_HEIGHT, useIsCompactFormFactor } from "@/constants/layout";
-import { isNative as platformIsNative } from "@/constants/platform";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useImportSession } from "@/hooks/use-import-session";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
@@ -564,6 +570,41 @@ function SidebarFooterRows({ onBeforeNavigate }: { onBeforeNavigate?: () => void
   );
 }
 
+interface MobileSidebarNavProps {
+  closeGestureRef: RefObject<GestureType | undefined>;
+  onBeforeNavigate: () => void;
+  firstRowTrailing: ReactNode;
+}
+
+/** The user picks the menu layout in Settings > Sidebar: a capped scroll, or a drag-to-size row count. */
+function MobileSidebarNav({
+  closeGestureRef,
+  onBeforeNavigate,
+  firstRowTrailing,
+}: MobileSidebarNavProps) {
+  const {
+    settings: { sidebarNavLayout },
+  } = useAppSettings();
+  if (sidebarNavLayout === "resizable") {
+    return (
+      <ResizableSidebarNav
+        style={styles.mobileNavRowsGroup}
+        onBeforeNavigate={onBeforeNavigate}
+        firstRowTrailing={firstRowTrailing}
+      />
+    );
+  }
+  return (
+    <SidebarNavScroll closeGestureRef={closeGestureRef}>
+      <SidebarNavRows
+        style={styles.mobileNavRowsGroup}
+        onBeforeNavigate={onBeforeNavigate}
+        firstRowTrailing={firstRowTrailing}
+      />
+    </SidebarNavScroll>
+  );
+}
+
 function MobileSidebar({
   active,
   theme,
@@ -595,7 +636,6 @@ function MobileSidebar({
   const insets = useSafeAreaInsets();
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const { gesture: closeGesture, gestureRef: closeGestureRef } = useCloseAgentListGesture();
-
   const handleWorkspacePress = useCallback(() => {
     closeSidebar();
   }, [closeSidebar]);
@@ -613,21 +653,89 @@ function MobileSidebar({
     [labels.closeSidebar, closeSidebar, insets.right],
   );
 
-  const mobileSidebarInsetStyle = useMemo(
-    () => ({
-      paddingTop: insetsTop,
-      paddingBottom: insetsBottom,
-      backgroundColor: theme.colors.surfaceSidebar,
-    }),
-    [insetsTop, insetsBottom, theme.colors.surfaceSidebar],
+  const mobileSidebarWidth = usePanelStore((state) => state.mobileSidebarWidth);
+  const setMobileSidebarWidth = usePanelStore((state) => state.setMobileSidebarWidth);
+  const { width: windowWidth } = useWindowDimensions();
+  const visibleSidebarWidth = resolveMobileSidebarWidth({
+    requestedWidth: mobileSidebarWidth,
+    windowWidth,
+  });
+
+  const startWidthRef = useRef(visibleSidebarWidth);
+  const resizeWidth = useSharedValue(visibleSidebarWidth);
+  const [resizePressed, setResizePressed] = useState(false);
+  const showResizeGrip = useCallback(() => setResizePressed(true), []);
+  const hideResizeGrip = useCallback(() => setResizePressed(false), []);
+  const commitWidth = useCallback(
+    (width: number) => {
+      setMobileSidebarWidth(resolveMobileSidebarPersistedWidth({ width, windowWidth }));
+    },
+    [setMobileSidebarWidth, windowWidth],
   );
 
-  const navRows = (
-    <SidebarNavRows
-      style={styles.mobileNavRowsGroup}
-      onBeforeNavigate={closeSidebar}
-      firstRowTrailing={closeButton}
-    />
+  useEffect(() => {
+    resizeWidth.value = visibleSidebarWidth;
+  }, [resizeWidth, visibleSidebarWidth]);
+
+  const resizeGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        // The close swipe is also a leftward pan; once the grip is touched, resizing owns it.
+        .blocksExternalGesture(closeGestureRef)
+        .onBegin(() => {
+          scheduleOnRN(showResizeGrip);
+        })
+        .activeOffsetX([-SIDEBAR_RESIZE_ACTIVATION_OFFSET, SIDEBAR_RESIZE_ACTIVATION_OFFSET])
+        .failOffsetY([-SIDEBAR_RESIZE_FAIL_OFFSET, SIDEBAR_RESIZE_FAIL_OFFSET])
+        .onStart((event) => {
+          startWidthRef.current = visibleSidebarWidth - event.translationX;
+          resizeWidth.value = visibleSidebarWidth;
+        })
+        .onUpdate((event) => {
+          resizeWidth.value = resolveMobileSidebarWidth({
+            requestedWidth: startWidthRef.current + event.translationX,
+            windowWidth,
+          });
+        })
+        .onEnd(() => {
+          const width = resizeWidth.value;
+          // A near-full release stores null. When that null is already stored, nothing else
+          // moves the shared width off the size the finger let go of.
+          const persisted = resolveMobileSidebarPersistedWidth({ width, windowWidth });
+          resizeWidth.value = resolveMobileSidebarWidth({
+            requestedWidth: persisted,
+            windowWidth,
+          });
+          scheduleOnRN(commitWidth, width);
+        })
+        .onFinalize(() => {
+          scheduleOnRN(hideResizeGrip);
+        }),
+    [
+      closeGestureRef,
+      commitWidth,
+      hideResizeGrip,
+      resizeWidth,
+      showResizeGrip,
+      visibleSidebarWidth,
+      windowWidth,
+    ],
+  );
+
+  const resizeAnimatedStyle = useAnimatedStyle(() => ({
+    width: resizeWidth.value,
+  }));
+
+  const mobileSidebarInsetStyle = useMemo(
+    () => [
+      {
+        paddingTop: insetsTop,
+        paddingBottom: insetsBottom,
+        backgroundColor: theme.colors.surfaceSidebar,
+      },
+      resizeAnimatedStyle,
+    ],
+    [insetsTop, insetsBottom, theme.colors.surfaceSidebar, resizeAnimatedStyle],
   );
 
   return (
@@ -638,7 +746,11 @@ function MobileSidebar({
     >
       <View style={styles.sidebarContent} pointerEvents="auto">
         <WindowChromeSafeArea placement="below" />
-        <SidebarNavScroll closeGestureRef={closeGestureRef}>{navRows}</SidebarNavScroll>
+        <MobileSidebarNav
+          closeGestureRef={closeGestureRef}
+          onBeforeNavigate={closeSidebar}
+          firstRowTrailing={closeButton}
+        />
 
         <SidebarViewSlot dismiss={handleWorkspacePress}>
           <SidebarToastRegion active={active}>
@@ -677,6 +789,13 @@ function MobileSidebar({
           handleAddHost={handleAddHost}
           handleOpenHostSettings={handleOpenHostSettings}
           onBeforeNavigate={closeSidebar}
+        />
+
+        <SidebarResizeHandle
+          edge="right"
+          gesture={resizeGesture}
+          pressed={resizePressed}
+          testID="mobile-sidebar-resize-handle"
         />
       </View>
     </MobilePanelOverlay>
@@ -752,6 +871,9 @@ function DesktopSidebar({
   overlay,
 }: DesktopSidebarProps) {
   const ownsTopLeft = useOwnsWindowChromeCorner("top-left");
+  const {
+    settings: { sidebarNavLayout },
+  } = useAppSettings();
   const hasActiveHostFilter = useSidebarViewStore((state) => state.hostFilters.length > 0);
   const setSidebarWidth = usePanelStore((state) => state.setSidebarWidth);
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -889,7 +1011,13 @@ function DesktopSidebar({
           {/* The drag overlay stays above this viewport: Electron does not clip
               app-region rects to scroll viewports, so a scrolled-out row would
               still claim its no-drag rect. */}
-          {hasNavRows ? (
+          {hasNavRows && sidebarNavLayout === "resizable" ? (
+            <ResizableSidebarNav
+              style={styles.sidebarHeaderGroup}
+              onBeforeNavigate={closeSidebar}
+            />
+          ) : null}
+          {hasNavRows && sidebarNavLayout !== "resizable" ? (
             <SidebarNavScroll closeGestureRef={closeGestureRef} windowContent>
               <SidebarNavRows style={styles.sidebarHeaderGroup} onBeforeNavigate={closeSidebar} />
             </SidebarNavScroll>

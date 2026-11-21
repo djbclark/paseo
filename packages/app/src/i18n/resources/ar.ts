@@ -1286,6 +1286,11 @@ export const ar: TranslationResources = {
       closeSidebar: "إغلاق الشريط الجانبي",
       moreActions: "المزيد من الإجراءات",
     },
+    nav: {
+      more: "المزيد",
+      moreItems: "المزيد من عناصر القائمة",
+      resize: "تغيير حجم القائمة",
+    },
     footer: {
       usage: "الاستخدام",
     },
@@ -2687,6 +2692,12 @@ export const ar: TranslationResources = {
         },
         moveUp: "نقل لأعلى",
         moveDown: "نقل لأسفل",
+        navLayout: {
+          title: "تخطيط القائمة",
+          description: "كيف تتسع قائمة الشريط الجانبي على الشاشات القصيرة",
+          scroll: "تمرير",
+          resizable: "قابل لتغيير الحجم",
+        },
       },
       fonts: {
         title: "الخطوط",

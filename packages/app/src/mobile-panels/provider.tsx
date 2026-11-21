@@ -27,6 +27,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { scheduleOnRN, scheduleOnUI } from "react-native-worklets";
 import { resolveDesktopSidebarWidth } from "@/components/desktop-sidebar-layout";
+import { resolveMobileSidebarWidth } from "@/components/mobile-sidebar-layout";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import {
@@ -81,14 +82,15 @@ function createSettledPanelStore(panel: MobilePanelView) {
 const SettledPanelContext = createContext(createSettledPanelStore("agent"));
 
 /**
- * The left sidebar's width: the full window for the compact drawer, the saved sidebar width
- * clamped to the safe viewport on wide layouts. The wide dock, its overlay, and the gestures that
- * drag it all read this one value.
+ * The left sidebar's width. Compact layouts use the saved mobile width, which fills the window
+ * until the user narrows it. Wide layouts use the saved sidebar width clamped to the safe
+ * viewport. The dock, its overlay, and the gestures that drag it all read this one value.
  */
 function useResolvedLeftPanelWidth(windowWidth: number): number {
   const isCompact = useIsCompactFormFactor();
   const insets = useSafeAreaInsets();
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
+  const mobileSidebarWidth = usePanelStore((state) => state.mobileSidebarWidth);
   const { height: windowHeight } = useWindowDimensions();
   const divisionLayout = resolveDesktopDivisionLayout({
     geometry: useWindowLayout(),
@@ -97,7 +99,12 @@ function useResolvedLeftPanelWidth(windowWidth: number): number {
     leftInset: insets.left,
     rightInset: insets.right,
   });
-  if (isCompact) return windowWidth;
+  if (isCompact) {
+    return resolveMobileSidebarWidth({
+      requestedWidth: mobileSidebarWidth,
+      windowWidth,
+    });
+  }
   return (
     divisionLayout?.sidebarWidth ??
     resolveDesktopSidebarWidth({

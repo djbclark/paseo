@@ -8,7 +8,7 @@ const withFdroidAutolinking = require("./plugins/with-fdroid-autolinking");
 const withPasteInput = require("./plugins/with-paste-input");
 const withAndroidScroll = require("./modules/paseo-scroll/app.plugin");
 const withAndroidDisplayMetrics = require("./modules/paseo-display-metrics/app.plugin");
-const { getNativeReleaseVersion } = require("./native-release-version");
+const { getForkAndroidVersionCode, getNativeReleaseVersion } = require("./native-release-version");
 const appVariant = process.env.APP_VARIANT ?? "production";
 const isFdroidBuild = process.env.PASEO_FDROID_BUILD === "1";
 const isWatchdogBuild = process.env.PASEO_WATCHDOG_BUILD === "1";
@@ -93,10 +93,28 @@ const variants = {
       fallbackRelativePath: "./.secrets/GoogleService-Info.debug.plist",
     }),
   },
+  // Sideloaded fork build (Android only). Push is bound to upstream's Expo and
+  // Firebase projects, which only know sh.paseo, so the fork has no Firebase
+  // files and must build with the F-Droid profile (no push, no QR camera).
+  fork: {
+    name: "Paseo Fork",
+    packageId: "sh.paseo.fork",
+    googleServicesFile: undefined,
+    googleServiceInfoPlist: undefined,
+  },
 };
 
 const variant = variants[appVariant] ?? variants.production;
+if (appVariant === "fork" && !isFdroidBuild) {
+  throw new Error(
+    "APP_VARIANT=fork has no Firebase config and only starts without push in the F-Droid profile: set PASEO_FDROID_BUILD=1",
+  );
+}
 const nativeReleaseVersion = getNativeReleaseVersion(pkg.version);
+const androidVersionCode =
+  appVariant === "fork"
+    ? getForkAndroidVersionCode(pkg.version, Number(process.env.PASEO_FORK_BUILD))
+    : nativeReleaseVersion.androidVersionCode;
 
 export default {
   expo: {
@@ -132,7 +150,7 @@ export default {
       usesCleartextTraffic: true,
       permissions: buildProfile.androidPermissions,
       package: variant.packageId,
-      versionCode: nativeReleaseVersion.androidVersionCode,
+      versionCode: androidVersionCode,
       ...(variant.googleServicesFile ? { googleServicesFile: variant.googleServicesFile } : {}),
     },
     web: {

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -58,6 +59,57 @@ describe("Android app config", () => {
     },
     30_000,
   );
+});
+
+// Expo caches the evaluated config module per process, so a variant needs its own process.
+function resolveConfigInChildProcess(env: Record<string, string>) {
+  const script = `
+    const { createRequire } = require("node:module");
+    const fromExpo = createRequire(require.resolve("expo/package.json"));
+    const fromCli = createRequire(fromExpo.resolve("@expo/cli/package.json"));
+    const { getPrebuildConfigAsync } = fromCli("@expo/prebuild-config");
+    getPrebuildConfigAsync(process.cwd(), { platforms: ["android"] }).then(
+      ({ exp }) => console.log("RESULT:" + JSON.stringify({ name: exp.name, android: exp.android })),
+      (error) => console.log("RESULT:" + JSON.stringify({ error: String(error.message) })),
+    );
+  `;
+  const run = spawnSync(process.execPath, ["-e", script], {
+    cwd: __dirname,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+  const line = run.stdout.split("\n").find((entry) => entry.startsWith("RESULT:"));
+  if (!line) {
+    throw new Error(`config child process printed no result: ${run.stderr}`);
+  }
+  return JSON.parse(line.slice("RESULT:".length));
+}
+
+describe("fork variant", () => {
+  it("is its own Android app with a fork version code and no Firebase files", () => {
+    const { getForkAndroidVersionCode } = require("./native-release-version");
+    const pkg = require("./package.json");
+    const config = resolveConfigInChildProcess({
+      APP_VARIANT: "fork",
+      PASEO_FDROID_BUILD: "1",
+      PASEO_FORK_BUILD: "3",
+    });
+
+    expect(config.name).toBe("Paseo Fork");
+    expect(config.android.package).toBe("sh.paseo.fork");
+    expect(config.android.versionCode).toBe(getForkAndroidVersionCode(pkg.version, 3));
+    expect(config.android.googleServicesFile).toBeUndefined();
+  }, 30_000);
+
+  it("refuses to build outside the F-Droid profile, the only proven no-push start", () => {
+    const config = resolveConfigInChildProcess({
+      APP_VARIANT: "fork",
+      PASEO_FDROID_BUILD: "0",
+      PASEO_FORK_BUILD: "1",
+    });
+
+    expect(config.error).toContain("PASEO_FDROID_BUILD=1");
+  }, 30_000);
 });
 
 it("follows system rotation on Android", async () => {

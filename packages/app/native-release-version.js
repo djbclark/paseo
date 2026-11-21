@@ -48,6 +48,27 @@ function getNativeReleaseVersion(version) {
   };
 }
 
+// The fork variant republishes the same upstream version with our patches, and
+// getNativeReleaseVersion ignores the beta suffix. Equal-versionCode updates are
+// not reliably installed, so each fork build gets its own code under the base.
+const FORK_BUILD_MAX = 99;
+const ANDROID_VERSION_CODE_CAP = 2_100_000_000;
+
+function getForkAndroidVersionCode(version, forkBuild) {
+  if (!Number.isInteger(forkBuild) || forkBuild < 1 || forkBuild > FORK_BUILD_MAX) {
+    throw new Error(`Fork build must be an integer between 1 and ${FORK_BUILD_MAX}: ${forkBuild}`);
+  }
+
+  const { androidVersionCode } = getNativeReleaseVersion(version);
+  const versionCode = androidVersionCode * 100 + forkBuild;
+  // The fork profile builds one ABI, so the F-Droid plugin multiplies by 10 and
+  // adds an ABI suffix (1-4) on top of this value. Keep room for that.
+  if (versionCode * 10 + 9 > ANDROID_VERSION_CODE_CAP) {
+    throw new Error(`Derived fork Android versionCode is out of range: ${versionCode}`);
+  }
+  return versionCode;
+}
+
 function getFdroidVersionCodes(version) {
   const { androidVersionCode } = getNativeReleaseVersion(version);
   return Object.entries(FDROID_ABI_VERSION_CODE_SUFFIXES).map(([abi, suffix]) => ({
@@ -58,6 +79,8 @@ function getFdroidVersionCodes(version) {
 
 module.exports = {
   FDROID_ABI_VERSION_CODE_SUFFIXES,
+  FORK_BUILD_MAX,
   getFdroidVersionCodes,
+  getForkAndroidVersionCode,
   getNativeReleaseVersion,
 };

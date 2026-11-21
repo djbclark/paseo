@@ -4,14 +4,24 @@
 
 Controlled by `APP_VARIANT` in `packages/app/app.config.js` (vanilla Expo, no custom Gradle plugin):
 
-| Variant       | App name    | Package ID       |
-| ------------- | ----------- | ---------------- |
-| `production`  | Paseo       | `sh.paseo`       |
-| `development` | Paseo Debug | `sh.paseo.debug` |
+| Variant       | App name    | Package ID       | Notes                                                           |
+| ------------- | ----------- | ---------------- | --------------------------------------------------------------- |
+| `production`  | Paseo       | `sh.paseo`       |                                                                 |
+| `development` | Paseo Debug | `sh.paseo.debug` |                                                                 |
+| `fork`        | Paseo Fork  | `sh.paseo.fork`  | Android sideload only; see [Fork builds](#fork-builds-sideload) |
 
-EAS profiles: `development`, `production`, and `production-apk` in `packages/app/eas.json`.
+EAS profiles: `development`, `production`, and `production-apk` in `packages/app/eas.json`. `fork` has no EAS profile.
 
 `development` uses Android `debug`.
+
+### Fork builds (sideload)
+
+The `fork` variant is an installable Android app that sits next to the Play app and that Play can never update. Its package ID is permanent: changing it makes every installed copy a different app.
+
+- **No push.** Push is bound to upstream's Expo and Firebase projects, which only know `sh.paseo`, and the variant carries no `google-services.json`. Starting a build that has `expo-notifications` but no Firebase app fails when the app asks for a push token, not at launch, and nothing proves the app handles it. So `app.config.js` refuses `APP_VARIANT=fork` unless `PASEO_FDROID_BUILD=1`, the profile that removes camera and notifications natively and stubs them in JavaScript. QR scanning goes with them; pasted-link pairing works.
+- **Own version codes.** Set `PASEO_FORK_BUILD=<1..99>`. See [Version codes](#version-codes).
+- **iOS.** The variant sets an iOS bundle ID but nothing builds or supports it.
+- **CI.** `.github/workflows/android-fork-release.yml` builds one `arm64-v8a` APK on Linux and re-signs it with `apksigner`. It never uses upstream's EAS credentials. Obtainium requires the same signing key on every release, so the key is permanent too.
 
 ## Version codes
 
@@ -26,6 +36,8 @@ major * 1_000_000 + minor * 1_000 + patch
 Prerelease metadata is ignored, so `0.1.102-beta.1` and `0.1.102` both produce `1102`. The same value is used as the iOS `buildNumber` because `packages/app/eas.json` uses EAS's local app version source. Do not re-enable EAS remote version counters or Android `autoIncrement`; F-Droid and other source-based builders need the native build number to be visible in the repo.
 
 The formula reserves three digits each for minor and patch. If either reaches `1000`, change the formula before cutting that release.
+
+Fork builds republish one upstream version many times, and the beta suffix is ignored, so two different fork builds would share a code. The `fork` variant uses `base * 100 + PASEO_FORK_BUILD` (build `1` to `99`, increasing per upstream base), for example `1_700_001` for `0.17.0`. The F-Droid single-ABI step then multiplies by `10` and adds the ABI suffix, so the arm64 APK carries `1_700_001 * 10 + 2 = 17_000_012`. `getForkAndroidVersionCode` rejects a code whose multiplied value passes the 2.1 billion Android cap.
 
 ## Prerequisites (local dev)
 

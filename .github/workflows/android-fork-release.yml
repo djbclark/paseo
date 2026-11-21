@@ -1,0 +1,213 @@
+name: Android Fork Release
+
+# Sideload build of the `fork` app variant (package sh.paseo.fork) for Obtainium.
+# See docs/android.md "Fork builds (sideload)". Never edit android-apk-release.yml
+# for this: that workflow is upstream's EAS release and is left untouched.
+#
+# PROOF MODE (current): manual dispatch only. The APK is re-signed with a
+# throwaway key generated inside the job and discarded with it, then uploaded as
+# a short-lived ARTIFACT. Nothing creates a tag or a GitHub release, and the
+# artifact must never be installed on a device.
+#
+# There is deliberately no tag trigger: a plain `v*` tag on the fork fires
+# upstream's desktop, docker, deploy and release-notes workflows. A release
+# trigger is added only with the human-approved release job at the bottom.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fork_build:
+        description: "Fork build number for this upstream version (1-99)"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_VARIANT: fork
+  # The only documented start without push: removes camera and notifications.
+  PASEO_FDROID_BUILD: "1"
+  PASEO_FORK_BUILD: ${{ inputs.fork_build }}
+  ABI: arm64-v8a
+
+jobs:
+  build-proof:
+    name: Build proof APK (arm64-v8a, ephemeral key)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Resolve version and expected values
+        id: meta
+        run: |
+          set -euo pipefail
+          node >> "$GITHUB_OUTPUT" <<'JS'
+          const { getForkAndroidVersionCode, getNativeReleaseVersion } = require("./packages/app/native-release-version");
+          const pkg = require("./packages/app/package.json");
+          const build = Number(process.env.PASEO_FORK_BUILD);
+          const forkCode = getForkAndroidVersionCode(pkg.version, build);
+          // fdroid single-ABI step: code * 10 + suffix; arm64-v8a is 2.
+          const out = {
+            package_version: pkg.version,
+            version_name: getNativeReleaseVersion(pkg.version).appVersion,
+            expected_version_code: forkCode * 10 + 2,
+            asset: `paseo-fork-v${pkg.version}-r${build}-arm64-v8a.apk`,
+          };
+          for (const [k, v] of Object.entries(out)) console.log(`${k}=${v}`);
+          JS
+          cat "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Accept Android SDK licenses
+        run: |
+          # `yes` exits 141 once sdkmanager closes stdin; that is not a failure.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Build workspace dependencies
+        run: npm run build:app-deps
+
+      - name: Expo prebuild
+        working-directory: packages/app
+        run: npx expo prebuild --platform android --clean --non-interactive --no-install
+
+      - name: Gradle assembleRelease (arm64-v8a)
+        working-directory: packages/app/android
+        run: |
+          ./gradlew assembleRelease \
+            -PreactNativeArchitectures="$ABI" \
+            -x lint -x lintVitalAnalyzeRelease -x lintVitalRelease \
+            -x generateReleaseLintModel -x generateReleaseLintVitalModel \
+            --no-daemon --max-workers=2 -Dorg.gradle.parallel=false
+
+      - name: Re-sign with an ephemeral throwaway key
+        id: sign
+        env:
+          ASSET: ${{ steps.meta.outputs.asset }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -1)"
+          echo "$BT" >> "$GITHUB_PATH"
+          mkdir -p out
+          # Random password, masked before it exists anywhere else, kept in the
+          # environment only (never argv). The key lives in RUNNER_TEMP and is
+          # removed by the cleanup step; it is not a release key.
+          EPHEMERAL_PASS="$(openssl rand -hex 24)"
+          echo "::add-mask::$EPHEMERAL_PASS"
+          export EPHEMERAL_PASS
+          KS="$RUNNER_TEMP/ephemeral-proof.jks"
+          keytool -genkeypair -keystore "$KS" -alias proof -keyalg RSA -keysize 3072 \
+            -validity 3 -dname "CN=paseo-fork-proof-ephemeral" \
+            -storepass:env EPHEMERAL_PASS -keypass:env EPHEMERAL_PASS
+          UNSIGNED="packages/app/android/app/build/outputs/apk/release/app-release.apk"
+          ls -l "$UNSIGNED"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias proof \
+            --ks-pass env:EPHEMERAL_PASS --key-pass env:EPHEMERAL_PASS \
+            --out "out/$ASSET" "$UNSIGNED"
+          echo "ks_path=$KS" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the proof APK
+        env:
+          ASSET: ${{ steps.meta.outputs.asset }}
+          EXPECTED_CODE: ${{ steps.meta.outputs.expected_version_code }}
+          EXPECTED_NAME: ${{ steps.meta.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          APK="out/$ASSET"
+          {
+            echo "== aapt2 dump badging =="
+            aapt2 dump badging "$APK" | grep -E "^(package|application-label|sdkVersion|targetSdkVersion|native-code)" || true
+            echo
+            echo "== uses-permission =="
+            aapt2 dump permissions "$APK"
+            echo
+            echo "== apksigner verify --print-certs =="
+            apksigner verify --verbose --print-certs "$APK"
+            echo
+            echo "== zipalign check =="
+            zipalign -c -v 4 "$APK" | tail -1
+            echo
+            echo "== native libraries by ABI =="
+            unzip -l "$APK" | grep -oE "lib/[^/]+/" | sort | uniq -c
+            echo
+            echo "== SHA-256 =="
+            sha256sum "$APK"
+          } 2>&1 | tee out/proof.txt
+
+          badging="$(aapt2 dump badging "$APK")"
+          grep -q "^package: name='sh.paseo.fork' " <<<"$badging" || { echo "package id is not sh.paseo.fork"; exit 1; }
+          if grep -q "^package: name='sh.paseo' " <<<"$badging"; then echo "package id is upstream's"; exit 1; fi
+          grep -q "application-label:'Paseo Fork'" <<<"$badging" || { echo "label is not Paseo Fork"; exit 1; }
+          grep -q "versionCode='$EXPECTED_CODE' versionName='$EXPECTED_NAME'" <<<"$badging" || {
+            echo "versionCode/versionName differ from $EXPECTED_CODE / $EXPECTED_NAME"; exit 1; }
+          # Exactly one signer, and it must be the throwaway one, not Expo's debug key.
+          certs="$(apksigner verify --print-certs "$APK")"
+          grep -q "Number of signers: 1" <<<"$certs" || { echo "unexpected signer count"; exit 1; }
+          grep -q "CN=paseo-fork-proof-ephemeral" <<<"$certs" || { echo "not signed by the ephemeral key"; exit 1; }
+          sha256sum "$APK" > out/SHA256SUMS
+          {
+            echo "### Proof APK (ephemeral key, do not install)"
+            echo '```'
+            cat out/proof.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Discard the ephemeral key
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/ephemeral-proof.jks"
+          ls "$RUNNER_TEMP"/*.jks 2>/dev/null || echo "no keystore left"
+
+      - name: Upload proof artifact (3 days, not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: paseo-fork-proof-EPHEMERAL-KEY-DO-NOT-INSTALL
+          path: |
+            out/*.apk
+            out/proof.txt
+            out/SHA256SUMS
+          retention-days: 3
+          if-no-files-found: error
+
+# -----------------------------------------------------------------------------
+# NOT ACTIVE. Placeholder for the real release, a later step that needs
+# djbclark's explicit approval for each part below. Nothing here may be enabled
+# by an agent on its own.
+#
+# 1. Create the release keystore offline, escrow it, and record its certificate
+#    SHA-256. Never generate it in CI, never print it.
+# 2. In the release repository, create an Actions environment `android-release`
+#    with required reviewers (the manual approval gate) and a deployment
+#    restriction to the release tag pattern. Put the keystore secrets in that
+#    environment, never in repository-level secrets:
+#      ANDROID_KEYSTORE_B64        base64 of the .jks
+#      ANDROID_KEYSTORE_PASSWORD
+#      ANDROID_KEY_ALIAS
+#      ANDROID_KEY_PASSWORD
+#    and one variable ANDROID_KEYSTORE_CERT_SHA256 (public) that the job
+#    compares against `apksigner verify --print-certs` before it publishes.
+# 3. Add the release trigger: a tag pattern that none of upstream's workflows
+#    match, e.g. `fork-android-v*` (upstream workflows start with `v*`,
+#    `desktop-v*`, `android-v*`).
+# 4. Add a job after build-proof with `environment: android-release`,
+#    `permissions: contents: write`, that re-signs with the real key, checks the
+#    certificate digest, and runs `gh release create` with the single arm64 APK
+#    plus SHA256SUMS. Pin non-GitHub actions to a commit SHA.

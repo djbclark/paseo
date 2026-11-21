@@ -4,7 +4,10 @@ name: Android Fork Release
 # See docs/android.md "Fork builds (sideload)". Never edit android-apk-release.yml
 # for this: that workflow is upstream's EAS release and is left untouched.
 #
-# PROOF MODE (current): manual dispatch only. The APK is re-signed with a
+# PROOF MODE (current): manual dispatch, plus a push trigger pinned to the one
+# proof branch below (GitHub only dispatches workflows that exist on the default
+# branch, so a branch-only workflow needs a push to run). Remove the push
+# trigger once this file is on the default branch. The APK is re-signed with a
 # throwaway key generated inside the job and discarded with it, then uploaded as
 # a short-lived ARTIFACT. Nothing creates a tag or a GitHub release, and the
 # artifact must never be installed on a device.
@@ -14,6 +17,9 @@ name: Android Fork Release
 # trigger is added only with the human-approved release job at the bottom.
 
 on:
+  push:
+    branches: [local/android-fork-20261121]
+    paths: [.github/workflows/android-fork-release.yml]
   workflow_dispatch:
     inputs:
       fork_build:
@@ -33,7 +39,7 @@ env:
   APP_VARIANT: fork
   # The only documented start without push: removes camera and notifications.
   PASEO_FDROID_BUILD: "1"
-  PASEO_FORK_BUILD: ${{ inputs.fork_build }}
+  PASEO_FORK_BUILD: ${{ inputs.fork_build || '1' }}
   ABI: arm64-v8a
 
 jobs:

@@ -402,6 +402,8 @@ interface ActivePrompt {
   deferred: DeferredTurnState | null;
 }
 
+// LOCAL patch pending upstream PR getpaseo/paseo#10428 (remove with it): see waitForLoadReplay.
+const LOAD_REPLAY_MAX_WAIT_MS = 30_000;
 const DEFAULT_DEFERRED_SETTLE_DELAY_MS = 500;
 const DEFAULT_DEFERRED_QUIET_LIMIT_MS = 120_000;
 
@@ -1890,13 +1892,24 @@ class AcpRuntime {
     isConnectionClosed: () => boolean,
   ): Promise<void> {
     const start = performance.now();
+    // LOCAL patch pending upstream PR getpaseo/paseo#10428 (remove with it): upstream makes this
+    // wait unbounded, which stalls session open and `paseo daemon stop` while history streams on.
+    const maxWaitMs =
+      this.options.options.acpOptions?.loadReplayMaxWaitMs ?? LOAD_REPLAY_MAX_WAIT_MS;
+    const deadline = start + maxWaitMs;
     while (!this.closing && !this.processFailed && !isConnectionClosed()) {
+      if (performance.now() >= deadline) {
+        console.warn(
+          `ACP session/load history was still streaming after ${maxWaitMs}ms; publishing the session as ready`,
+        );
+        return;
+      }
       const lastHistoryAt = Math.max(start, this.lastLoadHistoryAt);
       const remaining = lastHistoryAt + quietPeriod - performance.now();
       // A stalled event loop reaches the quiet period with history still unread in the pipe.
       // setImmediate lets the loop read pending input once before the silence is trusted.
       await new Promise<void>((resolve) => {
-        if (remaining > 0) setTimeout(resolve, remaining);
+        if (remaining > 0) setTimeout(resolve, Math.min(remaining, deadline - performance.now()));
         else setImmediate(resolve);
       });
       await this.notificationLane;

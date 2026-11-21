@@ -57,6 +57,11 @@ export interface AcpOptions {
    */
   loadReplayQuietPeriodMs?: number;
   /**
+   * LOCAL patch pending upstream PR getpaseo/paseo#10428 (remove with it): the longest the
+   * `loadReplayQuietPeriodMs` wait may last when history never goes quiet. Defaults to 30_000ms.
+   */
+  loadReplayMaxWaitMs?: number;
+  /**
    * Keep a turn open after `end_turn` while qualifying tool calls are still running,
    * settling once those tools finish and the agent finishes its follow-up reply.
    */

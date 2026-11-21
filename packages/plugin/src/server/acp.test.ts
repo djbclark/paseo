@@ -8,7 +8,7 @@ import {
   type SessionUpdate,
 } from "@agentclientprotocol/sdk";
 import type { ProviderConnection, ProviderEvent, ProviderInput } from "./provider.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentTimelineItemPayloadSchema } from "@getpaseo/protocol/messages";
 import { runAcpProvider, type AcpStreamMessage } from "./acp.js";
 
@@ -393,6 +393,57 @@ describe("runAcpProvider", () => {
       expect(outcome).toBe("closed");
     } finally {
       clearInterval(stream);
+    }
+  });
+
+  // LOCAL patch pending upstream PR getpaseo/paseo#10428 (remove with it).
+  it("publishes the session as ready once history streams past the replay wait cap", async () => {
+    const sessionId = "connector-session";
+    let stream: ReturnType<typeof setInterval> | undefined;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { connector } = connectorHarness({
+      capabilities: { loadSession: true },
+      handleRequest(runtime, request) {
+        if (request.method !== "session/load") return false;
+        runtime.respond(request, { configOptions: [] });
+        stream = setInterval(() => {
+          if (runtime.readsCanceled) return;
+          runtime.notify("session/update", {
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "previous answer" },
+            },
+          });
+        }, 20);
+        return true;
+      },
+    });
+    const connection = await runAcpProvider({
+      id: "load",
+      label: "Load",
+      connector,
+      acpOptions: { loadReplayQuietPeriodMs: 100, loadReplayMaxWaitMs: 300 },
+    }).connect({ versions: [1], capabilities: ["prompt.message", "session.persistence"] });
+    const events: ProviderEvent[] = [];
+    connection.onEvent((event) => events.push(event));
+    try {
+      const opened = performance.now();
+      await connection.send({
+        ...openInput(),
+        history: "replay",
+        persistence: { version: 1, data: { sessionId } },
+      });
+      // History never goes quiet (20 ms updates, 100 ms quiet period), so only the cap ends the wait.
+      await waitForEvent(events, (event) => event.type === "session.ready");
+      expect(performance.now() - opened).toBeGreaterThanOrEqual(250);
+      expect(events.some((event) => event.type === "timeline.item")).toBe(true);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("still streaming after 300ms");
+    } finally {
+      clearInterval(stream);
+      warn.mockRestore();
+      await connection.close();
     }
   });
 
